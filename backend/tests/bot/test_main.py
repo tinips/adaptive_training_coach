@@ -24,7 +24,7 @@ def test_create_application_registers_handlers_and_injects_facade() -> None:
     application = create_application(settings, service=service)
 
     assert application.bot_data[BOT_SERVICE_KEY] is service
-    assert len(application.handlers[0]) == 9
+    assert len(application.handlers[0]) == 10
     assert application.error_handlers
     assert application.bot.defaults.parse_mode == ParseMode.HTML
 

@@ -17,6 +17,7 @@ from app.bot.handlers import (
     callback_handler,
     cancel_handler,
     delete_handler,
+    document_handler,
     global_error_handler,
     help_handler,
     profile_handler,
@@ -39,6 +40,7 @@ def register_handlers(
     application.add_handler(CommandHandler("cancel", cancel_handler))
     application.add_handler(CommandHandler("delete_me", delete_handler))
     application.add_handler(CallbackQueryHandler(callback_handler))
+    application.add_handler(MessageHandler(filters.Document.ALL, document_handler))
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler)
     )

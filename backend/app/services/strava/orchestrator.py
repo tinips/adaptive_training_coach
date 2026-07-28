@@ -46,6 +46,7 @@ from app.services.strava.oauth import (
     OAuthInitiation,
     StravaOAuthService,
 )
+from app.services.strava.protocols import InitialSyncNotifier
 from app.services.strava.sync import StravaSyncService, SyncOutcome
 from app.services.strava.tokens import StravaTokenManager
 from app.services.strava.webhook import (
@@ -101,12 +102,14 @@ class StravaCoordinator:
         settings: Settings,
         client: StravaClient | None = None,
         cipher: TokenCipher | None = None,
+        initial_sync_notifier: InitialSyncNotifier | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._settings = settings
         self._client = client
         self._cipher = cipher
+        self._initial_sync_notifier = initial_sync_notifier
         self._owns_client = client is None
         self._clock = clock or (lambda: datetime.now(UTC))
         self._recovery_tasks: set[asyncio.Task[tuple[int, int]]] = set()
@@ -215,7 +218,21 @@ class StravaCoordinator:
     async def initial_sync(self, *, user_id: UUID) -> SyncOutcome:
         """Run the post-callback historical import."""
 
-        return await self._run_sync(user_id=user_id, initial=True)
+        outcome = await self._run_sync(user_id=user_id, initial=True)
+        if (
+            outcome.status == SyncStatus.SUCCEEDED
+            and self._initial_sync_notifier is not None
+        ):
+            try:
+                await self._initial_sync_notifier.notify_initial_sync_succeeded(
+                    user_id=user_id
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Telegram initial-sync notification failed type=%s",
+                    type(exc).__name__,
+                )
+        return outcome
 
     async def manual_sync(self, *, user_id: UUID) -> SyncOutcome:
         """Run a cooldown-protected user-requested import."""
@@ -234,6 +251,17 @@ class StravaCoordinator:
     ) -> StravaRecoveryOutcome:
         """Reconcile abandoned sync jobs and replay a bounded webhook batch."""
 
+        if not self._settings.strava_enabled:
+            return StravaRecoveryOutcome(
+                stale_sync_jobs_failed=0,
+                lifecycles_reconciled=0,
+                webhook_events_scheduled=0,
+                webhook_events_recovered=0,
+                webhook_events_failed=0,
+                initial_syncs_scheduled=0,
+                initial_syncs_recovered=0,
+                initial_syncs_failed=0,
+            )
         if stale_after <= timedelta(0):
             raise ValueError("stale_after must be positive.")
         if webhook_stale_after <= timedelta(0):
@@ -453,6 +481,7 @@ class StravaCoordinator:
     ) -> dict[str, str]:
         """Verify the provider challenge with no database or network work."""
 
+        self._require_enabled()
         return StravaWebhookService.verify_challenge(
             mode=mode,
             supplied_verify_token=verify_token,
@@ -763,6 +792,7 @@ class StravaCoordinator:
         )
 
     def _components(self) -> tuple[StravaClient, TokenCipher]:
+        self._require_enabled()
         if self._cipher is None:
             encryption_key = self._settings.app_encryption_key
             if encryption_key is None:
@@ -792,6 +822,7 @@ class StravaCoordinator:
 
     @property
     def _webhook_verify_token(self) -> str:
+        self._require_enabled()
         token = self._settings.strava_webhook_verify_token
         if token is None or not token.get_secret_value():
             raise StravaConfigurationError()
@@ -799,6 +830,7 @@ class StravaCoordinator:
 
     @property
     def _webhook_subscription_id(self) -> int:
+        self._require_enabled()
         value = self._settings.strava_webhook_subscription_id
         if value is None:
             raise StravaConfigurationError()
@@ -812,3 +844,7 @@ class StravaCoordinator:
         if now.tzinfo is None or now.utcoffset() is None:
             raise ValueError("The Strava coordinator clock must be timezone-aware.")
         return now.astimezone(UTC)
+
+    def _require_enabled(self) -> None:
+        if not self._settings.strava_enabled:
+            raise StravaConfigurationError()

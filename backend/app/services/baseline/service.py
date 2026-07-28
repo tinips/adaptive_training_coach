@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Protocol
 from uuid import UUID
 
-from app.domain.enums import Discipline
+from app.domain.enums import BaselineSource, Discipline
 from app.schemas.baseline import BaselineActivity, BaselineCalculation
 from app.services.baseline.engine import BaselineEngine
 
@@ -78,6 +78,7 @@ class BaselineService:
         *,
         user_id: UUID,
         analysis_end: datetime | None = None,
+        source: BaselineSource = BaselineSource.STRAVA,
     ) -> BaselineCalculation:
         """Calculate from user-scoped activities and persist a new version."""
 
@@ -112,7 +113,7 @@ class BaselineService:
             analysis_start=start,
             analysis_end=end,
             generated_at=generated_at,
-        )
+        ).model_copy(update={"source": source})
         await self._baselines.create(
             user_id=user_id,
             generated_at=calculation.generated_at,

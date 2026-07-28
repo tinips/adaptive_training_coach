@@ -86,11 +86,11 @@ def build_messages(
         "Preserve names and personal descriptions unless normalization is needed.",
     )
     system_text = (
-        "Interpret exactly one onboarding answer and return only the requested "
-        "structured schema. Accept any input language, but use English enum "
-        "codes and an English clarification question. Do not invent facts or "
-        f"provide medical diagnosis. {rule} Relevant confirmed context: "
-        f"{context_json}"
+        "Interpret exactly one onboarding answer and return only one valid JSON "
+        "object matching the requested structured schema. Accept any input "
+        "language, but use English enum codes and an English clarification "
+        "question. Do not invent facts or provide medical diagnosis. "
+        f"{rule} Relevant confirmed context: {context_json}"
     )
     return [
         SystemMessage(content=system_text),

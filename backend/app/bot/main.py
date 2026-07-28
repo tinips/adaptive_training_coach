@@ -11,6 +11,7 @@ from telegram.constants import ParseMode
 from telegram.ext import Application, Defaults
 
 from app.bot.handlers import BOT_SERVICE_KEY
+from app.bot.notifier import TelegramInitialSyncNotifier
 from app.bot.router import register_handlers
 from app.bot.service import CoachBotApplicationService
 from app.bot.service_protocol import CoachBotService
@@ -18,6 +19,7 @@ from app.config import Settings, get_settings
 from app.db.session import create_engine, create_session_factory
 from app.logging import configure_logging
 from app.services.accounts import AccountQueryService, AccountService
+from app.services.apple_health import AppleHealthImportService
 from app.services.onboarding import OnboardingService
 from app.services.profiles import ProfileService
 from app.services.strava.orchestrator import StravaCoordinator
@@ -33,12 +35,14 @@ class BotRuntime:
     settings: Settings
     engine: AsyncEngine
     strava: StravaCoordinator
+    apple_health: AppleHealthImportService
     service: CoachBotApplicationService
 
     async def recover(self) -> None:
         """Reconcile durable background work before accepting updates."""
 
         await self.strava.recover_stale_work()
+        await self.apple_health.recover_stale_work()
 
     async def aclose(self) -> None:
         """Close provider and database connection pools exactly once."""
@@ -60,7 +64,21 @@ def build_runtime(
     runtime_engine = engine or create_engine(runtime_settings)
     session_factory = create_session_factory(runtime_engine)
     parser = create_onboarding_text_parser(runtime_settings)
+    telegram_token = runtime_settings.telegram_bot_token
+    initial_sync_notifier = (
+        TelegramInitialSyncNotifier(
+            session_factory=session_factory,
+            bot_token=telegram_token,
+        )
+        if telegram_token is not None and telegram_token.get_secret_value()
+        else None
+    )
     strava = StravaCoordinator(
+        session_factory=session_factory,
+        settings=runtime_settings,
+        initial_sync_notifier=initial_sync_notifier,
+    )
+    apple_health = AppleHealthImportService(
         session_factory=session_factory,
         settings=runtime_settings,
     )
@@ -74,11 +92,15 @@ def build_runtime(
         account_queries=AccountQueryService(session_factory),
         accounts=AccountService(session_factory),
         strava=strava,
+        apple_health=apple_health,
+        strava_enabled=runtime_settings.strava_enabled,
+        apple_health_enabled=runtime_settings.apple_health_import_enabled,
     )
     return BotRuntime(
         settings=runtime_settings,
         engine=runtime_engine,
         strava=strava,
+        apple_health=apple_health,
         service=service,
     )
 

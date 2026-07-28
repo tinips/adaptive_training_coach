@@ -91,10 +91,12 @@ BASELINE_SELECTION_UNAVAILABLE = (
     "open your current account menu."
 )
 STRAVA_CONNECT_EXPLANATION = (
-    "Connecting Strava is optional. The authorization page requests activity read "
-    "access so recent activities can be imported for your baseline. You can "
-    "disconnect later."
+    "Connecting Strava is optional. Never enter your Strava username or password "
+    "in Telegram. Use the Connect Strava button to open the secure Strava "
+    "authorization page, where you can grant read-only profile and activity "
+    "access. You can disconnect later."
 )
+STRAVA_DISABLED = "Strava connection is currently disabled."
 STRAVA_NOT_CONNECTED = "Strava is not connected."
 STRAVA_CONNECTION_UNHEALTHY = (
     "Strava authorization is stored but cannot currently be used. You can reconnect "
@@ -105,6 +107,10 @@ STRAVA_SYNC_STARTED = (
 )
 STRAVA_SYNC_COMPLETE = (
     "Strava synchronization completed and your baseline was recalculated."
+)
+STRAVA_INITIAL_IMPORT_COMPLETE = (
+    "Strava is connected and your initial activity import is complete. "
+    "Use /baseline to review your data baseline."
 )
 STRAVA_SYNC_PARTIAL = (
     "Strava synchronization stopped before every activity page was processed. "
@@ -235,6 +241,31 @@ STEP_PROMPTS: dict[OnboardingStep, str] = {
     OnboardingStep.BASELINE_SOURCE: (
         "How would you like to establish your athletic baseline?"
     ),
+    OnboardingStep.APPLE_HEALTH_PRIVACY_NOTICE: (
+        "Apple Health exports can contain sensitive health information.\n\n"
+        "This import reads only workout, heart-rate, distance, energy, and "
+        "source data required for training analysis.\n\n"
+        "Clinical records and unrelated health categories are ignored. The "
+        "uploaded file is deleted after processing."
+    ),
+    OnboardingStep.APPLE_HEALTH_WAITING_FOR_FILE: (
+        "Export your data from the Apple Health app and send the ZIP file here "
+        "as a Telegram document.\n\n"
+        "On iPhone:\n"
+        "Health → profile picture → Export All Health Data"
+    ),
+    OnboardingStep.APPLE_HEALTH_PROCESSING: (
+        "Your Apple Health export is being processed. You can return later; "
+        "your progress is saved."
+    ),
+    OnboardingStep.APPLE_HEALTH_IMPORT_COMPLETE: (
+        "Your Apple Health import is complete."
+    ),
+    OnboardingStep.APPLE_HEALTH_IMPORT_FAILED: (
+        "The Apple Health export could not be imported safely. Your uploaded "
+        "file was deleted. You can retry with a new export or choose another "
+        "baseline method."
+    ),
     OnboardingStep.SUMMARY: "Review your profile before confirming it.",
 }
 
@@ -264,7 +295,61 @@ VALIDATION_ERRORS: dict[str, str] = {
         "Some required answers are missing. Your progress is safe; resume onboarding "
         "to complete them."
     ),
+    "apple_health_file_not_expected": (
+        "Choose Import Apple Health data and review the privacy notice before "
+        "sending a ZIP file."
+    ),
+    "apple_health_import_disabled": ("Apple Health import is currently unavailable."),
+    "import_already_active": ("An Apple Health import is already in progress."),
 }
+
+APPLE_HEALTH_PROGRESS = {
+    "validating_archive": "Validating archive",
+    "reading_workouts": "Reading workouts",
+    "reading_heart_rate": "Reading heart-rate records",
+    "matching_data": "Matching data",
+    "saving_activities": "Saving activities",
+    "recalculating_baseline": "Recalculating baseline",
+}
+
+
+def apple_health_import_success(
+    *,
+    workouts_found: int,
+    activities_imported: int,
+    activities_updated: int,
+    activities_skipped: int,
+    heart_rate_records_matched: int,
+    warning_count: int,
+    discipline_counts: Mapping[str, int],
+) -> str:
+    """Render honest counters from the persisted import outcome."""
+
+    discipline_order = (
+        ("RUN", "Runs"),
+        ("RIDE", "Rides"),
+        ("SWIM", "Swims"),
+        ("WALK_HIKE", "Walks or hikes"),
+        ("STRENGTH", "Strength workouts"),
+        ("OTHER", "Other workouts"),
+    )
+    lines = [
+        "Apple Health import complete.",
+        "",
+        f"Workouts found: {workouts_found}",
+        f"Activities imported: {activities_imported}",
+        f"Activities updated: {activities_updated}",
+        f"Activities skipped: {activities_skipped}",
+        f"Heart-rate records matched: {heart_rate_records_matched}",
+        f"Warnings: {warning_count}",
+        "",
+        "Saved activities by discipline:",
+    ]
+    lines.extend(
+        f"{label}: {discipline_counts.get(value, 0)}"
+        for value, label in discipline_order
+    )
+    return "\n".join(lines)
 
 
 def step_prompt(step: OnboardingStep) -> str:
@@ -483,7 +568,11 @@ def strava_status(data: Mapping[str, Any]) -> str:
     )
 
 
-def oauth_success_page(initial_sync_started: bool) -> str:
+def oauth_success_page(
+    initial_sync_started: bool,
+    *,
+    telegram_bot_username: str | None = None,
+) -> str:
     """Return an English OAuth success HTML page."""
 
     sync_text = (
@@ -491,9 +580,13 @@ def oauth_success_page(initial_sync_started: bool) -> str:
         if initial_sync_started
         else "You can return to Telegram and use Sync now."
     )
+    username = (telegram_bot_username or "").strip().lstrip("@")
+    telegram_url = f"https://t.me/{username}" if username else "https://t.me"
     return _html_page(
         "Strava connected",
         f"Strava authorization was saved securely. {sync_text} You may close this tab.",
+        action_label="Open Telegram",
+        action_url=telegram_url,
     )
 
 
@@ -520,11 +613,23 @@ def oauth_failure_page(reason: str) -> str:
     )
 
 
-def _html_page(title: str, body: str) -> str:
+def _html_page(
+    title: str,
+    body: str,
+    *,
+    action_label: str | None = None,
+    action_url: str | None = None,
+) -> str:
+    action = ""
+    if action_label is not None and action_url is not None:
+        action = (
+            f'<p><a href="{escape(action_url, quote=True)}">'
+            f"{escape(action_label)}</a></p>"
+        )
     return (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         f"<title>{escape(title)}</title></head><body><main><h1>{escape(title)}</h1>"
-        f"<p>{escape(body)}</p></main></body></html>"
+        f"<p>{escape(body)}</p>{action}</main></body></html>"
     )
 
 

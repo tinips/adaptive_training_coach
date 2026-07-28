@@ -43,7 +43,11 @@ LABELS = {
     "view_sync": "View sync status",
     "strava_settings": "Strava settings",
     "manual_baseline": "Manual baseline",
-    "calibration": "Calibration period",
+    "apple_health_import": "Import Apple Health data",
+    "choose_other_method": "Choose another method",
+    "cancel_import": "Cancel import",
+    "retry_import": "Retry import",
+    "continue_onboarding": "Continue onboarding",
     "help": "Help",
 }
 
@@ -131,12 +135,6 @@ SIMPLE_OPTIONS: dict[OnboardingStep, list[tuple[str, str]]] = {
         ("Medium", "MEDIUM"),
         ("Detailed", "DETAILED"),
     ],
-    OnboardingStep.BASELINE_SOURCE: [
-        ("Connect Strava", "STRAVA"),
-        ("Manual baseline", "MANUAL"),
-        ("Calibration period", "CALIBRATION"),
-        ("Decide later", "SKIP_FOR_NOW"),
-    ],
 }
 
 MULTI_OPTIONS: dict[OnboardingStep, list[tuple[str, str]]] = {
@@ -196,6 +194,9 @@ MULTI_OPTIONS: dict[OnboardingStep, list[tuple[str, str]]] = {
 def keyboard_for_step(
     step: OnboardingStep,
     answers: Mapping[str, Any],
+    *,
+    strava_enabled: bool = False,
+    apple_health_enabled: bool = True,
 ) -> InlineKeyboardMarkup | None:
     """Build the appropriate inline keyboard for a persisted step."""
 
@@ -217,6 +218,38 @@ def keyboard_for_step(
         sport = str(answers.get("primary_sport", "GENERAL_FITNESS")).lower()
         options = GOAL_OPTIONS.get(sport, GOAL_OPTIONS["general_fitness"])
         return _single_options(step, options, other=True)
+    if step is OnboardingStep.BASELINE_SOURCE:
+        baseline_options: list[tuple[str, str]] = []
+        if apple_health_enabled:
+            baseline_options.append(
+                (LABELS["apple_health_import"], "APPLE_HEALTH_EXPORT")
+            )
+        baseline_options.extend(
+            [
+                ("Enter baseline manually", "MANUAL"),
+                ("Decide later", "SKIP_FOR_NOW"),
+            ]
+        )
+        if strava_enabled:
+            baseline_options.insert(0, ("Connect Strava", "STRAVA"))
+        return _single_options(step, baseline_options, other=False)
+    if step is OnboardingStep.APPLE_HEALTH_PRIVACY_NOTICE:
+        return apple_health_privacy_keyboard()
+    if step is OnboardingStep.APPLE_HEALTH_WAITING_FOR_FILE:
+        return apple_health_file_keyboard()
+    if step is OnboardingStep.APPLE_HEALTH_IMPORT_COMPLETE:
+        return _rows(
+            [
+                [
+                    (
+                        LABELS["continue_onboarding"],
+                        "ob:v1:apple:continue",
+                    )
+                ]
+            ]
+        )
+    if step is OnboardingStep.APPLE_HEALTH_IMPORT_FAILED:
+        return apple_health_failure_keyboard()
     if step in SIMPLE_OPTIONS:
         allow_other = step is OnboardingStep.GOAL_PRIORITY
         return _single_options(step, SIMPLE_OPTIONS[step], other=allow_other)
@@ -278,6 +311,51 @@ def free_text_recovery_keyboard() -> InlineKeyboardMarkup:
         [
             [(LABELS["write_again"], "ob:v1:parsed:retry")],
             [(LABELS["back_options"], "ob:v1:parsed:back")],
+        ]
+    )
+
+
+def apple_health_privacy_keyboard() -> InlineKeyboardMarkup:
+    return _rows(
+        [
+            [(LABELS["continue"], "ob:v1:apple:continue")],
+            [
+                (
+                    LABELS["choose_other_method"],
+                    "ob:v1:apple:choose_other",
+                )
+            ],
+            [(LABELS["back"], "ob:v1:apple:back")],
+        ]
+    )
+
+
+def apple_health_file_keyboard() -> InlineKeyboardMarkup:
+    return _rows(
+        [
+            [(LABELS["cancel_import"], "ob:v1:apple:cancel")],
+            [
+                (
+                    LABELS["choose_other_method"],
+                    "ob:v1:apple:choose_other",
+                )
+            ],
+            [(LABELS["back"], "ob:v1:apple:back")],
+        ]
+    )
+
+
+def apple_health_failure_keyboard() -> InlineKeyboardMarkup:
+    return _rows(
+        [
+            [(LABELS["retry_import"], "ob:v1:apple:retry")],
+            [
+                (
+                    LABELS["choose_other_method"],
+                    "ob:v1:apple:choose_other",
+                )
+            ],
+            [(LABELS["back"], "ob:v1:apple:back")],
         ]
     )
 
@@ -375,10 +453,11 @@ def state_menu(
     *,
     connected: bool = False,
     syncing: bool = False,
+    strava_enabled: bool = False,
 ) -> InlineKeyboardMarkup:
     """Build post-onboarding actions valid for lifecycle and connection state."""
 
-    if state == "importing":
+    if state == "importing" and strava_enabled:
         strava_action = (
             (LABELS["view_sync"], "st:v1:status")
             if connected and syncing
@@ -397,7 +476,7 @@ def state_menu(
         )
     if state == "ready":
         rows = [[(LABELS["view_baseline"], "menu:v1:baseline")]]
-        if connected:
+        if connected and strava_enabled:
             if syncing:
                 rows.append([(LABELS["view_sync"], "st:v1:status")])
             else:
@@ -408,7 +487,7 @@ def state_menu(
                     ]
                 )
             rows.append([(LABELS["strava_settings"], "menu:v1:strava")])
-        else:
+        elif strava_enabled:
             rows.insert(
                 0,
                 [(LABELS["reconnect_strava"], "menu:v1:strava")],
@@ -421,18 +500,17 @@ def state_menu(
         )
         return _rows(rows)
     rows = []
-    if connected:
+    if connected and strava_enabled:
         if syncing:
             rows.append([(LABELS["view_sync"], "st:v1:status")])
         else:
             rows.append([(LABELS["strava_settings"], "menu:v1:strava")])
-    else:
+    elif strava_enabled:
         rows.append([(LABELS["connect_strava"], "menu:v1:strava")])
     rows.extend(
         [
             [(LABELS["view_profile"], "menu:v1:profile")],
             [(LABELS["manual_baseline"], "menu:v1:manual")],
-            [(LABELS["calibration"], "menu:v1:calibration")],
             [(LABELS["help"], "menu:v1:help")],
         ]
     )

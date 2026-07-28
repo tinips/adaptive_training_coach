@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
 import pytest
@@ -97,6 +98,7 @@ async def bot_service() -> AsyncIterator[
         environment="test",
         database_url="sqlite+aiosqlite:///:memory:",
         llm_mode="mock",
+        strava_enabled=True,
     )
     queries = AccountQueryService(factory)
     strava = FakeStravaPort()
@@ -110,6 +112,7 @@ async def bot_service() -> AsyncIterator[
         account_queries=queries,
         accounts=AccountService(factory),
         strava=strava,
+        strava_enabled=True,
     )
     yield service, queries, strava, engine
     await engine.dispose()
@@ -307,8 +310,10 @@ async def test_strava_connect_button_uses_opaque_application_ticket(
     response = await service.strava(identity)
 
     assert response.keyboard is not None
+    assert "Never enter your Strava username or password in Telegram" in response.text
     button = response.keyboard.inline_keyboard[0][0]
     assert button.url is not None
+    assert urlparse(button.url).path == "/integrations/strava/connect"
     assert "ticket=opaque" in button.url
     assert str(identity.telegram_user_id) not in button.url
 
@@ -333,7 +338,7 @@ async def test_strava_is_not_available_before_profile_confirmation(
 
 
 @pytest.mark.asyncio
-async def test_post_profile_manual_and_calibration_choices_are_persisted(
+async def test_post_profile_manual_choice_is_persisted_and_calibration_is_removed(
     bot_service: tuple[
         CoachBotApplicationService,
         AccountQueryService,
@@ -369,9 +374,9 @@ async def test_post_profile_manual_and_calibration_choices_are_persisted(
     )
     updated = await queries.profile(identity)
 
-    assert calibration.text == messages.BASELINE_CALIBRATION_PENDING
+    assert calibration.text == messages.CALLBACK_EXPIRED
     assert updated is not None
-    assert updated["baseline_source"] is BaselineSource.CALIBRATION
+    assert updated["baseline_source"] is BaselineSource.MANUAL
     assert await queries.baseline(identity) is None
 
 

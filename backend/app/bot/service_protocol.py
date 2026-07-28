@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Protocol
 
 from app.bot.rendering import TelegramResponse
 from app.schemas.common import TelegramIdentity
+from app.services.apple_health import TelegramDocumentUpload
 
 
 class CoachBotService(Protocol):
@@ -23,6 +26,14 @@ class CoachBotService(Protocol):
         self,
         identity: TelegramIdentity,
         text: str,
+    ) -> TelegramResponse: ...
+
+    async def handle_document(
+        self,
+        identity: TelegramIdentity,
+        document: TelegramDocumentUpload,
+        download: Callable[[Path], Awaitable[None]],
+        progress: Callable[[str], Awaitable[None]],
     ) -> TelegramResponse: ...
 
     async def profile(self, identity: TelegramIdentity) -> TelegramResponse: ...

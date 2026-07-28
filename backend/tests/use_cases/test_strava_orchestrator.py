@@ -5,9 +5,11 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs, urlparse
+from uuid import UUID
 
 import httpx
 import pytest
+from pydantic import SecretStr
 from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
@@ -15,6 +17,8 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from app.bot import messages
+from app.bot.notifier import TelegramInitialSyncNotifier
 from app.config import Settings
 from app.db.base import Base
 from app.db.models import (
@@ -51,6 +55,7 @@ from app.services.strava.exceptions import (
 )
 from app.services.strava.orchestrator import (
     ConnectTicketRejectedError,
+    StravaConfigurationError,
     StravaCoordinator,
 )
 
@@ -128,7 +133,7 @@ async def test_opaque_ticket_oauth_sync_baseline_and_disconnect(
                     "refresh_token": "provider-refresh",
                     "expires_at": int((NOW + timedelta(minutes=1)).timestamp()),
                     "athlete": {"id": 4242},
-                    "scope": "activity:read",
+                    "scope": "read,activity:read_all",
                 },
             )
         if request.url.path == "/api/v3/athlete/activities":
@@ -185,8 +190,14 @@ async def test_opaque_ticket_oauth_sync_baseline_and_disconnect(
         http_client=http,
     )
     cipher = TokenCipher(TokenCipher.generate_key())
+    sent_notifications: list[tuple[int, str]] = []
+
+    async def send_telegram(chat_id: int, text: str) -> None:
+        sent_notifications.append((chat_id, text))
+
     settings = Settings(
         environment="test",
+        strava_enabled=True,
         database_url="sqlite+aiosqlite:///:memory:",
         public_base_url="https://coach.example",
         strava_client_id="client-id",
@@ -214,6 +225,11 @@ async def test_opaque_ticket_oauth_sync_baseline_and_disconnect(
         settings=settings,
         client=client,
         cipher=cipher,
+        initial_sync_notifier=TelegramInitialSyncNotifier(
+            session_factory=session_factory,
+            bot_token=SecretStr("test-bot-token"),
+            sender=send_telegram,
+        ),
         clock=lambda: NOW,
     )
     app_connect_url = await coordinator.issue_connect_url(user_id=user_id)
@@ -229,6 +245,9 @@ async def test_opaque_ticket_oauth_sync_baseline_and_disconnect(
     provider_query = parse_qs(urlparse(initiation.authorization_url).query)
     provider_state = provider_query["state"][0]
     assert provider_state != raw_ticket
+    requested_scopes = provider_query["scope"][0].split(",")
+    assert set(requested_scopes) == {"read", "activity:read_all"}
+    assert len(requested_scopes) == 2
 
     completion = await coordinator.complete_oauth(
         raw_state=provider_state,
@@ -249,6 +268,7 @@ async def test_opaque_ticket_oauth_sync_baseline_and_disconnect(
 
     outcome = await coordinator.initial_sync(user_id=user_id)
     assert outcome.stats.imported_count == 1
+    assert sent_notifications == [(112233, messages.STRAVA_INITIAL_IMPORT_COMPLETE)]
 
     async with session_factory() as session:
         ready_user = await session.get(User, user_id)
@@ -425,6 +445,7 @@ async def test_startup_recovery_fails_stale_syncs_and_reconciles_lifecycle(
         session_factory=session_factory,
         settings=Settings(
             environment="test",
+            strava_enabled=True,
             database_url="sqlite+aiosqlite:///:memory:",
             public_base_url="https://coach.example",
         ),
@@ -580,6 +601,7 @@ async def test_startup_recovery_replays_bounded_canonical_webhook_inbox(
         session_factory=session_factory,
         settings=Settings(
             environment="test",
+            strava_enabled=True,
             database_url="sqlite+aiosqlite:///:memory:",
             public_base_url="https://coach.example",
             strava_webhook_verify_token="verify-token",
@@ -679,6 +701,7 @@ async def test_failed_manual_sync_preserves_existing_ready_baseline(
         session_factory=session_factory,
         settings=Settings(
             environment="test",
+            strava_enabled=True,
             database_url="sqlite+aiosqlite:///:memory:",
             public_base_url="https://coach.example",
             strava_sync_cooldown_seconds=0,
@@ -764,6 +787,7 @@ async def test_startup_recovery_resumes_pending_oauth_initial_sync(
         session_factory=session_factory,
         settings=Settings(
             environment="test",
+            strava_enabled=True,
             database_url="sqlite+aiosqlite:///:memory:",
             public_base_url="https://coach.example",
         ),
@@ -794,3 +818,31 @@ async def test_startup_recovery_resumes_pending_oauth_initial_sync(
     assert job.status == SyncStatus.SUCCEEDED
     assert baseline is not None
     await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_disabled_strava_requires_no_credentials_and_schedules_no_work(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    coordinator = StravaCoordinator(
+        session_factory=session_factory,
+        settings=Settings(
+            environment="test",
+            database_url="sqlite+aiosqlite:///:memory:",
+            strava_enabled=False,
+            strava_client_id=None,
+            strava_client_secret=None,
+            app_encryption_key=None,
+        ),
+        clock=lambda: NOW,
+    )
+
+    recovery = await coordinator.recover_stale_work()
+
+    assert recovery.stale_sync_jobs_failed == 0
+    assert recovery.webhook_events_scheduled == 0
+    assert recovery.initial_syncs_scheduled == 0
+    with pytest.raises(StravaConfigurationError):
+        await coordinator.issue_connect_url(
+            user_id=UUID("11111111-1111-1111-1111-111111111111")
+        )

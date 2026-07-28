@@ -241,3 +241,9 @@ class StravaRepositoryProtocol(Protocol):
 
 class BaselineRecalculator(Protocol):
     async def recalculate(self, *, user_id: UUID) -> BaselineCalculation: ...
+
+
+class InitialSyncNotifier(Protocol):
+    """Notify the owning product user after a completed initial import."""
+
+    async def notify_initial_sync_succeeded(self, *, user_id: UUID) -> None: ...

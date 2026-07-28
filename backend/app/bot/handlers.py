@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import cast
 
 from telegram import Update
@@ -14,6 +15,7 @@ from app.bot import messages
 from app.bot.rendering import TelegramResponse
 from app.bot.service_protocol import CoachBotService
 from app.schemas.common import TelegramIdentity
+from app.services.apple_health import TelegramDocumentUpload
 
 logger = logging.getLogger(__name__)
 BOT_SERVICE_KEY = "coach_bot_service"
@@ -94,6 +96,56 @@ async def text_handler(
         return
     response = await _service(context).handle_text(identity, message.text)
     await _deliver(update, response)
+
+
+async def document_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Pass a Telegram document to the import service without naming temp files."""
+
+    message = update.effective_message
+    identity = _identity(update)
+    document = message.document if message is not None else None
+    if message is None or identity is None or document is None:
+        return
+    status_message = await message.reply_text(
+        messages.APPLE_HEALTH_PROGRESS["validating_archive"]
+    )
+
+    async def download(destination: Path) -> None:
+        telegram_file = await document.get_file()
+        await telegram_file.download_to_drive(custom_path=destination)
+
+    async def progress(stage: str) -> None:
+        text = messages.APPLE_HEALTH_PROGRESS.get(stage)
+        if text is None:
+            return
+        try:
+            await status_message.edit_text(text)
+        except BadRequest as exc:
+            if "message is not modified" not in str(exc).lower():
+                logger.info("Telegram import progress edit unavailable")
+
+    response = await _service(context).handle_document(
+        identity,
+        TelegramDocumentUpload(
+            file_id=document.file_id,
+            file_unique_id=document.file_unique_id,
+            display_filename=document.file_name or "Apple Health export.zip",
+            file_size=document.file_size,
+            update_id=update.update_id,
+        ),
+        download,
+        progress,
+    )
+    try:
+        await status_message.edit_text(
+            response.text,
+            reply_markup=response.keyboard,
+        )
+    except BadRequest:
+        await message.reply_text(response.text, reply_markup=response.keyboard)
 
 
 async def global_error_handler(

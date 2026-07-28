@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "adaptive-endurance-coach"
 version = "0.1.0"
-description = "Telegram onboarding, Strava ingestion, and deterministic athlete baselines"
+description = "Telegram onboarding, Apple Health and Strava ingestion, and deterministic athlete baselines"
 readme = {text = "See the repository-level README for setup and architecture.", content-type = "text/markdown"}
 requires-python = ">=3.12"
 dependencies = [

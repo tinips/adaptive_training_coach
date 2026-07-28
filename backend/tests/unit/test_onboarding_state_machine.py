@@ -321,3 +321,19 @@ def test_other_callback_only_signals_free_text_and_never_calls_a_graph() -> None
         "write_answer",
     )
     assert spy.calls == 0
+
+
+def test_apple_health_baseline_selection_enters_privacy_branch() -> None:
+    transition = OnboardingStateMachine.advance(
+        current_step=OnboardingStep.BASELINE_SOURCE,
+        answers={},
+        value="APPLE_HEALTH_EXPORT",
+    )
+
+    assert transition.current_step is OnboardingStep.APPLE_HEALTH_PRIVACY_NOTICE
+    assert transition.answers["baseline_source"] == "APPLE_HEALTH_EXPORT"
+    back = OnboardingStateMachine.back(
+        current_step=transition.current_step,
+        answers=transition.answers,
+    )
+    assert back.current_step is OnboardingStep.BASELINE_SOURCE

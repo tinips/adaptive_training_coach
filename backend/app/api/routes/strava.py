@@ -14,8 +14,9 @@ from fastapi import (
 )
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-from app.api.dependencies import get_strava_coordinator
+from app.api.dependencies import get_runtime_settings, get_strava_coordinator
 from app.bot import messages
+from app.config import Settings
 from app.integrations.strava.exceptions import StravaProviderError
 from app.schemas.strava import StravaWebhookEvent
 from app.services.strava.exceptions import (
@@ -34,6 +35,7 @@ router = APIRouter(prefix="/integrations/strava", tags=["strava"])
 logger = logging.getLogger(__name__)
 
 Coordinator = Annotated[StravaCoordinator, Depends(get_strava_coordinator)]
+RuntimeSettings = Annotated[Settings, Depends(get_runtime_settings)]
 
 
 @router.get("/connect", response_model=None)
@@ -59,6 +61,7 @@ async def connect(
 async def callback(
     background_tasks: BackgroundTasks,
     coordinator: Coordinator,
+    settings: RuntimeSettings,
     state: Annotated[str, Query(min_length=1)],
     code: Annotated[str | None, Query()] = None,
     scope: Annotated[str | None, Query()] = None,
@@ -93,7 +96,10 @@ async def callback(
         completion.user_id,
     )
     return HTMLResponse(
-        messages.oauth_success_page(initial_sync_started=True),
+        messages.oauth_success_page(
+            initial_sync_started=True,
+            telegram_bot_username=settings.telegram_bot_username,
+        ),
         status_code=200,
     )
 

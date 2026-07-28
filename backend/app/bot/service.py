@@ -3,17 +3,29 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
+from pathlib import Path
 from typing import Protocol, cast
 from uuid import UUID
 
 from app.bot import keyboards, messages
 from app.bot.rendering import TelegramResponse
-from app.domain.enums import BaselineSource, OnboardingStep, SyncStatus, UserStatus
+from app.domain.enums import (
+    AppleHealthImportStatus,
+    BaselineSource,
+    OnboardingStep,
+    SyncStatus,
+    UserStatus,
+)
 from app.schemas.common import TelegramIdentity
 from app.schemas.onboarding import SummaryEditSection
 from app.schemas.onboarding_service import OnboardingServiceResult
 from app.services.accounts import AccountQueryService, AccountService
+from app.services.apple_health import (
+    AppleHealthImportOutcome,
+    TelegramDocumentUpload,
+)
 from app.services.onboarding import OnboardingApplicationError, OnboardingService
 from app.services.profiles import (
     BaselineSelectionUnavailableError,
@@ -46,6 +58,27 @@ class StravaBotPort(Protocol):
     async def revoke_for_deletion(self, *, user_id: UUID) -> bool: ...
 
 
+class AppleHealthBotPort(Protocol):
+    """Apple Health orchestration used by document and resume actions."""
+
+    async def process_upload(
+        self,
+        *,
+        identity: TelegramIdentity,
+        document: TelegramDocumentUpload,
+        download: Callable[[Path], Awaitable[None]],
+        progress: Callable[[str], Awaitable[None]],
+    ) -> AppleHealthImportOutcome: ...
+
+    async def latest_outcome(
+        self,
+        *,
+        user_id: UUID,
+    ) -> AppleHealthImportOutcome | None: ...
+
+    async def cancel_active(self, *, user_id: UUID) -> None: ...
+
+
 class CoachBotApplicationService:
     """Render application use cases without putting business logic in handlers."""
 
@@ -57,12 +90,18 @@ class CoachBotApplicationService:
         account_queries: AccountQueryService,
         accounts: AccountService,
         strava: StravaBotPort,
+        apple_health: AppleHealthBotPort | None = None,
+        strava_enabled: bool = False,
+        apple_health_enabled: bool = True,
     ) -> None:
         self._onboarding = onboarding
         self._profiles = profiles
         self._account_queries = account_queries
         self._accounts = accounts
         self._strava = strava
+        self._apple_health = apple_health
+        self._strava_enabled = strava_enabled
+        self._apple_health_enabled = apple_health_enabled
 
     async def start(self, identity: TelegramIdentity) -> TelegramResponse:
         result = await self._onboarding.start(identity)
@@ -78,6 +117,32 @@ class CoachBotApplicationService:
         except OnboardingApplicationError as exc:
             return TelegramResponse(messages.validation_error(exc.code))
         return await self._render_onboarding(identity, result)
+
+    async def handle_document(
+        self,
+        identity: TelegramIdentity,
+        document: TelegramDocumentUpload,
+        download: Callable[[Path], Awaitable[None]],
+        progress: Callable[[str], Awaitable[None]],
+    ) -> TelegramResponse:
+        if not self._apple_health_enabled or self._apple_health is None:
+            return TelegramResponse(
+                messages.validation_error("apple_health_import_disabled")
+            )
+        try:
+            outcome = await self._apple_health.process_upload(
+                identity=identity,
+                document=document,
+                download=download,
+                progress=progress,
+            )
+        except OnboardingApplicationError as exc:
+            return TelegramResponse(messages.validation_error(exc.code))
+        if outcome.status is AppleHealthImportStatus.FAILED:
+            snapshot = await self._onboarding.snapshot(identity)
+            return await self._render_onboarding(identity, snapshot)
+        snapshot = await self._onboarding.snapshot(identity)
+        return await self._render_onboarding(identity, snapshot)
 
     async def handle_callback(
         self,
@@ -126,6 +191,8 @@ class CoachBotApplicationService:
         return TelegramResponse(messages.BASELINE_NOT_READY)
 
     async def strava(self, identity: TelegramIdentity) -> TelegramResponse:
+        if not self._strava_enabled:
+            return TelegramResponse(messages.STRAVA_DISABLED)
         lifecycle = await self._account_queries.lifecycle(identity)
         if lifecycle is None:
             return TelegramResponse(messages.NOT_FOUND)
@@ -198,6 +265,16 @@ class CoachBotApplicationService:
         identity: TelegramIdentity,
         callback_data: str,
     ) -> TelegramResponse:
+        if callback_data.startswith("ob:v1:apple:"):
+            action = callback_data.removeprefix("ob:v1:apple:")
+            if action in {"cancel", "choose_other", "back"}:
+                snapshot = await self._onboarding.snapshot(identity)
+                if self._apple_health is not None:
+                    await self._apple_health.cancel_active(user_id=snapshot.user_id)
+            return await self._render_onboarding(
+                identity,
+                await self._onboarding.apple_action(identity, action),
+            )
         if callback_data.startswith("ob:v1:set:"):
             payload = callback_data.removeprefix("ob:v1:set:")
             step_value, value = self._split_callback(payload, parts=2)
@@ -389,11 +466,6 @@ class CoachBotApplicationService:
                 identity,
                 BaselineSource.MANUAL,
             )
-        if action == "calibration":
-            return await self._select_pending_baseline_source(
-                identity,
-                BaselineSource.CALIBRATION,
-            )
         if action == "home":
             lifecycle = await self._account_queries.lifecycle(identity)
             if lifecycle is None:
@@ -428,6 +500,32 @@ class CoachBotApplicationService:
     ) -> TelegramResponse:
         prefix = f"{messages.WELCOME_NEW}\n\n" if result.created else ""
         if result.kind == "step":
+            if result.current_step is OnboardingStep.APPLE_HEALTH_IMPORT_COMPLETE:
+                outcome = (
+                    await self._apple_health.latest_outcome(user_id=result.user_id)
+                    if self._apple_health is not None
+                    else None
+                )
+                if outcome is not None:
+                    return TelegramResponse(
+                        messages.apple_health_import_success(
+                            workouts_found=outcome.workouts_found,
+                            activities_imported=outcome.activities_imported,
+                            activities_updated=outcome.activities_updated,
+                            activities_skipped=outcome.activities_skipped,
+                            heart_rate_records_matched=(
+                                outcome.heart_rate_records_matched
+                            ),
+                            warning_count=outcome.warning_count,
+                            discipline_counts=outcome.discipline_counts or {},
+                        ),
+                        keyboards.keyboard_for_step(
+                            result.current_step,
+                            result.answers,
+                            strava_enabled=self._strava_enabled,
+                            apple_health_enabled=self._apple_health_enabled,
+                        ),
+                    )
             text = messages.step_prompt(result.current_step)
             if result.current_step in {
                 OnboardingStep.TRAINING_DAYS,
@@ -442,6 +540,8 @@ class CoachBotApplicationService:
                 keyboards.keyboard_for_step(
                     result.current_step,
                     result.answers,
+                    strava_enabled=self._strava_enabled,
+                    apple_health_enabled=self._apple_health_enabled,
                 ),
             )
         if result.kind == "summary":
@@ -525,6 +625,7 @@ class CoachBotApplicationService:
                 state,
                 connected=connected,
                 syncing=syncing,
+                strava_enabled=self._strava_enabled,
             ),
         )
 

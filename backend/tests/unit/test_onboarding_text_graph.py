@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+from typing import cast
+from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
+from langchain_openai import ChatOpenAI
 
 from app.config import Settings
 from app.domain.enums import OnboardingStep
 from app.integrations.llm.factory import create_onboarding_text_model
+from app.integrations.llm.live import OpenAICompatibleOnboardingModel
 from app.integrations.llm.mock import (
     DeterministicFakeOnboardingModel,
     FakeLLMScenario,
@@ -158,6 +162,42 @@ def test_factory_returns_model_for_each_supported_mode() -> None:
     live = create_onboarding_text_model(_settings(llm_mode="live", llm_api_key=None))
     assert mock.provider_mode == "mock"
     assert live.provider_mode == "live"
+
+
+def test_live_deepseek_defaults_disable_thinking_mode() -> None:
+    assert Settings.model_fields["llm_base_url"].default == "https://api.deepseek.com"
+    assert Settings.model_fields["llm_model"].default == "deepseek-v4-flash"
+    settings = Settings(
+        environment="test",
+        llm_mode="live",
+        llm_api_key="unit-test-key",
+        llm_base_url="https://api.deepseek.com",
+        llm_model="deepseek-v4-flash",
+    )
+    model = cast(
+        OpenAICompatibleOnboardingModel,
+        create_onboarding_text_model(settings),
+    )
+
+    with patch("app.integrations.llm.live.ChatOpenAI") as chat_openai:
+        chat_openai.return_value = cast(ChatOpenAI, object())
+        model._get_chat_model()
+
+    kwargs = chat_openai.call_args.kwargs
+    assert kwargs["base_url"] == "https://api.deepseek.com"
+    assert kwargs["model"] == "deepseek-v4-flash"
+    assert kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
+
+
+def test_live_api_key_is_loaded_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LLM_API_KEY", "environment-test-key")
+
+    settings = Settings(_env_file=None, environment="test", llm_mode="live")
+
+    assert settings.llm_api_key is not None
+    assert settings.llm_api_key.get_secret_value() == "environment-test-key"
 
 
 def test_prompt_context_is_step_scoped_and_excludes_sensitive_unrelated_data() -> None:

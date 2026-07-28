@@ -20,7 +20,7 @@ from app.services.strava.exceptions import (
 )
 from app.services.strava.protocols import StravaRepositoryProtocol
 
-REQUIRED_STRAVA_SCOPES = frozenset({"activity:read"})
+REQUIRED_STRAVA_SCOPES = frozenset({"read", "activity:read_all"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,7 +146,10 @@ class StravaOAuthService:
             raise OAuthAuthorizationDeniedError()
         if not code:
             raise OAuthAuthorizationDeniedError()
-        del accepted_scope  # The token response is the authoritative scope grant.
+        callback_scopes = normalize_scopes(accepted_scope)
+        callback_missing = self._required_scopes - callback_scopes
+        if callback_missing:
+            raise OAuthScopeError(frozenset(callback_missing))
         token_response = await self._client.exchange_code(code)
         accepted = normalize_scopes(token_response.scope)
         missing = self._required_scopes - accepted

@@ -106,6 +106,7 @@ async def create_user(
 def test_model_metadata_has_every_entity_and_postgresql_jsonb() -> None:
     assert set(Base.metadata.tables) == {
         "activities",
+        "apple_health_import_jobs",
         "athlete_baselines",
         "athlete_profiles",
         "availability_rules",
@@ -114,6 +115,7 @@ def test_model_metadata_has_every_entity_and_postgresql_jsonb() -> None:
         "discipline_baselines",
         "equipment_access",
         "health_constraints",
+        "heart_rate_observations",
         "llm_usage",
         "oauth_states",
         "onboarding_sessions",

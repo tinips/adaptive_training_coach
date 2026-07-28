@@ -2,8 +2,9 @@
 
 Adaptive Endurance Coach is a modular Python application that creates a
 persisted athlete profile through Telegram and establishes an activity-data
-baseline from Strava. This repository contains the first complete product
-vertical slice: onboarding and baseline measurement.
+baseline from an Apple Health export or, when enabled, Strava. This repository
+contains the first complete product vertical slice: onboarding and baseline
+measurement.
 
 The interface is English-only for this milestone. Explicit free-text answers
 may be written in any language, including English, Catalan, and Spanish.
@@ -22,6 +23,9 @@ emergencies, and does not diagnose fitness or health conditions.
 - Explicit confirmation before an interpreted answer enters onboarding staging.
 - Database-backed live-LLM rolling-hour rate limiting.
 - Atomic, idempotent profile finalization into normalized records.
+- Secure Apple Health ZIP import with a privacy notice, persisted progress,
+  streaming XML parsing, activity/heart-rate deduplication, and automatic
+  baseline recalculation.
 - Strava OAuth 2.0 with random expiring one-time state, scope validation, and
   Fernet-encrypted tokens.
 - Token refresh and rotation, paginated activity import, deduplication, manual
@@ -33,9 +37,9 @@ emergencies, and does not diagnose fitness or health conditions.
 - Async SQLAlchemy persistence, PostgreSQL, Alembic, Docker Compose, tests, Ruff,
   and mypy.
 
-Manual baseline collection and calibration-period measurement are honest
-persisted selections and extension points. They do not fabricate baseline
-values in this milestone.
+Manual baseline collection is an honest persisted extension point. It does not
+fabricate baseline values in this milestone. A calibration-period button is
+not shown because no real calibration workflow exists yet.
 
 ## Intentional non-goals
 
@@ -61,6 +65,7 @@ Telegram handlers ─┐
                    ├─ application services ─ repositories ─ PostgreSQL
 FastAPI routes ────┘          │
                               ├─ LangGraph ─ LangChain model
+                              ├─ Apple Health ZIP/XML parser
                               ├─ Strava HTTP client
                               └─ deterministic baseline engine
 ```
@@ -114,14 +119,16 @@ The initial Alembic migration creates:
 - users and resumable onboarding sessions;
 - athlete profiles, training goals, availability, equipment, non-diagnostic
   health constraints, coaching preferences, and baseline preferences;
-- OAuth states, encrypted Strava connections, normalized activities, sync jobs,
-  and webhook events;
+- Apple Health import jobs, normalized heart-rate observations, OAuth states,
+  encrypted Strava connections, normalized activities, sync jobs, and webhook
+  events;
 - versioned athlete and discipline baselines;
 - safe LLM usage records.
 
 Personal-data repository methods always include the owning internal user. OAuth
 states are hashed, time-limited, and single-use. Imported activities are unique
-by provider and external ID. Active sync jobs are serialized per user.
+by owner, provider, and stable source key. Active Apple Health imports and
+Strava sync jobs are serialized per user.
 
 ## Repository layout
 
@@ -160,9 +167,9 @@ by provider and external ID. Active sync jobs are serialized per user.
 - Python 3.12 or newer
 - Docker Desktop with Linux containers
 - A Telegram bot token for live Telegram testing
-- A Strava developer application for live Strava testing
-- Optionally, an OpenAI-compatible API key for `LLM_MODE=live`
-- A public HTTPS URL for live OAuth callbacks and Strava webhooks
+- Optionally, a Strava developer application and public HTTPS URL for live
+  Strava OAuth/webhook testing
+- Optionally, a DeepSeek API key for `LLM_MODE=live`
 
 All automated tests use fakes or HTTP mock transports and do not call Telegram,
 Strava, or an LLM provider.
@@ -224,7 +231,10 @@ Docker development credentials shown in `docker-compose.yml`.
 1. Open [@BotFather](https://t.me/BotFather) in Telegram.
 2. Run `/newbot` and follow the prompts.
 3. Put the returned token in `TELEGRAM_BOT_TOKEN` in the ignored `.env`.
-4. Optionally use `/setcommands` with:
+4. Put the public bot username, without the leading `@`, in
+   `TELEGRAM_BOT_USERNAME`. The OAuth success page uses it for its
+   **Open Telegram** link.
+5. Optionally use `/setcommands` with:
 
 ```text
 start - Start or resume onboarding
@@ -238,7 +248,67 @@ delete_me - Request account deletion
 
 Telegram uses long polling locally; no Telegram webhook is required.
 
+## Apple Health export import
+
+Apple Health import is enabled by default. During the baseline-source step,
+choose **Import Apple Health data**, review the privacy notice, choose
+**Continue**, then send the export as a Telegram document. A ZIP sent before
+the notice is accepted is rejected without parsing.
+
+On iPhone, create the file in:
+
+```text
+Health → profile picture → Export All Health Data
+```
+
+The import reads only `Workout`, child `WorkoutStatistics`, and heart-rate
+`Record` elements needed for training analysis. Clinical records and unrelated
+health categories are ignored. It normalizes run, ride, swim, walk/hike,
+strength, and other workouts; preserves the Apple workout type; and converts
+documented duration, distance, energy, and heart-rate units deterministically.
+Unsupported units are omitted with a warning or fail safely when the field is
+required.
+
+Before XML parsing, the service verifies ZIP magic and configured limits,
+rejects traversal/absolute/drive paths, links, encryption, nested archives,
+conflicting duplicate names, and excessive compression. It discovers the
+primary XML by its `HealthData` root, so localized and Unicode paths work.
+Parsing uses two bounded streaming passes on a worker thread. External DTDs,
+entity declarations, network resolution, malformed XML, and unsafe expansion
+are rejected; ordinary internal Apple-style DTD declarations are tolerated.
+
+Heart-rate records are matched by workout overlap with same-source preference.
+Exact and short observations may contribute to averages. Coarse intervals are
+preserved and flagged, may contribute only to a maximum, and never become
+invented samples or exact averages.
+
+Uploaded files use generated temporary paths, never the Telegram filename, and
+are deleted after success or failure by default. Raw ZIP/XML content is not
+stored in PostgreSQL or application logs. Normalized activities, relevant
+heart-rate observations, safe import counters, and baseline versions are
+persisted. Re-importing cumulative exports adds or enriches records without
+duplicating or deleting earlier activities.
+
+Resource ceilings can be adjusted without adding secrets:
+
+```dotenv
+APPLE_HEALTH_IMPORT_ENABLED=true
+APPLE_HEALTH_IMPORT_MAX_COMPRESSED_SIZE_MB=100
+APPLE_HEALTH_IMPORT_MAX_UNCOMPRESSED_SIZE_MB=1024
+APPLE_HEALTH_IMPORT_MAX_ZIP_MEMBERS=100
+APPLE_HEALTH_IMPORT_MAX_COMPRESSION_RATIO=200
+APPLE_HEALTH_IMPORT_TEMP_DIR=
+APPLE_HEALTH_IMPORT_KEEP_ORIGINAL_FILES=false
+```
+
 ## Strava developer application setup
+
+Strava is optional and disabled by default. The application and Telegram bot
+start without Strava credentials. To enable it, set:
+
+```dotenv
+STRAVA_ENABLED=true
+```
 
 Create an application in the
 [Strava API settings](https://www.strava.com/settings/api), then configure:
@@ -256,10 +326,17 @@ https://YOUR-PUBLIC-HOST/integrations/strava/callback
 ```
 
 Configure the matching callback host in the Strava developer application.
-Requesting `activity:read` is sufficient for public/follower activity summaries.
-Use `activity:read_all` only if importing private activities and privacy-zone
-data is an intentional consent choice. The application validates the scopes
-the athlete actually grants.
+The application requests exactly `read` and `activity:read_all`. This provides
+public profile access and read-only access to activity summaries, including
+activities whose visibility is Only You. It does not request profile or
+activity write access. The callback validates both the callback grant and the
+token response before retaining a connection.
+
+Users never provide a Strava username or password to this application. The
+Telegram button opens the backend's one-time connect endpoint, which redirects
+the browser to Strava. Authentication and consent happen directly on Strava.
+The application stores only a digest of each expiring state, consumes it once,
+and encrypts the returned access and refresh tokens before persistence.
 
 The implementation follows Strava's official
 [authentication](https://developers.strava.com/docs/authentication/),
@@ -313,20 +390,25 @@ LLM_MODE=mock
 The API, bot, and deterministic onboarding paths start without an LLM key.
 Mock-mode free text still traverses LangChain and the compiled LangGraph.
 
-For an OpenAI-compatible provider:
+Live mode uses DeepSeek's OpenAI-compatible API:
 
 ```dotenv
 LLM_MODE=live
 LLM_API_KEY=replace-locally
-LLM_BASE_URL=https://provider.example/v1
-LLM_MODEL=provider-economical-model
+LLM_BASE_URL=https://api.deepseek.com
+LLM_MODEL=deepseek-v4-flash
 LLM_MIN_CONFIDENCE=0.75
 LLM_OTHER_REQUESTS_PER_HOUR=10
 ```
 
-Leave `LLM_BASE_URL` empty for a provider that uses the integration default.
-The key is required only when a live free-text parse is attempted. A provider
-failure never confirms or overwrites an onboarding answer.
+The key is required only when a live free-text parse is attempted. Onboarding
+extraction uses LangChain JSON-mode structured output through the same compiled
+LangGraph used by mock mode. DeepSeek thinking is explicitly disabled for these
+requests with `{"thinking": {"type": "disabled"}}`. A provider failure never
+confirms or overwrites an onboarding answer. See DeepSeek's official
+[model](https://api-docs.deepseek.com/quick_start/pricing/) and
+[thinking-mode](https://api-docs.deepseek.com/guides/thinking_mode)
+documentation.
 
 ## Start both processes
 
@@ -353,8 +435,9 @@ cd backend
 python -m app.bot.main
 ```
 
-The API and bot must use the same `DATABASE_URL` and
-`APP_ENCRYPTION_KEY`.
+The API and bot must use the same `DATABASE_URL`, `APP_ENCRYPTION_KEY`,
+`TELEGRAM_BOT_TOKEN`, and `TELEGRAM_BOT_USERNAME`. The API uses the Telegram
+token only to notify the OAuth owner after a successful initial import.
 
 ## Product journey
 
@@ -363,10 +446,17 @@ The API and bot must use the same `DATABASE_URL` and
 3. Complete button-first onboarding.
 4. For an `Other`/`Write answer` path, review the structured interpretation and
    choose `Correct` before it is staged.
-5. Review and confirm the full profile.
-6. Select Strava, manual baseline, calibration, or decide later.
-7. If using Strava, open the opaque one-time connection link and authorize.
-8. Return to Telegram to view sync state, the imported-data summary, and
+5. Choose Apple Health import, manual entry, decide later, or Strava when
+   `STRAVA_ENABLED=true`.
+6. For Apple Health, accept the privacy notice and upload the ZIP document.
+   Review the real import counters, then continue to the profile summary.
+7. Review and confirm the full profile.
+8. If using Strava, open the opaque one-time connection link and authenticate
+   directly on Strava. Never send Strava credentials in Telegram.
+9. After the callback, use **Open Telegram** on the success page. The bot sends
+   the correct Telegram user an English confirmation after the initial import
+   completes.
+10. Return to Telegram to view sync state, the imported-data summary, and
    discipline confidence.
 
 Progress is stored after each confirmed step and survives process restarts.
@@ -412,6 +502,9 @@ calculates numeric baseline metrics.
 
 A new baseline version is generated after initial sync, successful manual sync,
 meaningful webhook changes, or an explicit recalculation.
+Apple Health import also generates a deterministic baseline version after its
+normalized activity transaction succeeds. Insufficient data remains visibly
+unknown rather than being inferred.
 
 ## Testing and static analysis
 
@@ -452,6 +545,10 @@ doubles.
   stored.
 - OAuth state, callbacks, records, activities, baselines, and profile reads are
   ownership-scoped.
+- Apple Health ZIPs and XML are deleted after processing and are never stored
+  as raw database payloads; only matched training observations are retained.
+- Strava usernames and passwords are never requested or accepted in Telegram;
+  credentials are entered only on Strava's authorization page.
 - Disconnect and account deletion both require explicit confirmation.
 
 Review retention, consent, encryption-key management, database backups, tunnel
@@ -464,10 +561,13 @@ cloud deployment is outside this milestone.
   interaction; automated tests do not contact Telegram.
 - Live Strava OAuth and webhook validation require a developer application,
   public HTTPS callback, subscription, and real athlete authorization.
-- `activity:read` deliberately excludes activities with Only Me visibility.
-- Manual-baseline and calibration-period choices are persisted, but their
-  measurement workflows are next-milestone extension points and create no
-  fabricated metrics.
+- `activity:read_all` includes activities with Only You visibility and should
+  be enabled only for athletes who consent to that read-only import.
+- Manual-baseline measurement is a next-milestone extension point and creates
+  no fabricated metrics. Calibration is hidden until a real workflow exists.
+- Automated tests exercise Apple Health document delivery with local fixtures.
+  A real Telegram bot receiving a real Apple Health export was not validated
+  in this environment.
 - Background sync and webhook work uses a durable PostgreSQL inbox/lease with
   startup recovery, not a distributed task queue. Running multiple production
   worker processes would require an explicit deployment review.

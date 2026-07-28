@@ -131,10 +131,9 @@ entry point and its construction tests were in place, preventing ambiguous
   PostgreSQL is therefore exposed on host port 55432 while retaining container
   port 5432; application, Alembic, example environment, and README defaults are
   aligned.
-- Strava's current reference documents `activity:read` for listing logged-in
-  athlete activities; `activity:read_all` is needed only for activities with
-  Only Me visibility. This milestone requests the narrower `activity:read`
-  scope.
+- The original slice requested the narrower `activity:read` scope. The
+  2026-07-28 provider follow-up below intentionally supersedes that decision
+  and requests exactly `read` plus `activity:read_all`.
 
 ## Validation commands
 
@@ -278,3 +277,129 @@ Observed on 2026-07-28:
 - Training planning, adaptive replanning, RAG, embeddings/vector storage,
   dashboards, Mini Apps, payments, nutrition, and medical diagnosis were
   intentionally not implemented.
+
+## Follow-up: DeepSeek defaults and complete Strava OAuth UX
+
+Requested and implemented on 2026-07-28:
+
+- [x] Retain `LLM_MODE=mock` and `LLM_MODE=live` while making DeepSeek V4 Flash
+  the default live OpenAI-compatible provider.
+- [x] Configure LangChain with `https://api.deepseek.com`,
+  `deepseek-v4-flash`, environment-supplied `LLM_API_KEY`, and disabled
+  thinking for onboarding extraction.
+- [x] Keep Pydantic structured output and the existing compiled, stateless
+  LangGraph; switch the live adapter to DeepSeek-supported JSON mode.
+- [x] Confirm through existing use-case coverage that predefined callbacks do
+  not invoke the model.
+- [x] Change Strava authorization to request only `read` and
+  `activity:read_all`, and validate the callback grant before code exchange as
+  well as the authoritative token-response scopes afterward.
+- [x] Keep the opaque backend connect ticket, separate expiring single-use
+  provider state, direct Strava login, and encrypted token persistence.
+- [x] Add an ownership-resolving Telegram notifier after a successful initial
+  import and an **Open Telegram** link to the callback success page.
+- [x] Update focused unit, API, scenario, and end-to-end OAuth tests.
+- [x] Update `.env.example` and README without changing or exposing `.env`.
+- [x] Run and record the complete pytest, Ruff, formatting, mypy, runtime,
+  migration, and secret-review gates.
+
+DeepSeek's current official documentation lists `deepseek-v4-flash` at the
+OpenAI-compatible `https://api.deepseek.com` base URL and documents the
+`extra_body={"thinking": {"type": "disabled"}}` toggle. The live adapter uses
+LangChain `with_structured_output(..., method="json_mode")`; the graph topology
+and deterministic mock adapter are unchanged.
+
+Focused validation after implementation:
+
+- 61 relevant DeepSeek, OAuth, Strava service, API, bot-scenario, and
+  application-service tests passed.
+- Focused Ruff passed.
+- Strict mypy passed for 83 application source files.
+
+Final follow-up validation:
+
+- `pytest -q`: 150 passed in 18.34 seconds.
+- `ruff check .`: passed.
+- `ruff format --check .`: 102 files already formatted.
+- `mypy app`: no issues in 83 source files.
+- Docker PostgreSQL remained healthy on `localhost:55432`;
+  `pg_isready` accepted connections.
+- `alembic upgrade head`, `alembic current`, and `alembic check` passed at
+  `0001_initial (head)` with no schema drift.
+- FastAPI returned `200/ok` from `/health` and `200/ready` from `/ready`; the
+  connect and callback routes remained mounted.
+- Production bot construction still registered nine update handlers and one
+  error handler. Runtime diagnostics showed `LLM_MODE=mock` with the new
+  DeepSeek base URL/model ready for live mode.
+- `.env` remained ignored and untracked. Exact local-value comparison and the
+  high-risk credential-pattern scan both found zero matches outside `.env`;
+  `git diff --check` passed apart from non-failing Windows line-ending notices.
+- Live DeepSeek invocation was not claimed because no DeepSeek key was
+  configured. Live Strava OAuth/import/notification was not claimed because
+  Strava credentials and a public callback were unavailable; the complete flow
+  is covered with provider transports, real repositories, encrypted-token
+  assertions, and an injected Telegram sender.
+
+## Follow-up: Apple Health export onboarding branch
+
+Requested on 2026-07-28:
+
+- [x] Replace the baseline menu with Apple Health import, manual entry, decide
+  later, Back, and feature-flagged Strava; remove the unreal calibration
+  option.
+- [x] Add persisted privacy, waiting, processing, complete, and failed
+  onboarding states without routing deterministic actions through the LLM.
+- [x] Add generated-path Telegram document handling and resumable,
+  ownership-scoped import jobs with one active import per user.
+- [x] Validate ZIP magic and resource ceilings and reject unsafe paths, links,
+  encryption, nested archives, conflicting names, and compression bombs.
+- [x] Discover `HealthData` by XML root and implement two streaming passes for
+  workouts/statistics and heart-rate records with DTD/entity/network
+  protections.
+- [x] Normalize supported units and sports, preserve source types, match heart
+  rate by interval/source, and retain explicit temporal-quality/reliability
+  flags.
+- [x] Upsert canonical activities and relevant heart-rate observations,
+  deduplicate cumulative exports, and persist only safe job metadata/counters.
+- [x] Recalculate and version the deterministic baseline with source
+  `APPLE_HEALTH_EXPORT` in the successful persistence transaction.
+- [x] Make Strava disabled by default, hide its bot entry points, and return a
+  safe disabled response without requiring provider credentials at startup.
+- [x] Add focused parser, ZIP-security, onboarding, handler, persistence,
+  idempotency, cleanup, recovery, migration, and regression tests.
+- [x] Document configuration, privacy behavior, resource limits, and the
+  absence of a live Telegram upload claim.
+- [x] Run final pytest, Ruff, formatting, mypy, PostgreSQL migration/runtime,
+  bot-construction, and secret/personal-file review gates.
+
+Implementation decision: the standard-library expat-backed ElementTree
+streaming parser is wrapped in a prolog scanner that rejects external DTD
+identifiers and all entity declarations before bytes reach the parser. This
+tolerates ordinary internal Apple-style element declarations while preventing
+external retrieval and entity expansion. Both full XML passes run through
+`asyncio.to_thread`; no queue, Redis, raw XML persistence, or LangGraph
+checkpoint was added.
+
+Final Apple Health follow-up validation:
+
+- `pytest -q`: 178 passed in 35.32 seconds.
+- `ruff check .`: passed.
+- `ruff format --check .`: 110 files already formatted.
+- `mypy app`: no issues in 89 application source files.
+- The existing Docker PostgreSQL database upgraded from `0001_initial` to
+  `0002_apple_health_import`; `alembic current` and `alembic check` passed.
+- A disposable empty PostgreSQL database upgraded from zero to head with 20
+  public tables (19 application tables plus `alembic_version`), reported no
+  schema drift, and was then removed. The portable migration test also covers
+  upgrade and downgrade.
+- FastAPI lifespan startup with `STRAVA_ENABLED=false` and no Strava or
+  encryption credentials returned `200/ok` from `/health` and `200/ready` from
+  `/ready`.
+- Bot runtime recovery and construction succeeded with Strava disabled and no
+  Strava credentials: ten update handlers (including documents), one error
+  handler, and Apple Health recovery were registered.
+- `.env` remained ignored and untracked. The tracked-file high-risk key scan
+  found no matches; no ZIP or XML fixtures were present in the repository;
+  `git diff --check` reported only non-failing Windows line-ending notices.
+- No live Telegram upload was claimed. All Apple Health delivery tests used
+  locally generated ZIP/XML data and an injected Telegram download boundary.

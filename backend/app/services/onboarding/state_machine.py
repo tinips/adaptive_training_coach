@@ -580,7 +580,6 @@ class OnboardingStateMachine:
             OnboardingStep.HEALTH_DESCRIPTION: OnboardingStep.COACH_TONE,
             OnboardingStep.COACH_TONE: OnboardingStep.COACH_DETAIL,
             OnboardingStep.COACH_DETAIL: OnboardingStep.BASELINE_SOURCE,
-            OnboardingStep.BASELINE_SOURCE: OnboardingStep.SUMMARY,
         }
         if current_step in fixed_successors:
             return fixed_successors[current_step]
@@ -607,6 +606,13 @@ class OnboardingStateMachine:
             if _has_health_constraints(answers):
                 return OnboardingStep.HEALTH_TIMING
             return OnboardingStep.COACH_TONE
+        if current_step is OnboardingStep.BASELINE_SOURCE:
+            source = answers.get(answer_key(OnboardingStep.BASELINE_SOURCE))
+            return (
+                OnboardingStep.APPLE_HEALTH_PRIVACY_NOTICE
+                if source == BaselineSource.APPLE_HEALTH_EXPORT.value
+                else OnboardingStep.SUMMARY
+            )
         raise OnboardingStateMachineError("unsupported_transition")
 
     @classmethod
@@ -676,6 +682,24 @@ class OnboardingStateMachine:
 
         if current_step is OnboardingStep.CONSENT:
             raise OnboardingStateMachineError("already_at_first_step")
+        if current_step is OnboardingStep.APPLE_HEALTH_PRIVACY_NOTICE:
+            return OnboardingTransition(
+                current_step=OnboardingStep.BASELINE_SOURCE,
+                answers=dict(answers),
+                return_to_summary=return_to_summary,
+            )
+        if current_step is OnboardingStep.APPLE_HEALTH_WAITING_FOR_FILE:
+            return OnboardingTransition(
+                current_step=OnboardingStep.APPLE_HEALTH_PRIVACY_NOTICE,
+                answers=dict(answers),
+                return_to_summary=return_to_summary,
+            )
+        if current_step is OnboardingStep.APPLE_HEALTH_IMPORT_FAILED:
+            return OnboardingTransition(
+                current_step=OnboardingStep.BASELINE_SOURCE,
+                answers=dict(answers),
+                return_to_summary=return_to_summary,
+            )
         if return_to_summary and current_step in _EDIT_STARTS.values():
             return OnboardingTransition(
                 current_step=OnboardingStep.SUMMARY,
@@ -796,10 +820,14 @@ class OnboardingStateMachine:
             OnboardingStep.WEEKEND_DURATION,
             OnboardingStep.HEALTH_DESCRIPTION,
             OnboardingStep.COACH_DETAIL,
-            OnboardingStep.BASELINE_SOURCE,
             OnboardingStep.BIKE_ACCESS,
         }:
             return True
+        if current_step is OnboardingStep.BASELINE_SOURCE:
+            return (
+                answers.get(answer_key(OnboardingStep.BASELINE_SOURCE))
+                != BaselineSource.APPLE_HEALTH_EXPORT.value
+            )
         if current_step is OnboardingStep.EQUIPMENT:
             return not _swimming_relevant(answers) and not _cycling_relevant(answers)
         if current_step is OnboardingStep.POOL_ACCESS:

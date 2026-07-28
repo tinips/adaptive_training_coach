@@ -22,6 +22,7 @@ from app.domain.enums import (
     OnboardingStep,
     UserStatus,
 )
+from app.repositories.baselines import BaselineRepository
 from app.repositories.onboarding import OnboardingRepository
 from app.repositories.profiles import (
     AvailabilityRuleInput,
@@ -87,6 +88,12 @@ class ProfileService:
                 answers = FinalOnboardingAnswers.model_validate(onboarding.answers)
             except ValidationError as exc:
                 raise IncompleteProfileError from exc
+            if (
+                answers.baseline_source is BaselineSource.APPLE_HEALTH_EXPORT
+                and await BaselineRepository(session).get_latest(user_id=user_id)
+                is None
+            ):
+                raise IncompleteProfileError
 
             bundle = await profile_repository.finalize_profile(
                 user_id=user_id,
@@ -313,6 +320,8 @@ class ProfileService:
     ) -> BaselinePreferenceStatus:
         if source is BaselineSource.STRAVA:
             return BaselinePreferenceStatus.PENDING
+        if source is BaselineSource.APPLE_HEALTH_EXPORT:
+            return BaselinePreferenceStatus.READY
         if source in {BaselineSource.MANUAL, BaselineSource.CALIBRATION}:
             return BaselinePreferenceStatus.NOT_IMPLEMENTED
         return BaselinePreferenceStatus.SELECTED
@@ -321,6 +330,8 @@ class ProfileService:
     def _user_status(source: BaselineSource) -> UserStatus:
         if source is BaselineSource.STRAVA:
             return UserStatus.BASELINE_PENDING
+        if source is BaselineSource.APPLE_HEALTH_EXPORT:
+            return UserStatus.BASELINE_READY
         return UserStatus.PROFILE_COMPLETED
 
     @classmethod

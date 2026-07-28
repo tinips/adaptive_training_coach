@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
@@ -132,3 +133,66 @@ async def test_global_error_handler_sends_neutral_message() -> None:
         reply_markup=None,
     )
     assert "sensitive detail" not in messages.GENERIC_ERROR
+
+
+@pytest.mark.asyncio
+async def test_document_handler_delegates_metadata_download_and_progress(
+    tmp_path: Path,
+) -> None:
+    status_message = SimpleNamespace(edit_text=AsyncMock())
+    telegram_file = SimpleNamespace(download_to_drive=AsyncMock())
+    document = SimpleNamespace(
+        file_id="telegram-file",
+        file_unique_id="telegram-unique",
+        file_name="../../Health Export.zip",
+        file_size=1234,
+        get_file=AsyncMock(return_value=telegram_file),
+    )
+    message = SimpleNamespace(
+        document=document,
+        reply_text=AsyncMock(return_value=status_message),
+    )
+    update = SimpleNamespace(
+        update_id=987,
+        effective_user=SimpleNamespace(
+            id=8172,
+            username="runner",
+            first_name="Ada",
+            language_code="en",
+        ),
+        effective_message=message,
+        callback_query=None,
+    )
+
+    async def handle_document(
+        identity: TelegramIdentity,
+        metadata: object,
+        download: object,
+        progress: object,
+    ) -> TelegramResponse:
+        del identity, metadata
+        destination = tmp_path / "generated.zip"
+        await download(destination)  # type: ignore[operator]
+        await progress("reading_workouts")  # type: ignore[operator]
+        return TelegramResponse("complete")
+
+    service = SimpleNamespace(handle_document=AsyncMock(side_effect=handle_document))
+
+    await handlers.document_handler(
+        cast(Update, update),
+        cast(ContextTypes.DEFAULT_TYPE, _context(service)),
+    )
+
+    metadata = service.handle_document.await_args.args[1]
+    assert metadata.display_filename == "../../Health Export.zip"
+    assert metadata.update_id == 987
+    telegram_file.download_to_drive.assert_awaited_once_with(
+        custom_path=tmp_path / "generated.zip"
+    )
+    status_message.edit_text.assert_any_await(
+        messages.APPLE_HEALTH_PROGRESS["reading_workouts"]
+    )
+    status_message.edit_text.assert_awaited_with(
+        "complete",
+        reply_markup=None,
+    )

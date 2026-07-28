@@ -123,9 +123,14 @@ class OAuthRepositoryFake:
 
 
 class OAuthClientFake:
-    def __init__(self, *, granted_scope: str = "activity:read") -> None:
+    def __init__(
+        self,
+        *,
+        granted_scope: str = "read,activity:read_all",
+    ) -> None:
         self.granted_scope = granted_scope
         self.revoked = False
+        self.exchanged = False
 
     def authorization_url(
         self,
@@ -139,6 +144,7 @@ class OAuthClientFake:
 
     async def exchange_code(self, code: str) -> StravaTokenResponse:
         assert code == "authorization-code"
+        self.exchanged = True
         return StravaTokenResponse(
             access_token="access-token",
             refresh_token="refresh-token",
@@ -179,10 +185,11 @@ async def test_oauth_state_is_hashed_expiring_owned_and_single_use() -> None:
 
     assert raw_state not in repository.states
     assert str(user_id) not in initiation.authorization_url
-    assert parse_qs(urlparse(initiation.authorization_url).query)["scope"] == [
-        "activity:read"
-    ]
-    assert "read_all" not in initiation.authorization_url
+    requested_scopes = parse_qs(urlparse(initiation.authorization_url).query)["scope"][
+        0
+    ].split(",")
+    assert set(requested_scopes) == {"read", "activity:read_all"}
+    assert len(requested_scopes) == 2
     assert len(repository.states) == 1
     with pytest.raises(OAuthStateRejectedError):
         await service.complete(
@@ -246,10 +253,10 @@ async def test_expired_denied_and_missing_scope_callbacks_are_rejected() -> None
             error="access_denied",
         )
 
-    insufficient_client = OAuthClientFake(granted_scope="read")
+    callback_scope_client = OAuthClientFake()
     service = StravaOAuthService(
         repository=repository,  # type: ignore[arg-type]
-        client=insufficient_client,  # type: ignore[arg-type]
+        client=callback_scope_client,  # type: ignore[arg-type]
         cipher=TokenCipher(TokenCipher.generate_key()),
         clock=lambda: NOW,
     )
@@ -260,7 +267,24 @@ async def test_expired_denied_and_missing_scope_callbacks_are_rejected() -> None
             code="authorization-code",
             accepted_scope="read",
         )
-    assert caught.value.missing_scopes == frozenset({"activity:read"})
+    assert caught.value.missing_scopes == frozenset({"activity:read_all"})
+    assert not callback_scope_client.exchanged
+
+    insufficient_client = OAuthClientFake(granted_scope="read")
+    service = StravaOAuthService(
+        repository=repository,  # type: ignore[arg-type]
+        client=insufficient_client,  # type: ignore[arg-type]
+        cipher=TokenCipher(TokenCipher.generate_key()),
+        clock=lambda: NOW,
+    )
+    insufficient_token = await service.begin(user_id=uuid4())
+    with pytest.raises(OAuthScopeError) as caught:
+        await service.complete(
+            raw_state=raw_state_from_url(insufficient_token.authorization_url),
+            code="authorization-code",
+            accepted_scope="read,activity:read_all",
+        )
+    assert caught.value.missing_scopes == frozenset({"activity:read_all"})
     assert insufficient_client.revoked
 
 

@@ -519,6 +519,74 @@ class OnboardingService:
             )
             return self._result(user, onboarding)
 
+    async def apple_action(
+        self,
+        identity: TelegramIdentity,
+        action: str,
+    ) -> OnboardingServiceResult:
+        """Apply a deterministic Apple Health onboarding transition."""
+
+        async with self._session_factory.begin() as session:
+            user, onboarding = await self._locked_state(session, identity)
+            self._require_active(onboarding)
+            self._require_no_pending(onboarding)
+            current = onboarding.current_step
+            transitions = {
+                (
+                    OnboardingStep.APPLE_HEALTH_PRIVACY_NOTICE,
+                    "continue",
+                ): OnboardingStep.APPLE_HEALTH_WAITING_FOR_FILE,
+                (
+                    OnboardingStep.APPLE_HEALTH_PRIVACY_NOTICE,
+                    "back",
+                ): OnboardingStep.BASELINE_SOURCE,
+                (
+                    OnboardingStep.APPLE_HEALTH_WAITING_FOR_FILE,
+                    "back",
+                ): OnboardingStep.APPLE_HEALTH_PRIVACY_NOTICE,
+                (
+                    OnboardingStep.APPLE_HEALTH_WAITING_FOR_FILE,
+                    "cancel",
+                ): OnboardingStep.BASELINE_SOURCE,
+                (
+                    OnboardingStep.APPLE_HEALTH_IMPORT_FAILED,
+                    "retry",
+                ): OnboardingStep.APPLE_HEALTH_WAITING_FOR_FILE,
+                (
+                    OnboardingStep.APPLE_HEALTH_IMPORT_FAILED,
+                    "back",
+                ): OnboardingStep.BASELINE_SOURCE,
+                (
+                    OnboardingStep.APPLE_HEALTH_IMPORT_COMPLETE,
+                    "continue",
+                ): OnboardingStep.SUMMARY,
+            }
+            next_step: OnboardingStep | None
+            if action == "choose_other" and current in {
+                OnboardingStep.APPLE_HEALTH_PRIVACY_NOTICE,
+                OnboardingStep.APPLE_HEALTH_WAITING_FOR_FILE,
+                OnboardingStep.APPLE_HEALTH_IMPORT_FAILED,
+            }:
+                next_step = OnboardingStep.BASELINE_SOURCE
+            else:
+                next_step = transitions.get((current, action))
+            if next_step is None:
+                raise OnboardingApplicationError("invalid_action")
+            answers = self._answers(onboarding)
+            if next_step is OnboardingStep.BASELINE_SOURCE:
+                answers.pop(answer_key(OnboardingStep.BASELINE_SOURCE), None)
+            onboarding = await OnboardingRepository(session).save_progress(
+                user_id=user.id,
+                current_step=next_step,
+                answers=cast(dict[str, object], answers),
+                return_to_summary=(
+                    False
+                    if next_step is OnboardingStep.SUMMARY
+                    else onboarding.return_to_summary
+                ),
+            )
+            return self._result(user, onboarding)
+
     async def cancel(
         self,
         identity: TelegramIdentity,

@@ -492,3 +492,45 @@ async def test_completed_onboarding_rejects_cancel_restart_and_back_replays(
     snapshot = await service.snapshot(athlete)
     assert snapshot.kind == "completed"
     assert snapshot.current_step is OnboardingStep.SUMMARY
+
+
+@pytest.mark.asyncio
+async def test_apple_health_buttons_persist_branch_without_invoking_parser(
+    onboarding_database: tuple[
+        AsyncEngine,
+        async_sessionmaker[AsyncSession],
+    ],
+) -> None:
+    _, factory = onboarding_database
+    parser = unused_parser()
+    service = OnboardingService(
+        session_factory=factory,
+        text_parser=parser,
+        settings=settings(),
+    )
+    athlete = identity(4014)
+    started = await service.start(athlete)
+    async with factory.begin() as session:
+        await OnboardingRepository(session).save_progress(
+            user_id=started.user_id,
+            current_step=OnboardingStep.BASELINE_SOURCE,
+            answers={},
+        )
+
+    privacy = await service.choose(
+        athlete,
+        "APPLE_HEALTH_EXPORT",
+        expected_step=OnboardingStep.BASELINE_SOURCE,
+    )
+    waiting = await service.apple_action(athlete, "continue")
+    back = await service.apple_action(athlete, "back")
+    waiting_again = await service.apple_action(athlete, "continue")
+    cancelled = await service.apple_action(athlete, "cancel")
+
+    assert privacy.current_step is OnboardingStep.APPLE_HEALTH_PRIVACY_NOTICE
+    assert waiting.current_step is OnboardingStep.APPLE_HEALTH_WAITING_FOR_FILE
+    assert back.current_step is OnboardingStep.APPLE_HEALTH_PRIVACY_NOTICE
+    assert waiting_again.current_step is OnboardingStep.APPLE_HEALTH_WAITING_FOR_FILE
+    assert cancelled.current_step is OnboardingStep.BASELINE_SOURCE
+    assert "baseline_source" not in cancelled.answers
+    assert parser.calls == 0

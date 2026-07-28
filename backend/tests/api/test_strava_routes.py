@@ -9,8 +9,9 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
-from app.api.dependencies import get_strava_coordinator
+from app.api.dependencies import get_runtime_settings, get_strava_coordinator
 from app.api.routes.strava import router
+from app.config import Settings
 from app.schemas.strava import StravaWebhookEvent
 from app.services.strava.exceptions import (
     OAuthAuthorizationDeniedError,
@@ -27,6 +28,7 @@ class CoordinatorFake:
     def __init__(self) -> None:
         self.begin_tickets: list[str] = []
         self.callback_states: list[str] = []
+        self.callback_values: list[tuple[str | None, str | None, str | None]] = []
         self.synced_users: list[UUID] = []
         self.processed_events: list[UUID] = []
         self.begin_error: Exception | None = None
@@ -54,8 +56,8 @@ class CoordinatorFake:
         accepted_scope: str | None,
         error: str | None,
     ) -> OAuthCompletion:
-        del code, accepted_scope, error
         self.callback_states.append(raw_state)
+        self.callback_values.append((code, accepted_scope, error))
         if self.callback_error is not None:
             raise self.callback_error
         return OAuthCompletion(
@@ -105,6 +107,12 @@ def app_and_coordinator() -> tuple[FastAPI, CoordinatorFake]:
     application.include_router(router)
     coordinator = CoordinatorFake()
     application.dependency_overrides[get_strava_coordinator] = lambda: coordinator
+    application.dependency_overrides[get_runtime_settings] = lambda: Settings(
+        environment="test",
+        strava_enabled=True,
+        database_url="sqlite+aiosqlite:///:memory:",
+        telegram_bot_username="adaptive_coach_test_bot",
+    )
     return application, coordinator
 
 
@@ -174,7 +182,12 @@ async def test_callback_saves_then_requests_background_initial_sync(
     expected_user = UUID("11111111-1111-1111-1111-111111111111")
     assert response.status_code == 200
     assert "Strava connected" in response.text
+    assert "Open Telegram" in response.text
+    assert 'href="https://t.me/adaptive_coach_test_bot"' in response.text
     assert coordinator.callback_states == ["provider-state"]
+    assert coordinator.callback_values == [
+        ("authorization-code", "read,activity:read_all", None)
+    ]
     assert coordinator.synced_users == [expected_user]
 
 

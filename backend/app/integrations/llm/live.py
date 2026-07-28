@@ -59,6 +59,7 @@ class OpenAICompatibleOnboardingModel:
             temperature=0,
             timeout=self._timeout_seconds,
             max_retries=1,
+            extra_body={"thinking": {"type": "disabled"}},
         )
         return self._chat_model
 
@@ -72,7 +73,11 @@ class OpenAICompatibleOnboardingModel:
     ) -> StructuredModelResponse:
         del step
         model = self._get_chat_model()
-        runnable = model.with_structured_output(schema, include_raw=True)
+        runnable = model.with_structured_output(
+            schema,
+            method="json_mode",
+            include_raw=True,
+        )
         result = await runnable.ainvoke(messages, config=config)
         if isinstance(result, BaseModel):
             return StructuredModelResponse(output=result)

@@ -79,7 +79,12 @@ def test_every_callback_value_fits_telegram_limit() -> None:
 
 def test_state_aware_menu_exposes_only_valid_import_actions() -> None:
     labels = _button_labels(
-        keyboards.state_menu("importing", connected=True, syncing=True)
+        keyboards.state_menu(
+            "importing",
+            connected=True,
+            syncing=True,
+            strava_enabled=True,
+        )
     )
 
     assert labels == ["View sync status", "View profile", "Help"]
@@ -87,7 +92,13 @@ def test_state_aware_menu_exposes_only_valid_import_actions() -> None:
 
 
 def test_ready_disconnected_menu_offers_reconnect_without_sync_actions() -> None:
-    labels = _button_labels(keyboards.state_menu("ready", connected=False))
+    labels = _button_labels(
+        keyboards.state_menu(
+            "ready",
+            connected=False,
+            strava_enabled=True,
+        )
+    )
 
     assert labels == [
         "Reconnect Strava",
@@ -97,6 +108,34 @@ def test_ready_disconnected_menu_offers_reconnect_without_sync_actions() -> None
     ]
     assert "Sync now" not in labels
     assert "Recalculate baseline" not in labels
+
+
+def test_baseline_keyboard_respects_flags_and_has_no_calibration() -> None:
+    disabled = _button_labels(
+        keyboards.keyboard_for_step(
+            OnboardingStep.BASELINE_SOURCE,
+            {},
+            strava_enabled=False,
+            apple_health_enabled=True,
+        )
+    )
+    enabled = _button_labels(
+        keyboards.keyboard_for_step(
+            OnboardingStep.BASELINE_SOURCE,
+            {},
+            strava_enabled=True,
+            apple_health_enabled=True,
+        )
+    )
+
+    assert disabled[:3] == [
+        "Import Apple Health data",
+        "Enter baseline manually",
+        "Decide later",
+    ]
+    assert "Connect Strava" not in disabled
+    assert enabled[0] == "Connect Strava"
+    assert "Calibration period" not in enabled
 
 
 def test_manual_sync_outcome_copy_covers_every_terminal_and_active_state() -> None:

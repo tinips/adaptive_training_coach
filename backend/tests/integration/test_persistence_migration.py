@@ -39,11 +39,18 @@ def test_initial_migration_upgrade_and_downgrade(
             "WHERE type = 'index' "
             "AND name = 'uq_strava_sync_jobs_active_user'",
         ).fetchone()
+        active_apple_index = connection.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'index' "
+            "AND name = 'uq_apple_health_import_jobs_active_user'",
+        ).fetchone()
 
-    assert revision == ("0001_initial",)
-    assert len(tables - {"alembic_version"}) == 17
+    assert revision == ("0002_apple_health_import",)
+    assert len(tables - {"alembic_version"}) == 19
     assert active_sync_index is not None
     assert "WHERE status IN" in active_sync_index[0]
+    assert active_apple_index is not None
+    assert "WHERE status IN" in active_apple_index[0]
 
     command.downgrade(configuration, "base")
     with sqlite3.connect(database_path) as connection:
