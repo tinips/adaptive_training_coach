@@ -1,0 +1,30 @@
+"""Single construction point for mock and live onboarding model adapters."""
+
+from __future__ import annotations
+
+from app.config import Settings
+from app.integrations.llm.live import OpenAICompatibleOnboardingModel
+from app.integrations.llm.mock import (
+    DeterministicFakeOnboardingModel,
+    FakeLLMScenario,
+)
+from app.integrations.llm.models import StructuredOnboardingModel
+
+
+def create_onboarding_text_model(
+    settings: Settings,
+    *,
+    fake_scenario: FakeLLMScenario = FakeLLMScenario.AUTO,
+) -> StructuredOnboardingModel:
+    """Create one model adapter without constructing workflow topology."""
+
+    if settings.llm_mode == "mock":
+        return DeterministicFakeOnboardingModel(
+            scenario=fake_scenario,
+            model_name=settings.llm_model,
+        )
+    return OpenAICompatibleOnboardingModel(
+        api_key=settings.llm_api_key,
+        base_url=settings.llm_base_url or None,
+        model_name=settings.llm_model,
+    )
