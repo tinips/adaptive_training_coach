@@ -174,6 +174,79 @@ async def test_complete_deterministic_onboarding_and_resume_after_restart(
 
 
 @pytest.mark.asyncio
+async def test_file_import_waiting_resumes_from_persisted_state_after_restart(
+    onboarding_database: tuple[
+        AsyncEngine,
+        async_sessionmaker[AsyncSession],
+    ],
+) -> None:
+    _, factory = onboarding_database
+    parser = unused_parser()
+    service = OnboardingService(
+        session_factory=factory,
+        text_parser=parser,
+        settings=settings(),
+    )
+    athlete = identity(4015)
+    started = await service.start(athlete)
+    async with factory.begin() as session:
+        await OnboardingRepository(session).save_progress(
+            user_id=started.user_id,
+            current_step=OnboardingStep.BASELINE_SOURCE,
+            answers={},
+        )
+
+    waiting = await service.choose(
+        athlete,
+        "FILE_IMPORT",
+        expected_step=OnboardingStep.BASELINE_SOURCE,
+    )
+
+    assert waiting.current_step is OnboardingStep.FILE_IMPORT_WAITING
+    assert waiting.answers["baseline_source"] == "FILE_IMPORT"
+
+    restarted_service = OnboardingService(
+        session_factory=factory,
+        text_parser=parser,
+        settings=settings(),
+    )
+    resumed = await restarted_service.start(athlete)
+
+    assert resumed.current_step is OnboardingStep.FILE_IMPORT_WAITING
+    assert resumed.answers == waiting.answers
+    assert parser.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_processing_import_back_recovers_to_baseline_choice(
+    onboarding_database: tuple[
+        AsyncEngine,
+        async_sessionmaker[AsyncSession],
+    ],
+) -> None:
+    _, factory = onboarding_database
+    parser = unused_parser()
+    service = OnboardingService(
+        session_factory=factory,
+        text_parser=parser,
+        settings=settings(),
+    )
+    athlete = identity(4016)
+    started = await service.start(athlete)
+    async with factory.begin() as session:
+        await OnboardingRepository(session).save_progress(
+            user_id=started.user_id,
+            current_step=OnboardingStep.FILE_IMPORT_PROCESSING,
+            answers={"baseline_source": "FILE_IMPORT"},
+        )
+
+    recovered = await service.apple_action(athlete, "back")
+
+    assert recovered.current_step is OnboardingStep.BASELINE_SOURCE
+    assert "baseline_source" not in recovered.answers
+
+
+@pytest.mark.asyncio
 async def test_free_text_uses_graph_and_requires_confirmation_before_answer(
     onboarding_database: tuple[
         AsyncEngine,

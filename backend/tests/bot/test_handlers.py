@@ -73,6 +73,32 @@ async def test_start_handler_delegates_identity_to_service() -> None:
 
 
 @pytest.mark.asyncio
+async def test_add_workout_handler_delegates_identity_to_service() -> None:
+    service = SimpleNamespace(
+        add_workout=AsyncMock(return_value=TelegramResponse("send a file")),
+    )
+    update = _update()
+
+    await handlers.add_workout_handler(
+        cast(Update, update),
+        cast(ContextTypes.DEFAULT_TYPE, _context(service)),
+    )
+
+    service.add_workout.assert_awaited_once_with(
+        TelegramIdentity(
+            telegram_user_id=8172,
+            telegram_username="runner",
+            first_name="Ada",
+            language_code="es",
+        )
+    )
+    update.effective_message.reply_text.assert_awaited_once_with(
+        "send a file",
+        reply_markup=None,
+    )
+
+
+@pytest.mark.asyncio
 async def test_callback_handler_acknowledges_and_delegates_action() -> None:
     service = SimpleNamespace(
         handle_callback=AsyncMock(
@@ -136,15 +162,24 @@ async def test_global_error_handler_sends_neutral_message() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("supplied_filename", "expected_hint"),
+    [
+        ("../../Health Export.zip", "../../Health Export.zip"),
+        (None, "training-file"),
+    ],
+)
 async def test_document_handler_delegates_metadata_download_and_progress(
     tmp_path: Path,
+    supplied_filename: str | None,
+    expected_hint: str,
 ) -> None:
     status_message = SimpleNamespace(edit_text=AsyncMock())
     telegram_file = SimpleNamespace(download_to_drive=AsyncMock())
     document = SimpleNamespace(
         file_id="telegram-file",
         file_unique_id="telegram-unique",
-        file_name="../../Health Export.zip",
+        file_name=supplied_filename,
         file_size=1234,
         get_file=AsyncMock(return_value=telegram_file),
     )
@@ -173,7 +208,8 @@ async def test_document_handler_delegates_metadata_download_and_progress(
         del identity, metadata
         destination = tmp_path / "generated.zip"
         await download(destination)  # type: ignore[operator]
-        await progress("reading_workouts")  # type: ignore[operator]
+        await progress("detecting_format")  # type: ignore[operator]
+        await progress("not_a_real_stage")  # type: ignore[operator]
         return TelegramResponse("complete")
 
     service = SimpleNamespace(handle_document=AsyncMock(side_effect=handle_document))
@@ -184,13 +220,16 @@ async def test_document_handler_delegates_metadata_download_and_progress(
     )
 
     metadata = service.handle_document.await_args.args[1]
-    assert metadata.display_filename == "../../Health Export.zip"
+    assert metadata.display_filename == expected_hint
     assert metadata.update_id == 987
+    message.reply_text.assert_awaited_once_with(
+        messages.TRAINING_FILE_PROGRESS["validating_file"]
+    )
     telegram_file.download_to_drive.assert_awaited_once_with(
         custom_path=tmp_path / "generated.zip"
     )
     status_message.edit_text.assert_any_await(
-        messages.APPLE_HEALTH_PROGRESS["reading_workouts"]
+        messages.TRAINING_FILE_PROGRESS["detecting_format"]
     )
     status_message.edit_text.assert_awaited_with(
         "complete",

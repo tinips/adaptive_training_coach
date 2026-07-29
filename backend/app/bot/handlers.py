@@ -50,6 +50,13 @@ async def baseline_handler(
     await _delegate(update, context, "baseline")
 
 
+async def add_workout_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    await _delegate(update, context, "add_workout")
+
+
 async def strava_handler(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -110,7 +117,7 @@ async def document_handler(
     if message is None or identity is None or document is None:
         return
     status_message = await message.reply_text(
-        messages.APPLE_HEALTH_PROGRESS["validating_archive"]
+        messages.TRAINING_FILE_PROGRESS["validating_file"]
     )
 
     async def download(destination: Path) -> None:
@@ -118,7 +125,7 @@ async def document_handler(
         await telegram_file.download_to_drive(custom_path=destination)
 
     async def progress(stage: str) -> None:
-        text = messages.APPLE_HEALTH_PROGRESS.get(stage)
+        text = messages.TRAINING_FILE_PROGRESS.get(stage)
         if text is None:
             return
         try:
@@ -132,7 +139,7 @@ async def document_handler(
         TelegramDocumentUpload(
             file_id=document.file_id,
             file_unique_id=document.file_unique_id,
-            display_filename=document.file_name or "Apple Health export.zip",
+            display_filename=document.file_name or "training-file",
             file_size=document.file_size,
             update_id=update.update_id,
         ),

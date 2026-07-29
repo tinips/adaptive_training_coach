@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 import stat
 import unicodedata
@@ -79,6 +80,10 @@ class _SecureXMLReader:
         # prevents an accidental consumer from turning read(-1) into a full
         # in-memory XML load.
         chunk = self._stream.read(65_536 if size < 0 else size)
+        if b"\x00" in chunk:
+            # Reject multibyte XML encodings rather than let their NUL-padded
+            # declarations bypass the byte-level DTD/entity policy.
+            raise AppleHealthParserError("unsafe_xml_encoding")
         if self._prolog and chunk:
             combined = self._tail + chunk
             upper = combined.upper()
@@ -440,7 +445,7 @@ class AppleHealthParser:
             value = float(_required(attributes, "value"))
         except ValueError:
             return None
-        if value <= 0:
+        if not math.isfinite(value) or value <= 0:
             return None
         started_at = _parse_datetime(_required(attributes, "startDate"))
         ended_at = _parse_datetime(_required(attributes, "endDate"))
@@ -507,6 +512,8 @@ def _duration_seconds(value: str, unit: str) -> int:
         numeric = float(value)
     except ValueError as exc:
         raise AppleHealthParserError("invalid_workout_duration") from exc
+    if not math.isfinite(numeric):
+        raise AppleHealthParserError("invalid_workout_duration")
     factors = {
         "s": 1.0,
         "sec": 1.0,
@@ -543,6 +550,9 @@ def _optional_quantity(
     except ValueError:
         warnings.append(f"invalid_{kind}_value")
         return None
+    if not math.isfinite(numeric):
+        warnings.append(f"invalid_{kind}_value")
+        return None
     normalized_unit = (unit or "").strip().casefold()
     factors = {
         "distance": {
@@ -567,7 +577,7 @@ def _optional_quantity(
         warnings.append(f"unsupported_{kind}_unit")
         return None
     normalized = numeric * factor
-    if normalized < 0:
+    if not math.isfinite(normalized) or normalized < 0:
         warnings.append(f"invalid_{kind}_value")
         return None
     return normalized

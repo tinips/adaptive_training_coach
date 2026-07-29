@@ -35,7 +35,7 @@ def parser(
 
 def write_archive(
     path: Path,
-    xml: str,
+    xml: str | bytes,
     *,
     name: str = "健康資料/健康匯出.xml",
 ) -> None:
@@ -312,6 +312,51 @@ def test_rejects_external_dtd_and_entity_declarations(
 
     with pytest.raises(AppleHealthParserError, match=error_code):
         parser().validate(archive)
+
+
+def test_rejects_utf16_before_entity_declarations_can_bypass_scanning(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "unsafe-utf16.zip"
+    xml = (
+        '<?xml version="1.0" encoding="UTF-16"?>'
+        '<!DOCTYPE HealthData [<!ENTITY x "expanded">]>'
+        "<HealthData><Workout>&x;</Workout></HealthData>"
+    )
+    write_archive(archive, xml.encode("utf-16"))
+
+    with pytest.raises(AppleHealthParserError, match="unsafe_xml_encoding"):
+        parser().validate(archive)
+
+
+def test_nonfinite_quantities_are_rejected_or_left_unavailable(
+    tmp_path: Path,
+) -> None:
+    invalid_duration = tmp_path / "invalid-duration.zip"
+    write_archive(
+        invalid_duration,
+        complete_xml().replace('duration="1"', 'duration="Infinity"'),
+    )
+    with pytest.raises(AppleHealthParserError, match="invalid_workout_duration"):
+        parser().parse(invalid_duration)
+
+    invalid_optional = tmp_path / "invalid-optional.zip"
+    xml = (
+        complete_xml()
+        .replace('totalDistance="3.1"', 'totalDistance="NaN"')
+        .replace('sum="5"', 'sum="NaN"')
+        .replace('totalEnergyBurned="418.4"', 'totalEnergyBurned="Infinity"')
+        .replace('value="150"', 'value="Infinity"')
+    )
+    write_archive(invalid_optional, xml)
+
+    result = parser().parse(invalid_optional)
+
+    assert result.workouts[0].distance_meters is None
+    assert result.workouts[0].calories_kcal is None
+    assert result.heart_rate_records_matched == 0
+    assert "invalid_distance_value" in result.warnings
+    assert "invalid_energy_value" in result.warnings
 
 
 def test_rejects_unsupported_duration_unit_without_guessing(

@@ -47,7 +47,9 @@ from app.domain.enums import (
     DayOfWeek,
     DetailLevel,
     Discipline,
+    DiscomfortSeverity,
     GoalPriority,
+    HeartRateSource,
     HeartRateTemporalQuality,
     LevelLabel,
     LLMUsageStatus,
@@ -57,10 +59,13 @@ from app.domain.enums import (
     PrimarySport,
     SyncStatus,
     SyncType,
+    TrainingFileFormat,
+    TrainingImportContext,
     UserStatus,
     WebhookAspectType,
     WebhookObjectType,
     WebhookProcessingStatus,
+    WorkoutFlowStep,
 )
 
 
@@ -279,6 +284,25 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
         lazy="raise",
+    )
+    activity_source_links: Mapped[list[ActivitySourceLink]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="raise",
+    )
+    activity_feedback: Mapped[list[ActivityFeedback]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="raise",
+    )
+    workout_flow_session: Mapped[WorkoutFlowSession | None] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="raise",
+        uselist=False,
     )
     heart_rate_observations: Mapped[list[HeartRateObservation]] = relationship(
         back_populates="user",
@@ -768,6 +792,10 @@ class Activity(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "elevation_gain_meters IS NULL OR elevation_gain_meters >= 0",
             name="elevation_nonnegative",
         ),
+        CheckConstraint(
+            "average_cadence IS NULL OR average_cadence >= 0",
+            name="average_cadence_nonnegative",
+        ),
     )
 
     user_id: Mapped[uuid.UUID] = mapped_column(
@@ -810,6 +838,16 @@ class Activity(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         Float,
         nullable=True,
     )
+    average_heart_rate_source: Mapped[HeartRateSource] = mapped_column(
+        persisted_enum(
+            HeartRateSource,
+            name="heart_rate_source",
+            length=24,
+        ),
+        default=HeartRateSource.UNAVAILABLE,
+        server_default=HeartRateSource.UNAVAILABLE.value,
+        nullable=False,
+    )
     max_heart_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
     heart_rate_sample_count: Mapped[int] = mapped_column(
         Integer,
@@ -832,6 +870,11 @@ class Activity(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         default=False,
         server_default=text("false"),
         nullable=False,
+    )
+    average_cadence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    route_points: Mapped[list[dict[str, object]] | None] = mapped_column(
+        json_document(),
+        nullable=True,
     )
     average_speed: Mapped[float | None] = mapped_column(Float, nullable=True)
     average_watts: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -869,6 +912,29 @@ class Activity(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         passive_deletes=True,
         lazy="raise",
     )
+    source_links: Mapped[list[ActivitySourceLink]] = relationship(
+        back_populates="activity",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="raise",
+    )
+    feedback: Mapped[ActivityFeedback | None] = relationship(
+        back_populates="activity",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="raise",
+        uselist=False,
+    )
+    workout_flow_sessions: Mapped[list[WorkoutFlowSession]] = relationship(
+        back_populates="activity",
+        passive_deletes=True,
+        lazy="raise",
+    )
+    import_jobs: Mapped[list[AppleHealthImportJob]] = relationship(
+        back_populates="activity",
+        passive_deletes=True,
+        lazy="raise",
+    )
 
 
 class AppleHealthImportJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -888,6 +954,11 @@ class AppleHealthImportJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "user_id",
             "created_at",
         ),
+        Index(
+            "ix_apple_health_import_jobs_user_file_sha256",
+            "user_id",
+            "file_sha256",
+        ),
     )
 
     user_id: Mapped[uuid.UUID] = mapped_column(
@@ -895,10 +966,15 @@ class AppleHealthImportJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
     )
-    onboarding_session_id: Mapped[uuid.UUID] = mapped_column(
+    onboarding_session_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True),
-        ForeignKey("onboarding_sessions.id", ondelete="CASCADE"),
-        nullable=False,
+        ForeignKey("onboarding_sessions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    activity_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("activities.id", ondelete="SET NULL"),
+        nullable=True,
     )
     telegram_update_id: Mapped[int | None] = mapped_column(
         BigInteger,
@@ -910,7 +986,31 @@ class AppleHealthImportJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         nullable=False,
     )
     display_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    temporary_path: Mapped[str | None] = mapped_column(
+        String(1024),
+        nullable=True,
+    )
     file_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    file_format: Mapped[TrainingFileFormat] = mapped_column(
+        persisted_enum(
+            TrainingFileFormat,
+            name="training_file_format",
+            length=24,
+        ),
+        default=TrainingFileFormat.APPLE_HEALTH_ZIP,
+        server_default=TrainingFileFormat.APPLE_HEALTH_ZIP.value,
+        nullable=False,
+    )
+    context: Mapped[TrainingImportContext] = mapped_column(
+        persisted_enum(
+            TrainingImportContext,
+            name="training_import_context",
+            length=16,
+        ),
+        default=TrainingImportContext.ONBOARDING,
+        server_default=TrainingImportContext.ONBOARDING.value,
+        nullable=False,
+    )
     status: Mapped[AppleHealthImportStatus] = mapped_column(
         persisted_enum(
             AppleHealthImportStatus,
@@ -972,6 +1072,218 @@ class AppleHealthImportJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     user: Mapped[User] = relationship(
         back_populates="apple_health_import_jobs",
+        lazy="raise",
+    )
+    activity: Mapped[Activity | None] = relationship(
+        back_populates="import_jobs",
+        lazy="raise",
+    )
+    source_links: Mapped[list[ActivitySourceLink]] = relationship(
+        back_populates="import_job",
+        passive_deletes=True,
+        lazy="raise",
+    )
+
+
+class ActivitySourceLink(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """One owner-scoped provider key linked to a canonical activity."""
+
+    __tablename__ = "activity_source_links"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "source",
+            "external_id",
+            name="uq_activity_source_links_user_source_external_id",
+        ),
+        Index(
+            "ix_activity_source_links_activity_id",
+            "activity_id",
+        ),
+    )
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    activity_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("activities.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    source: Mapped[ActivitySource] = mapped_column(
+        persisted_enum(
+            ActivitySource,
+            name="activity_source_link_source",
+            length=16,
+        ),
+        nullable=False,
+    )
+    external_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    file_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    import_job_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("apple_health_import_jobs.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    user: Mapped[User] = relationship(
+        back_populates="activity_source_links",
+        lazy="raise",
+    )
+    activity: Mapped[Activity] = relationship(
+        back_populates="source_links",
+        lazy="raise",
+    )
+    import_job: Mapped[AppleHealthImportJob | None] = relationship(
+        back_populates="source_links",
+        lazy="raise",
+    )
+
+
+class ActivityFeedback(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Optional, non-diagnostic user feedback for one owned activity."""
+
+    __tablename__ = "activity_feedback"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "activity_id",
+            name="uq_activity_feedback_user_activity",
+        ),
+        CheckConstraint(
+            "manual_average_heart_rate IS NULL "
+            "OR (manual_average_heart_rate >= 30 "
+            "AND manual_average_heart_rate <= 250)",
+            name="manual_average_heart_rate_range",
+        ),
+        CheckConstraint(
+            "reported_rpe IS NULL OR (reported_rpe >= 1 AND reported_rpe <= 10)",
+            name="reported_rpe_range",
+        ),
+    )
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    activity_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("activities.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    manual_average_heart_rate: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    reported_rpe: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reported_rpe_label: Mapped[str | None] = mapped_column(
+        String(32),
+        nullable=True,
+    )
+    reported_discomfort: Mapped[bool | None] = mapped_column(
+        Boolean,
+        nullable=True,
+    )
+    discomfort_body_area: Mapped[BodyArea | None] = mapped_column(
+        persisted_enum(
+            BodyArea,
+            name="activity_feedback_body_area",
+            length=16,
+        ),
+        nullable=True,
+    )
+    discomfort_severity: Mapped[DiscomfortSeverity | None] = mapped_column(
+        persisted_enum(
+            DiscomfortSeverity,
+            name="discomfort_severity",
+            length=16,
+        ),
+        nullable=True,
+    )
+    discomfort_description: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+    feedback_created_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    user: Mapped[User] = relationship(
+        back_populates="activity_feedback",
+        lazy="raise",
+    )
+    activity: Mapped[Activity] = relationship(
+        back_populates="feedback",
+        lazy="raise",
+    )
+
+
+class WorkoutFlowSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Durable state for one user's resumable daily workout feedback flow."""
+
+    __tablename__ = "workout_flow_sessions"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            name="uq_workout_flow_sessions_user_id",
+        ),
+        CheckConstraint(
+            "pending_manual_average_heart_rate IS NULL "
+            "OR (pending_manual_average_heart_rate >= 30 "
+            "AND pending_manual_average_heart_rate <= 250)",
+            name="pending_manual_average_heart_rate_range",
+        ),
+    )
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    activity_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("activities.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    state: Mapped[WorkoutFlowStep] = mapped_column(
+        persisted_enum(
+            WorkoutFlowStep,
+            name="workout_flow_step",
+            length=32,
+        ),
+        default=WorkoutFlowStep.WAITING_FOR_FILE,
+        server_default=WorkoutFlowStep.WAITING_FOR_FILE.value,
+        nullable=False,
+    )
+    pending_manual_average_heart_rate: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    pending_discomfort_description: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+    return_to_onboarding: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=text("false"),
+        nullable=False,
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    user: Mapped[User] = relationship(
+        back_populates="workout_flow_session",
+        lazy="raise",
+    )
+    activity: Mapped[Activity | None] = relationship(
+        back_populates="workout_flow_sessions",
         lazy="raise",
     )
 
@@ -1416,6 +1728,8 @@ class LLMUsage(UUIDPrimaryKeyMixin, Base):
 
 __all__ = [
     "Activity",
+    "ActivityFeedback",
+    "ActivitySourceLink",
     "AppleHealthImportJob",
     "AthleteBaseline",
     "AthleteProfile",
@@ -1440,4 +1754,5 @@ __all__ = [
     "StravaWebhookEvent",
     "TrainingGoal",
     "User",
+    "WorkoutFlowSession",
 ]

@@ -64,6 +64,7 @@ HELP = (
     "/start — start or resume\n"
     "/profile — view your athlete profile\n"
     "/baseline — view your current data baseline\n"
+    "/add_workout — import a workout or training history\n"
     "/strava — view or manage Strava\n"
     "/cancel — cancel active onboarding\n"
     "/delete_me — request account deletion\n\n"
@@ -155,6 +156,40 @@ RECALCULATION_FAILED = (
 READY_MENU = "Your profile and baseline are ready."
 IMPORTING_MENU = "Your Strava activities are currently being imported."
 BASELINE_SETUP_MENU = "Choose how you want to establish your athletic baseline."
+ADD_WORKOUT_REQUEST = (
+    "Send a TCX workout file or an Apple Health export ZIP.\n\n"
+    "TCX is recommended for a single new workout.\n"
+    "Apple Health ZIP can update or enrich your history."
+)
+FILE_IMPORT_REQUEST = (
+    "Send an Apple Health export ZIP or one or more TCX workout files.\n\n"
+    "Apple Health ZIP is recommended for importing previous history.\n"
+    "TCX is useful for individual workouts.\n\n"
+    "You can upload multiple files and finish when you are done."
+)
+FILE_IMPORT_NO_ACTIVITIES = (
+    "No valid activities have been imported in this session yet, so the "
+    "baseline is still incomplete. Upload a supported file, choose another "
+    "method, decide later, or go back."
+)
+HEART_RATE_MISSING = (
+    "Heart-rate data was not available.\n\n"
+    "Would you like to enter your average heart rate manually?"
+)
+HEART_RATE_ENTRY = "Enter your average heart rate in bpm.\n\nExample: 148"
+RPE_QUESTION = "How did the session feel?"
+DISCOMFORT_QUESTION = "Did you experience pain or unusual discomfort?"
+DISCOMFORT_AREA_QUESTION = "Where did you feel it?"
+DISCOMFORT_DESCRIPTION_REQUEST = (
+    "Briefly describe where you felt it. Do not include a diagnosis. "
+    "You will confirm the text before it is saved."
+)
+DISCOMFORT_SEVERITY_QUESTION = "How strong was the discomfort?"
+WORKOUT_FEEDBACK_COMPLETE = "Workout details saved."
+WORKOUT_FEEDBACK_CANCELLED = (
+    "Workout questions cancelled. The imported activity remains saved."
+)
+WORKOUT_IMPORT_CANCELLED = "Workout import cancelled."
 RESTART_OFFER = "Your previous onboarding was cancelled. Restart from the beginning?"
 FREE_TEXT_REQUEST = (
     "Write your answer in any language. I will interpret it and ask you to confirm "
@@ -239,7 +274,14 @@ STEP_PROMPTS: dict[OnboardingStep, str] = {
     OnboardingStep.COACH_TONE: "Which coaching tone do you prefer?",
     OnboardingStep.COACH_DETAIL: "How much explanation do you prefer?",
     OnboardingStep.BASELINE_SOURCE: (
-        "How would you like to establish your athletic baseline?"
+        "How would you like to establish your initial training baseline?"
+    ),
+    OnboardingStep.FILE_IMPORT_WAITING: FILE_IMPORT_REQUEST,
+    OnboardingStep.FILE_IMPORT_PROCESSING: (
+        "Your training file is being processed. Your saved progress is safe."
+    ),
+    OnboardingStep.FILE_IMPORT_COMPLETE: (
+        "Your training-history import is ready to finish."
     ),
     OnboardingStep.APPLE_HEALTH_PRIVACY_NOTICE: (
         "Apple Health exports can contain sensitive health information.\n\n"
@@ -301,16 +343,97 @@ VALIDATION_ERRORS: dict[str, str] = {
     ),
     "apple_health_import_disabled": ("Apple Health import is currently unavailable."),
     "import_already_active": ("An Apple Health import is already in progress."),
+    "training_file_not_expected": (
+        "Choose Import training history during onboarding, or Add workout from "
+        "your account menu, before sending this file."
+    ),
+    "training_file_import_disabled": "Training-file import is currently unavailable.",
+    "unsupported_training_file": (
+        "That document is not a supported Apple Health ZIP or TCX workout file. "
+        "The temporary upload was deleted."
+    ),
+    "training_file_import_failed": (
+        "That training file could not be imported safely. The temporary upload "
+        "was deleted."
+    ),
+    "training_file_import_cancelled": (
+        "The training-file import was cancelled. The temporary upload was deleted."
+    ),
+    "import_interrupted": (
+        "A previous training-file import was interrupted. Send the file again."
+    ),
+    "training_file_size_exceeded": (
+        "That training file is larger than the allowed limit."
+    ),
+    "archive_compressed_size_exceeded": (
+        "That Apple Health ZIP is larger than the allowed limit."
+    ),
+    "archive_not_zip": "That document is not a valid Apple Health ZIP.",
+    "archive_empty": "That Apple Health ZIP is empty.",
+    "invalid_archive": "That Apple Health ZIP could not be read safely.",
+    "health_data_xml_not_found": (
+        "That ZIP does not contain an Apple Health export.xml file."
+    ),
+    "unsafe_xml_entity": "That XML contains unsafe entities and was rejected.",
+    "unsafe_external_dtd": "That XML contains an unsafe DTD and was rejected.",
+    "unsafe_xml_encoding": (
+        "That XML encoding is not supported safely. Export the file as UTF-8."
+    ),
+    "tcx_import_disabled": "TCX import is currently unavailable.",
+    "tcx_size_exceeded": "That TCX file is larger than the allowed limit.",
+    "tcx_file_size_exceeded": "That TCX file is larger than the allowed limit.",
+    "tcx_file_unavailable": "That TCX file could not be opened safely.",
+    "malformed_tcx_xml": "That TCX file could not be read safely.",
+    "unsafe_xml_doctype": "That TCX file contains an unsafe DTD and was rejected.",
+    "tcx_root_invalid": "That XML document is not a supported TCX file.",
+    "tcx_namespace_unsupported": (
+        "That TCX namespace is not supported. Export the workout as TCX v1 or v2."
+    ),
+    "tcx_activity_not_found": ("That TCX file does not contain a workout activity."),
+    "tcx_lap_not_found": "That TCX activity does not contain a workout lap.",
+    "tcx_activity_identity_missing": (
+        "That TCX activity has no usable identifier or start time."
+    ),
+    "tcx_multiple_activities_not_supported": (
+        "Send one workout activity per TCX file."
+    ),
+    "no_valid_imported_activities": FILE_IMPORT_NO_ACTIVITIES,
+    "workout_feedback_disabled": "Workout feedback is currently unavailable.",
+    "workout_flow_not_active": (
+        "There is no active workout flow. Use /add_workout to begin."
+    ),
+    "workout_flow_not_found": (
+        "There is no active workout flow. Use /add_workout to begin."
+    ),
+    "workout_flow_already_active": (
+        "Finish or cancel the current workout questions before adding another."
+    ),
+    "activity_not_found": "That workout is no longer available.",
+    "profile_incomplete": ("Complete onboarding before adding a daily workout."),
+    "invalid_manual_heart_rate": (
+        "Enter a whole-number average heart rate from 30 to 250 bpm."
+    ),
+    "manual_heart_rate_out_of_range": (
+        "Enter a whole-number average heart rate from 30 to 250 bpm."
+    ),
+    "invalid_discomfort_description": (
+        "Enter a short description of 500 characters or fewer."
+    ),
+    "feedback_text_too_long": ("Keep the description short (500 characters or fewer)."),
 }
 
-APPLE_HEALTH_PROGRESS = {
+TRAINING_FILE_PROGRESS = {
+    "validating_file": "Validating file",
+    "detecting_format": "Detecting file format",
     "validating_archive": "Validating archive",
+    "reading_tcx": "Reading TCX workout",
     "reading_workouts": "Reading workouts",
     "reading_heart_rate": "Reading heart-rate records",
     "matching_data": "Matching data",
     "saving_activities": "Saving activities",
     "recalculating_baseline": "Recalculating baseline",
 }
+APPLE_HEALTH_PROGRESS = TRAINING_FILE_PROGRESS
 
 
 def apple_health_import_success(
@@ -350,6 +473,138 @@ def apple_health_import_success(
         for value, label in discipline_order
     )
     return "\n".join(lines)
+
+
+def apple_health_file_result(
+    *,
+    activities_imported: int,
+    activities_updated: int,
+    activities_skipped: int,
+    onboarding: bool = True,
+    baseline_limited: bool = False,
+) -> str:
+    """Render one bulk-file outcome for onboarding or a daily backfill."""
+
+    lines = [
+        "Apple Health history imported",
+        "",
+        f"Activities imported: {activities_imported}",
+        f"Activities updated: {activities_updated}",
+        f"Activities skipped: {activities_skipped}",
+        "",
+        (
+            "You can upload TCX files or finish the import."
+            if onboarding
+            else "Your history was updated and your deterministic baseline "
+            "was recalculated."
+        ),
+    ]
+    if not onboarding and baseline_limited:
+        lines.extend(
+            [
+                "",
+                "The baseline is partial; disciplines without enough data "
+                "remain UNKNOWN.",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def tcx_workout_result(
+    *,
+    sport: object,
+    started_at: object,
+    duration_seconds: int,
+    distance_meters: float | None,
+    average_heart_rate: float | None,
+    onboarding: bool,
+    baseline_limited: bool = False,
+) -> str:
+    """Render one canonical TCX workout without inventing missing metrics."""
+
+    if onboarding:
+        suffix = "You can upload another file or finish the import."
+    elif baseline_limited:
+        suffix = (
+            "The workout is saved and your baseline was recalculated. "
+            "The baseline is partial; disciplines without enough data "
+            "remain UNKNOWN."
+        )
+    else:
+        suffix = "The workout is saved and your baseline was recalculated."
+    heart_rate = (
+        "Unavailable"
+        if average_heart_rate is None
+        else f"{round(average_heart_rate)} bpm"
+    )
+    return "\n".join(
+        [
+            "Workout imported",
+            "",
+            f"Sport: {_display(sport)}",
+            f"Date: {_date_time(started_at)}",
+            f"Duration: {_duration(duration_seconds)}",
+            (
+                "Distance: Unavailable"
+                if distance_meters is None
+                else f"Distance: {_distance(distance_meters)}"
+            ),
+            f"Average heart rate: {heart_rate}",
+            "",
+            suffix,
+        ]
+    )
+
+
+def training_import_complete(
+    *,
+    activities_imported: int,
+    activities_updated: int,
+    activities_skipped: int,
+    discipline_counts: Mapping[str, int],
+    baseline_limited: bool = False,
+) -> str:
+    """Render cumulative onboarding import counts and discipline coverage."""
+
+    labels = (
+        ("RUN", "Runs"),
+        ("RIDE", "Rides"),
+        ("SWIM", "Swims"),
+        ("WALK_HIKE", "Walks or hikes"),
+        ("STRENGTH", "Strength workouts"),
+        ("OTHER", "Other workouts"),
+    )
+    lines = [
+        "Training history imported",
+        "",
+        f"Activities imported: {activities_imported}",
+        f"Activities updated: {activities_updated}",
+        f"Activities skipped: {activities_skipped}",
+        "",
+        "Imported disciplines:",
+    ]
+    lines.extend(
+        f"{label}: {discipline_counts.get(value, 0)}" for value, label in labels
+    )
+    lines.extend(
+        [
+            "",
+            "Your deterministic baseline was recalculated from the available data.",
+        ]
+    )
+    if baseline_limited:
+        lines.append(
+            "The baseline is partial; disciplines without enough data remain UNKNOWN."
+        )
+    return "\n".join(lines)
+
+
+def manual_heart_rate_confirmation(bpm: int) -> str:
+    return f"Average heart rate: {bpm} bpm"
+
+
+def discomfort_description_confirmation(description: str) -> str:
+    return f"Discomfort description:\n\n{escape(description)}"
 
 
 def step_prompt(step: OnboardingStep) -> str:

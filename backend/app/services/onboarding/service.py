@@ -524,7 +524,11 @@ class OnboardingService:
         identity: TelegramIdentity,
         action: str,
     ) -> OnboardingServiceResult:
-        """Apply a deterministic Apple Health onboarding transition."""
+        """Apply a deterministic file-import onboarding transition.
+
+        The legacy Apple-specific states remain readable for sessions created
+        before the unified file-import flow.
+        """
 
         async with self._session_factory.begin() as session:
             user, onboarding = await self._locked_state(session, identity)
@@ -560,12 +564,42 @@ class OnboardingService:
                     OnboardingStep.APPLE_HEALTH_IMPORT_COMPLETE,
                     "continue",
                 ): OnboardingStep.SUMMARY,
+                (
+                    OnboardingStep.FILE_IMPORT_WAITING,
+                    "back",
+                ): OnboardingStep.BASELINE_SOURCE,
+                (
+                    OnboardingStep.FILE_IMPORT_WAITING,
+                    "choose_other",
+                ): OnboardingStep.BASELINE_SOURCE,
+                (
+                    OnboardingStep.FILE_IMPORT_PROCESSING,
+                    "back",
+                ): OnboardingStep.BASELINE_SOURCE,
+                (
+                    OnboardingStep.FILE_IMPORT_PROCESSING,
+                    "choose_other",
+                ): OnboardingStep.BASELINE_SOURCE,
+                (
+                    OnboardingStep.FILE_IMPORT_PROCESSING,
+                    "cancel",
+                ): OnboardingStep.BASELINE_SOURCE,
+                (
+                    OnboardingStep.FILE_IMPORT_COMPLETE,
+                    "continue",
+                ): OnboardingStep.SUMMARY,
+                (
+                    OnboardingStep.FILE_IMPORT_COMPLETE,
+                    "back",
+                ): OnboardingStep.FILE_IMPORT_WAITING,
             }
             next_step: OnboardingStep | None
             if action == "choose_other" and current in {
                 OnboardingStep.APPLE_HEALTH_PRIVACY_NOTICE,
                 OnboardingStep.APPLE_HEALTH_WAITING_FOR_FILE,
                 OnboardingStep.APPLE_HEALTH_IMPORT_FAILED,
+                OnboardingStep.FILE_IMPORT_WAITING,
+                OnboardingStep.FILE_IMPORT_PROCESSING,
             }:
                 next_step = OnboardingStep.BASELINE_SOURCE
             else:

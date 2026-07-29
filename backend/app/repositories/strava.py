@@ -27,6 +27,8 @@ from app.domain.enums import (
     BaselineSource,
     ConnectionStatus,
     Discipline,
+    HeartRateSource,
+    HeartRateTemporalQuality,
     OAuthProvider,
     SyncStatus,
     SyncType,
@@ -831,6 +833,9 @@ class StravaRepository:
             "distance_meters",
             "elevation_gain_meters",
             "average_heart_rate",
+            "average_heart_rate_source",
+            "heart_rate_quality",
+            "heart_rate_reliable",
             "max_heart_rate",
             "average_speed",
             "average_watts",
@@ -855,6 +860,26 @@ class StravaRepository:
             names = ", ".join(sorted(missing))
             raise ValueError(f"missing normalized activity fields: {names}")
         normalized = dict(values)
+        if normalized.get("average_heart_rate") is not None:
+            normalized.setdefault(
+                "average_heart_rate_source",
+                HeartRateSource.PROVIDER_SUMMARY,
+            )
+            normalized.setdefault(
+                "heart_rate_quality",
+                HeartRateTemporalQuality.UNKNOWN,
+            )
+            normalized.setdefault("heart_rate_reliable", True)
+        else:
+            normalized.setdefault(
+                "average_heart_rate_source",
+                HeartRateSource.UNAVAILABLE,
+            )
+            normalized.setdefault(
+                "heart_rate_quality",
+                HeartRateTemporalQuality.UNKNOWN,
+            )
+            normalized.setdefault("heart_rate_reliable", False)
         raw_summary = normalized.get("raw_summary")
         if isinstance(raw_summary, dict):
             normalized["raw_summary"] = dict(raw_summary)

@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Protocol
 from uuid import UUID
 
-from app.domain.enums import BaselineSource, Discipline
+from app.domain.enums import BaselineSource, Discipline, HeartRateSource
 from app.schemas.baseline import BaselineActivity, BaselineCalculation
 from app.services.baseline.engine import BaselineEngine
 
@@ -21,6 +21,8 @@ class ActivityRecord(Protocol):
     duration_seconds: int
     distance_meters: float | None
     average_heart_rate: float | None
+    average_heart_rate_source: HeartRateSource
+    heart_rate_reliable: bool
 
 
 class BaselineActivityRepository(Protocol):
@@ -100,7 +102,16 @@ class BaselineService:
                 started_at=self._persisted_utc(record.started_at),
                 duration_seconds=record.duration_seconds,
                 distance_meters=record.distance_meters,
-                average_heart_rate=record.average_heart_rate,
+                average_heart_rate=(
+                    record.average_heart_rate
+                    if record.heart_rate_reliable
+                    and record.average_heart_rate_source
+                    in {
+                        HeartRateSource.MEASURED_SENSOR,
+                        HeartRateSource.PROVIDER_SUMMARY,
+                    }
+                    else None
+                ),
             )
             for record in records
         ]

@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.base import utc_now
 from app.db.models import (
     Activity,
+    ActivitySourceLink,
     AppleHealthImportJob,
     HeartRateObservation,
     OnboardingSession,
@@ -20,7 +21,10 @@ from app.db.models import (
 from app.domain.enums import (
     ActivitySource,
     AppleHealthImportStatus,
+    HeartRateSource,
     OnboardingStep,
+    TrainingFileFormat,
+    TrainingImportContext,
 )
 from app.integrations.apple_health.models import ParsedWorkout
 from app.repositories.errors import OwnedRecordNotFoundError
@@ -38,11 +42,13 @@ class AppleHealthRepository:
         self,
         *,
         user_id: uuid.UUID,
-        onboarding_session_id: uuid.UUID,
+        onboarding_session_id: uuid.UUID | None = None,
         telegram_update_id: int | None,
         telegram_file_id: str,
         telegram_file_unique_id: str,
         display_filename: str,
+        file_format: TrainingFileFormat = TrainingFileFormat.APPLE_HEALTH_ZIP,
+        context: TrainingImportContext = TrainingImportContext.ONBOARDING,
     ) -> tuple[AppleHealthImportJob, bool]:
         if telegram_update_id is not None:
             existing = await self._session.scalar(
@@ -65,6 +71,8 @@ class AppleHealthRepository:
             telegram_file_id=telegram_file_id,
             telegram_file_unique_id=telegram_file_unique_id,
             display_filename=display_filename[:255],
+            file_format=file_format,
+            context=context,
         )
         try:
             async with self._session.begin_nested():
@@ -173,6 +181,99 @@ class AppleHealthRepository:
         )
         return {discipline.value: count for discipline, count in rows.all()}
 
+    async def all_discipline_counts(
+        self,
+        *,
+        user_id: uuid.UUID,
+    ) -> dict[str, int]:
+        """Count every owned canonical activity exactly once."""
+
+        rows = await self._session.execute(
+            select(Activity.sport, func.count(Activity.id))
+            .where(
+                Activity.user_id == user_id,
+                Activity.deleted_at.is_(None),
+            )
+            .group_by(Activity.sport)
+        )
+        return {discipline.value: count for discipline, count in rows.all()}
+
+    async def onboarding_totals(
+        self,
+        *,
+        user_id: uuid.UUID,
+        onboarding_session_id: uuid.UUID,
+    ) -> dict[str, int]:
+        """Aggregate successful files in one owned onboarding import session."""
+
+        row = (
+            await self._session.execute(
+                select(
+                    func.count(AppleHealthImportJob.id),
+                    func.coalesce(func.sum(AppleHealthImportJob.workouts_found), 0),
+                    func.coalesce(
+                        func.sum(AppleHealthImportJob.activities_imported),
+                        0,
+                    ),
+                    func.coalesce(
+                        func.sum(AppleHealthImportJob.activities_updated),
+                        0,
+                    ),
+                    func.coalesce(
+                        func.sum(AppleHealthImportJob.activities_skipped),
+                        0,
+                    ),
+                ).where(
+                    AppleHealthImportJob.user_id == user_id,
+                    AppleHealthImportJob.onboarding_session_id == onboarding_session_id,
+                    AppleHealthImportJob.context == TrainingImportContext.ONBOARDING,
+                    AppleHealthImportJob.status == AppleHealthImportStatus.SUCCEEDED,
+                )
+            )
+        ).one()
+        return {
+            "successful_files": int(row[0]),
+            "workouts_found": int(row[1]),
+            "activities_imported": int(row[2]),
+            "activities_updated": int(row[3]),
+            "activities_skipped": int(row[4]),
+        }
+
+    async def latest_imported_activity(
+        self,
+        *,
+        user_id: uuid.UUID,
+        onboarding_session_id: uuid.UUID | None = None,
+    ) -> Activity | None:
+        """Return the latest canonical activity linked by an owned import job."""
+
+        statement = (
+            select(Activity)
+            .join(
+                ActivitySourceLink,
+                ActivitySourceLink.activity_id == Activity.id,
+            )
+            .join(
+                AppleHealthImportJob,
+                AppleHealthImportJob.id == ActivitySourceLink.import_job_id,
+            )
+            .where(
+                Activity.user_id == user_id,
+                ActivitySourceLink.user_id == user_id,
+                AppleHealthImportJob.user_id == user_id,
+                AppleHealthImportJob.status == AppleHealthImportStatus.SUCCEEDED,
+                Activity.deleted_at.is_(None),
+            )
+        )
+        if onboarding_session_id is not None:
+            statement = statement.where(
+                AppleHealthImportJob.onboarding_session_id == onboarding_session_id,
+            )
+        result = await self._session.scalars(
+            statement.order_by(Activity.started_at.desc(), Activity.id).limit(1)
+        )
+        return result.first()
+
     async def get_successful_by_hash(
         self,
         *,
@@ -199,6 +300,7 @@ class AppleHealthRepository:
         user_id: uuid.UUID,
         job_id: uuid.UUID,
         file_sha256: str,
+        file_format: TrainingFileFormat | None = None,
     ) -> AppleHealthImportJob:
         job = await self.require_job(
             user_id=user_id,
@@ -209,6 +311,8 @@ class AppleHealthRepository:
             job.status = AppleHealthImportStatus.PROCESSING
             job.started_at = utc_now()
         job.file_sha256 = file_sha256
+        if file_format is not None:
+            job.file_format = file_format
         await self._session.flush()
         return job
 
@@ -223,12 +327,19 @@ class AppleHealthRepository:
         activities_skipped: int,
         heart_rate_records_matched: int,
         warning_count: int,
+        activity_id: uuid.UUID | None = None,
+        file_format: TrainingFileFormat | None = None,
     ) -> AppleHealthImportJob:
         job = await self.require_job(
             user_id=user_id,
             job_id=job_id,
             for_update=True,
         )
+        if job.status not in {
+            AppleHealthImportStatus.RECEIVED,
+            AppleHealthImportStatus.PROCESSING,
+        }:
+            return job
         job.status = AppleHealthImportStatus.SUCCEEDED
         job.completed_at = utc_now()
         job.workouts_found = workouts_found
@@ -237,6 +348,9 @@ class AppleHealthRepository:
         job.activities_skipped = activities_skipped
         job.heart_rate_records_matched = heart_rate_records_matched
         job.warning_count = warning_count
+        job.activity_id = activity_id
+        if file_format is not None:
+            job.file_format = file_format
         job.safe_error_code = None
         await self._session.flush()
         return job
@@ -257,6 +371,8 @@ class AppleHealthRepository:
             activities_skipped=source.workouts_found,
             heart_rate_records_matched=source.heart_rate_records_matched,
             warning_count=source.warning_count,
+            activity_id=source.activity_id,
+            file_format=source.file_format,
         )
 
     async def mark_failed(
@@ -281,6 +397,46 @@ class AppleHealthRepository:
             await self._session.flush()
         return job
 
+    async def set_temporary_path(
+        self,
+        *,
+        user_id: uuid.UUID,
+        job_id: uuid.UUID,
+        temporary_path: str,
+    ) -> None:
+        """Associate a generated upload path before personal data is written."""
+
+        if len(temporary_path) > 1024:
+            raise ValueError("temporary_path is too long")
+        job = await self.require_job(
+            user_id=user_id,
+            job_id=job_id,
+            for_update=True,
+        )
+        if job.status in {
+            AppleHealthImportStatus.RECEIVED,
+            AppleHealthImportStatus.PROCESSING,
+        }:
+            job.temporary_path = temporary_path
+            await self._session.flush()
+
+    async def clear_temporary_path(
+        self,
+        *,
+        user_id: uuid.UUID,
+        job_id: uuid.UUID,
+    ) -> None:
+        """Clear one owned path after verified filesystem cleanup."""
+
+        await self._session.execute(
+            update(AppleHealthImportJob)
+            .where(
+                AppleHealthImportJob.user_id == user_id,
+                AppleHealthImportJob.id == job_id,
+            )
+            .values(temporary_path=None)
+        )
+
     async def cancel_active(self, *, user_id: uuid.UUID) -> bool:
         result = await self._session.execute(
             update(AppleHealthImportJob)
@@ -302,46 +458,121 @@ class AppleHealthRepository:
         )
         return result.scalar_one_or_none() is not None
 
-    async def recover_abandoned(self, *, stale_before: datetime) -> int:
+    async def recover_abandoned(
+        self,
+        *,
+        stale_before: datetime | None,
+    ) -> int:
         """Fail expired processing leases and restore their onboarding state."""
 
-        jobs = tuple(
+        jobs = await self._recoverable_jobs(stale_before=stale_before)
+        await self._fail_recovered_jobs(jobs)
+        return len(jobs)
+
+    async def recover_abandoned_with_temporary_paths(
+        self,
+        *,
+        stale_before: datetime | None,
+    ) -> tuple[
+        int,
+        tuple[tuple[uuid.UUID, uuid.UUID, str], ...],
+    ]:
+        """Recover jobs and return recorded paths that are safe to clean later."""
+
+        jobs = await self._recoverable_jobs(stale_before=stale_before)
+        await self._fail_recovered_jobs(jobs)
+        recovered_ids = {job.id for job in jobs}
+        path_jobs = tuple(
             (
                 await self._session.scalars(
                     select(AppleHealthImportJob).where(
-                        AppleHealthImportJob.status.in_(
-                            (
-                                AppleHealthImportStatus.RECEIVED,
-                                AppleHealthImportStatus.PROCESSING,
-                            )
-                        ),
+                        AppleHealthImportJob.temporary_path.is_not(None),
                         or_(
-                            AppleHealthImportJob.started_at < stale_before,
-                            (
-                                AppleHealthImportJob.started_at.is_(None)
-                                & (AppleHealthImportJob.created_at < stale_before)
+                            AppleHealthImportJob.status.not_in(
+                                (
+                                    AppleHealthImportStatus.RECEIVED,
+                                    AppleHealthImportStatus.PROCESSING,
+                                )
                             ),
+                            AppleHealthImportJob.id.in_(recovered_ids),
                         ),
                     )
                 )
             ).all()
         )
+        return (
+            len(jobs),
+            tuple(
+                (job.user_id, job.id, job.temporary_path)
+                for job in path_jobs
+                if job.temporary_path is not None
+            ),
+        )
+
+    async def _recoverable_jobs(
+        self,
+        *,
+        stale_before: datetime | None,
+    ) -> tuple[AppleHealthImportJob, ...]:
+        statement = select(AppleHealthImportJob).where(
+            AppleHealthImportJob.status.in_(
+                (
+                    AppleHealthImportStatus.RECEIVED,
+                    AppleHealthImportStatus.PROCESSING,
+                )
+            )
+        )
+        if stale_before is not None:
+            statement = statement.where(
+                or_(
+                    AppleHealthImportJob.started_at < stale_before,
+                    (
+                        AppleHealthImportJob.started_at.is_(None)
+                        & (AppleHealthImportJob.created_at < stale_before)
+                    ),
+                )
+            )
+        return tuple((await self._session.scalars(statement)).all())
+
+    async def _fail_recovered_jobs(
+        self,
+        jobs: tuple[AppleHealthImportJob, ...],
+    ) -> None:
+        jobs = tuple(
+            job
+            for job in jobs
+            if job.status
+            in {
+                AppleHealthImportStatus.RECEIVED,
+                AppleHealthImportStatus.PROCESSING,
+            }
+        )
         for job in jobs:
             job.status = AppleHealthImportStatus.FAILED
             job.completed_at = utc_now()
             job.safe_error_code = "import_interrupted"
-            await self._session.execute(
-                update(OnboardingSession)
-                .where(
-                    OnboardingSession.id == job.onboarding_session_id,
-                    OnboardingSession.user_id == job.user_id,
-                    OnboardingSession.current_step
-                    == OnboardingStep.APPLE_HEALTH_PROCESSING,
+            if job.onboarding_session_id is not None:
+                await self._session.execute(
+                    update(OnboardingSession)
+                    .where(
+                        OnboardingSession.id == job.onboarding_session_id,
+                        OnboardingSession.user_id == job.user_id,
+                        OnboardingSession.current_step
+                        == OnboardingStep.FILE_IMPORT_PROCESSING,
+                    )
+                    .values(current_step=OnboardingStep.FILE_IMPORT_WAITING)
                 )
-                .values(current_step=OnboardingStep.APPLE_HEALTH_IMPORT_FAILED)
-            )
+                await self._session.execute(
+                    update(OnboardingSession)
+                    .where(
+                        OnboardingSession.id == job.onboarding_session_id,
+                        OnboardingSession.user_id == job.user_id,
+                        OnboardingSession.current_step
+                        == OnboardingStep.APPLE_HEALTH_PROCESSING,
+                    )
+                    .values(current_step=OnboardingStep.APPLE_HEALTH_IMPORT_FAILED)
+                )
         await self._session.flush()
-        return len(jobs)
 
     async def upsert_workout(
         self,
@@ -369,6 +600,16 @@ class AppleHealthRepository:
             "elevation_gain_meters": None,
             "calories_kcal": workout.calories_kcal,
             "average_heart_rate": workout.average_heart_rate,
+            "average_heart_rate_source": (
+                HeartRateSource.MEASURED_SENSOR
+                if workout.average_heart_rate is not None
+                and workout.heart_rate_sample_count > 0
+                else (
+                    HeartRateSource.PROVIDER_SUMMARY
+                    if workout.average_heart_rate is not None
+                    else HeartRateSource.UNAVAILABLE
+                )
+            ),
             "max_heart_rate": workout.max_heart_rate,
             "heart_rate_sample_count": workout.heart_rate_sample_count,
             "heart_rate_quality": workout.heart_rate_quality,

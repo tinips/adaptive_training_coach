@@ -89,7 +89,11 @@ class ProfileService:
             except ValidationError as exc:
                 raise IncompleteProfileError from exc
             if (
-                answers.baseline_source is BaselineSource.APPLE_HEALTH_EXPORT
+                answers.baseline_source
+                in {
+                    BaselineSource.APPLE_HEALTH_EXPORT,
+                    BaselineSource.FILE_IMPORT,
+                }
                 and await BaselineRepository(session).get_latest(user_id=user_id)
                 is None
             ):
@@ -320,7 +324,10 @@ class ProfileService:
     ) -> BaselinePreferenceStatus:
         if source is BaselineSource.STRAVA:
             return BaselinePreferenceStatus.PENDING
-        if source is BaselineSource.APPLE_HEALTH_EXPORT:
+        if source in {
+            BaselineSource.APPLE_HEALTH_EXPORT,
+            BaselineSource.FILE_IMPORT,
+        }:
             return BaselinePreferenceStatus.READY
         if source in {BaselineSource.MANUAL, BaselineSource.CALIBRATION}:
             return BaselinePreferenceStatus.NOT_IMPLEMENTED
@@ -330,7 +337,10 @@ class ProfileService:
     def _user_status(source: BaselineSource) -> UserStatus:
         if source is BaselineSource.STRAVA:
             return UserStatus.BASELINE_PENDING
-        if source is BaselineSource.APPLE_HEALTH_EXPORT:
+        if source in {
+            BaselineSource.APPLE_HEALTH_EXPORT,
+            BaselineSource.FILE_IMPORT,
+        }:
             return UserStatus.BASELINE_READY
         return UserStatus.PROFILE_COMPLETED
 

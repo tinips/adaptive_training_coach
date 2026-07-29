@@ -16,16 +16,16 @@ from app.domain.enums import (
     BaselineSource,
     OnboardingStep,
     SyncStatus,
+    TrainingFileFormat,
+    TrainingImportContext,
     UserStatus,
+    WorkoutFlowStep,
 )
 from app.schemas.common import TelegramIdentity
 from app.schemas.onboarding import SummaryEditSection
 from app.schemas.onboarding_service import OnboardingServiceResult
 from app.services.accounts import AccountQueryService, AccountService
-from app.services.apple_health import (
-    AppleHealthImportOutcome,
-    TelegramDocumentUpload,
-)
+from app.services.apple_health import TelegramDocumentUpload
 from app.services.onboarding import OnboardingApplicationError, OnboardingService
 from app.services.profiles import (
     BaselineSelectionUnavailableError,
@@ -35,6 +35,12 @@ from app.services.profiles import (
 from app.services.strava.disconnect import DisconnectOutcome
 from app.services.strava.exceptions import StravaServiceError
 from app.services.strava.sync import SyncOutcome
+from app.services.training_import import TrainingFileImportOutcome
+from app.services.workout_feedback import (
+    WorkoutFeedbackError,
+    WorkoutFeedbackResult,
+    WorkoutFeedbackService,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,8 +64,8 @@ class StravaBotPort(Protocol):
     async def revoke_for_deletion(self, *, user_id: UUID) -> bool: ...
 
 
-class AppleHealthBotPort(Protocol):
-    """Apple Health orchestration used by document and resume actions."""
+class TrainingImportBotPort(Protocol):
+    """Unified file-import orchestration used by document and resume actions."""
 
     async def process_upload(
         self,
@@ -68,15 +74,31 @@ class AppleHealthBotPort(Protocol):
         document: TelegramDocumentUpload,
         download: Callable[[Path], Awaitable[None]],
         progress: Callable[[str], Awaitable[None]],
-    ) -> AppleHealthImportOutcome: ...
+    ) -> TrainingFileImportOutcome: ...
 
     async def latest_outcome(
         self,
         *,
         user_id: UUID,
-    ) -> AppleHealthImportOutcome | None: ...
+    ) -> TrainingFileImportOutcome | None: ...
 
     async def cancel_active(self, *, user_id: UUID) -> None: ...
+
+    async def finish_onboarding_import(
+        self,
+        *,
+        identity: TelegramIdentity,
+    ) -> TrainingFileImportOutcome: ...
+
+    async def latest_onboarding_activity(
+        self,
+        *,
+        user_id: UUID,
+    ) -> ActivityIdentity | None: ...
+
+
+class ActivityIdentity(Protocol):
+    id: UUID
 
 
 class CoachBotApplicationService:
@@ -90,9 +112,12 @@ class CoachBotApplicationService:
         account_queries: AccountQueryService,
         accounts: AccountService,
         strava: StravaBotPort,
-        apple_health: AppleHealthBotPort | None = None,
+        apple_health: TrainingImportBotPort | None = None,
+        workout_feedback: WorkoutFeedbackService | None = None,
         strava_enabled: bool = False,
         apple_health_enabled: bool = True,
+        tcx_enabled: bool = True,
+        workout_feedback_enabled: bool = True,
     ) -> None:
         self._onboarding = onboarding
         self._profiles = profiles
@@ -100,11 +125,25 @@ class CoachBotApplicationService:
         self._accounts = accounts
         self._strava = strava
         self._apple_health = apple_health
+        self._workout_feedback = workout_feedback
         self._strava_enabled = strava_enabled
         self._apple_health_enabled = apple_health_enabled
+        self._tcx_enabled = tcx_enabled
+        self._workout_feedback_enabled = workout_feedback_enabled
 
     async def start(self, identity: TelegramIdentity) -> TelegramResponse:
         result = await self._onboarding.start(identity)
+        if (
+            result.kind == "completed"
+            and self._workout_feedback_enabled
+            and self._workout_feedback is not None
+        ):
+            feedback = await self._workout_feedback.snapshot(identity)
+            if feedback is not None and feedback.state not in {
+                WorkoutFlowStep.COMPLETE,
+                WorkoutFlowStep.CANCELLED,
+            }:
+                return await self._render_workout_feedback(identity, feedback)
         return await self._render_onboarding(identity, result)
 
     async def handle_text(
@@ -113,8 +152,33 @@ class CoachBotApplicationService:
         text: str,
     ) -> TelegramResponse:
         try:
+            if self._workout_feedback_enabled and self._workout_feedback is not None:
+                feedback = await self._workout_feedback.snapshot(identity)
+                if feedback is not None:
+                    if feedback.state is WorkoutFlowStep.HR_ENTRY:
+                        updated = await self._workout_feedback.submit_manual_heart_rate(
+                            identity,
+                            text,
+                        )
+                        return await self._render_workout_feedback(
+                            identity,
+                            updated,
+                        )
+                    if feedback.state is WorkoutFlowStep.DESCRIPTION_ENTRY:
+                        updated = (
+                            await self._workout_feedback.submit_discomfort_description(
+                                identity,
+                                text,
+                            )
+                        )
+                        return await self._render_workout_feedback(
+                            identity,
+                            updated,
+                        )
             result = await self._onboarding.handle_text(identity, text)
         except OnboardingApplicationError as exc:
+            return TelegramResponse(messages.validation_error(exc.code))
+        except WorkoutFeedbackError as exc:
             return TelegramResponse(messages.validation_error(exc.code))
         return await self._render_onboarding(identity, result)
 
@@ -125,24 +189,54 @@ class CoachBotApplicationService:
         download: Callable[[Path], Awaitable[None]],
         progress: Callable[[str], Awaitable[None]],
     ) -> TelegramResponse:
-        if not self._apple_health_enabled or self._apple_health is None:
+        if self._apple_health is None:
             return TelegramResponse(
-                messages.validation_error("apple_health_import_disabled")
+                messages.validation_error("training_file_import_disabled")
             )
+        feedback: WorkoutFeedbackResult | None = None
         try:
+            if self._workout_feedback_enabled and self._workout_feedback is not None:
+                feedback = await self._workout_feedback.snapshot(identity)
+                if feedback is not None and feedback.state not in {
+                    WorkoutFlowStep.WAITING_FOR_FILE,
+                    WorkoutFlowStep.COMPLETE,
+                    WorkoutFlowStep.CANCELLED,
+                }:
+                    raise WorkoutFeedbackError("workout_flow_already_active")
             outcome = await self._apple_health.process_upload(
                 identity=identity,
                 document=document,
                 download=download,
                 progress=progress,
             )
+            if outcome.status is not AppleHealthImportStatus.SUCCEEDED:
+                error_text = messages.validation_error(
+                    outcome.safe_error_code
+                    or (
+                        "training_file_import_cancelled"
+                        if outcome.status is AppleHealthImportStatus.CANCELLED
+                        else "training_file_import_failed"
+                    )
+                )
+                if outcome.context is TrainingImportContext.ONBOARDING:
+                    return TelegramResponse(
+                        error_text,
+                        keyboards.training_file_import_keyboard(),
+                    )
+                if (
+                    feedback is not None
+                    and feedback.state is WorkoutFlowStep.WAITING_FOR_FILE
+                ):
+                    return TelegramResponse(
+                        error_text,
+                        keyboards.add_workout_keyboard(),
+                    )
+                return await self._home_with_prefix(identity, error_text)
+            return await self._render_import_outcome(identity, outcome)
         except OnboardingApplicationError as exc:
             return TelegramResponse(messages.validation_error(exc.code))
-        if outcome.status is AppleHealthImportStatus.FAILED:
-            snapshot = await self._onboarding.snapshot(identity)
-            return await self._render_onboarding(identity, snapshot)
-        snapshot = await self._onboarding.snapshot(identity)
-        return await self._render_onboarding(identity, snapshot)
+        except WorkoutFeedbackError as exc:
+            return TelegramResponse(messages.validation_error(exc.code))
 
     async def handle_callback(
         self,
@@ -152,6 +246,15 @@ class CoachBotApplicationService:
         try:
             response = await self._route_callback(identity, callback_data)
         except OnboardingApplicationError as exc:
+            response = TelegramResponse(
+                messages.validation_error(exc.code),
+                (
+                    keyboards.training_file_import_keyboard()
+                    if exc.code == "no_valid_imported_activities"
+                    else None
+                ),
+            )
+        except WorkoutFeedbackError as exc:
             response = TelegramResponse(messages.validation_error(exc.code))
         except IncompleteProfileError:
             response = TelegramResponse(messages.validation_error("incomplete_profile"))
@@ -189,6 +292,22 @@ class CoachBotApplicationService:
         if source.endswith("CALIBRATION"):
             return TelegramResponse(messages.BASELINE_CALIBRATION_PENDING)
         return TelegramResponse(messages.BASELINE_NOT_READY)
+
+    async def add_workout(
+        self,
+        identity: TelegramIdentity,
+    ) -> TelegramResponse:
+        if not (self._apple_health_enabled or self._tcx_enabled):
+            return TelegramResponse(
+                messages.validation_error("training_file_import_disabled")
+            )
+        if not self._workout_feedback_enabled or self._workout_feedback is None:
+            return TelegramResponse(messages.ADD_WORKOUT_REQUEST)
+        try:
+            feedback = await self._workout_feedback.begin_waiting_upload(identity)
+        except WorkoutFeedbackError as exc:
+            return TelegramResponse(messages.validation_error(exc.code))
+        return await self._render_workout_feedback(identity, feedback)
 
     async def strava(self, identity: TelegramIdentity) -> TelegramResponse:
         if not self._strava_enabled:
@@ -265,6 +384,44 @@ class CoachBotApplicationService:
         identity: TelegramIdentity,
         callback_data: str,
     ) -> TelegramResponse:
+        if callback_data == "ob:v1:import:finish":
+            if self._apple_health is None:
+                raise OnboardingApplicationError("training_file_import_disabled")
+            outcome = await self._apple_health.finish_onboarding_import(
+                identity=identity
+            )
+            return TelegramResponse(
+                messages.training_import_complete(
+                    activities_imported=outcome.activities_imported,
+                    activities_updated=outcome.activities_updated,
+                    activities_skipped=outcome.activities_skipped,
+                    discipline_counts=outcome.discipline_counts or {},
+                    baseline_limited=outcome.baseline_limited,
+                ),
+                keyboards.training_file_complete_keyboard(
+                    can_enrich_latest=outcome.activity_id is not None,
+                ),
+            )
+        if callback_data == "ob:v1:import:enrich_latest":
+            if self._apple_health is None or self._workout_feedback is None:
+                raise OnboardingApplicationError("workout_feedback_disabled")
+            snapshot = await self._onboarding.snapshot(identity)
+            activity = await self._apple_health.latest_onboarding_activity(
+                user_id=snapshot.user_id
+            )
+            if activity is None:
+                raise OnboardingApplicationError("no_valid_imported_activities")
+            feedback = await self._workout_feedback.start_for_activity(
+                user_id=snapshot.user_id,
+                activity_id=activity.id,
+                return_to_onboarding=True,
+            )
+            return await self._render_workout_feedback(identity, feedback)
+        if callback_data.startswith("wf:v1:"):
+            return await self._workout_feedback_callback(
+                identity,
+                callback_data.removeprefix("wf:v1:"),
+            )
         if callback_data.startswith("ob:v1:apple:"):
             action = callback_data.removeprefix("ob:v1:apple:")
             if action in {"cancel", "choose_other", "back"}:
@@ -457,6 +614,8 @@ class CoachBotApplicationService:
             return await self.profile(identity)
         if action == "baseline":
             return await self.baseline(identity)
+        if action == "add_workout":
+            return await self.add_workout(identity)
         if action == "strava":
             return await self.strava(identity)
         if action == "help":
@@ -493,6 +652,229 @@ class CoachBotApplicationService:
         )
         return TelegramResponse(text, home.keyboard)
 
+    async def _render_import_outcome(
+        self,
+        identity: TelegramIdentity,
+        outcome: TrainingFileImportOutcome,
+    ) -> TelegramResponse:
+        onboarding = outcome.context is TrainingImportContext.ONBOARDING
+        if outcome.file_format is TrainingFileFormat.APPLE_HEALTH_ZIP:
+            text = messages.apple_health_file_result(
+                activities_imported=outcome.activities_imported,
+                activities_updated=outcome.activities_updated,
+                activities_skipped=outcome.activities_skipped,
+                onboarding=onboarding,
+                baseline_limited=outcome.baseline_limited,
+            )
+        else:
+            text = messages.tcx_workout_result(
+                sport=outcome.sport,
+                started_at=outcome.started_at,
+                duration_seconds=outcome.duration_seconds or 0,
+                distance_meters=outcome.distance_meters,
+                average_heart_rate=outcome.average_heart_rate,
+                onboarding=onboarding,
+                baseline_limited=outcome.baseline_limited,
+            )
+        if onboarding:
+            return TelegramResponse(
+                text,
+                keyboards.training_file_import_keyboard(),
+            )
+        if (
+            outcome.file_format is TrainingFileFormat.TCX
+            and outcome.activity_id is not None
+            and self._workout_feedback_enabled
+            and self._workout_feedback is not None
+        ):
+            feedback = await self._workout_feedback.start_for_activity(
+                user_id=await self._resolved_user_id(identity),
+                activity_id=outcome.activity_id,
+            )
+            return await self._render_workout_feedback(
+                identity,
+                feedback,
+                prefix=text,
+            )
+        if self._workout_feedback_enabled and self._workout_feedback is not None:
+            waiting = await self._workout_feedback.snapshot(identity)
+            if (
+                waiting is not None
+                and waiting.state is WorkoutFlowStep.WAITING_FOR_FILE
+            ):
+                await self._workout_feedback.cancel(identity)
+        return await self._home_with_prefix(identity, text)
+
+    async def _workout_feedback_callback(
+        self,
+        identity: TelegramIdentity,
+        action: str,
+    ) -> TelegramResponse:
+        service = self._workout_feedback
+        if service is None or not self._workout_feedback_enabled:
+            raise WorkoutFeedbackError("workout_feedback_disabled")
+        if action == "cancel":
+            result = await service.cancel(identity)
+        elif action.startswith("back:"):
+            expected_state = self._workout_flow_step(action.removeprefix("back:"))
+            result = await service.back(
+                identity,
+                expected_state=expected_state,
+            )
+        elif action == "hr:enter":
+            result = await service.choose_manual_heart_rate(
+                identity,
+                enter=True,
+            )
+        elif action == "hr:skip":
+            snapshot = await service.snapshot(identity)
+            if snapshot is None:
+                raise WorkoutFeedbackError("workout_flow_not_found")
+            if snapshot.state is WorkoutFlowStep.HR_OFFER:
+                result = await service.choose_manual_heart_rate(
+                    identity,
+                    enter=False,
+                )
+            else:
+                result = await service.skip_manual_heart_rate(identity)
+        elif action == "hr:confirm":
+            result = await service.confirm_manual_heart_rate(identity)
+        elif action == "hr:change":
+            result = await service.change_manual_heart_rate(identity)
+        elif action.startswith("rpe:"):
+            value = action.removeprefix("rpe:")
+            result = (
+                await service.skip_rpe(identity)
+                if value == "skip"
+                else await service.select_rpe(identity, value)
+            )
+        elif action.startswith("discomfort:"):
+            value = action.removeprefix("discomfort:")
+            reported = {"yes": True, "no": False, "skip": None}.get(value)
+            if value not in {"yes", "no", "skip"}:
+                raise WorkoutFeedbackError("invalid_action")
+            result = await service.select_discomfort(identity, reported)
+        elif action.startswith("area:"):
+            value = action.removeprefix("area:")
+            result = await service.select_body_area(
+                identity,
+                None if value == "skip" else value,
+            )
+        elif action.startswith("description:"):
+            value = action.removeprefix("description:")
+            actions = {
+                "confirm": service.confirm_discomfort_description,
+                "change": service.change_discomfort_description,
+                "skip": service.skip_discomfort_description,
+            }
+            try:
+                operation = actions[value]
+            except KeyError as exc:
+                raise WorkoutFeedbackError("invalid_action") from exc
+            result = await operation(identity)
+        elif action.startswith("severity:"):
+            value = action.removeprefix("severity:")
+            result = await service.select_severity(
+                identity,
+                None if value == "skip" else value,
+            )
+        else:
+            raise WorkoutFeedbackError("invalid_action")
+        return await self._render_workout_feedback(identity, result)
+
+    async def _render_workout_feedback(
+        self,
+        identity: TelegramIdentity,
+        result: WorkoutFeedbackResult,
+        *,
+        prefix: str | None = None,
+    ) -> TelegramResponse:
+        text: str
+        keyboard = None
+        if result.state is WorkoutFlowStep.WAITING_FOR_FILE:
+            text = messages.ADD_WORKOUT_REQUEST
+            keyboard = keyboards.add_workout_keyboard()
+        elif result.state is WorkoutFlowStep.HR_OFFER:
+            text = messages.HEART_RATE_MISSING
+            keyboard = keyboards.manual_heart_rate_offer_keyboard()
+        elif result.state is WorkoutFlowStep.HR_ENTRY:
+            text = messages.HEART_RATE_ENTRY
+            keyboard = keyboards.feedback_text_entry_keyboard(
+                state=WorkoutFlowStep.HR_ENTRY
+            )
+        elif result.state is WorkoutFlowStep.HR_CONFIRM:
+            pending = result.pending_manual_average_heart_rate
+            if pending is None:
+                raise WorkoutFeedbackError("manual_heart_rate_missing")
+            text = messages.manual_heart_rate_confirmation(pending)
+            keyboard = keyboards.manual_heart_rate_confirmation_keyboard()
+        elif result.state is WorkoutFlowStep.RPE:
+            text = messages.RPE_QUESTION
+            keyboard = keyboards.rpe_keyboard()
+        elif result.state is WorkoutFlowStep.DISCOMFORT:
+            text = messages.DISCOMFORT_QUESTION
+            keyboard = keyboards.discomfort_keyboard()
+        elif result.state is WorkoutFlowStep.BODY_AREA:
+            text = messages.DISCOMFORT_AREA_QUESTION
+            keyboard = keyboards.discomfort_area_keyboard()
+        elif result.state is WorkoutFlowStep.DESCRIPTION_ENTRY:
+            text = messages.DISCOMFORT_DESCRIPTION_REQUEST
+            keyboard = keyboards.feedback_text_entry_keyboard(
+                state=WorkoutFlowStep.DESCRIPTION_ENTRY
+            )
+        elif result.state is WorkoutFlowStep.DESCRIPTION_CONFIRM:
+            description = result.pending_discomfort_description
+            if description is None:
+                raise WorkoutFeedbackError("discomfort_description_missing")
+            text = messages.discomfort_description_confirmation(description)
+            keyboard = keyboards.discomfort_description_confirmation_keyboard()
+        elif result.state is WorkoutFlowStep.SEVERITY:
+            text = messages.DISCOMFORT_SEVERITY_QUESTION
+            keyboard = keyboards.discomfort_severity_keyboard()
+        elif result.state is WorkoutFlowStep.CANCELLED:
+            text = messages.WORKOUT_FEEDBACK_CANCELLED
+        else:
+            text = messages.WORKOUT_FEEDBACK_COMPLETE
+
+        if prefix:
+            text = f"{prefix}\n\n{text}"
+        if result.state in {
+            WorkoutFlowStep.COMPLETE,
+            WorkoutFlowStep.CANCELLED,
+        }:
+            if result.return_to_onboarding:
+                return TelegramResponse(
+                    text,
+                    keyboards.training_file_complete_keyboard(
+                        can_enrich_latest=False,
+                    ),
+                )
+            return await self._home_with_prefix(identity, text)
+        return TelegramResponse(text, keyboard)
+
+    async def _resolved_user_id(
+        self,
+        identity: TelegramIdentity,
+    ) -> UUID:
+        user_id = await self._account_queries.resolve_user_id(identity)
+        if user_id is None:
+            raise WorkoutFeedbackError("user_not_found")
+        return user_id
+
+    async def _home_with_prefix(
+        self,
+        identity: TelegramIdentity,
+        prefix: str,
+    ) -> TelegramResponse:
+        lifecycle = await self._account_queries.lifecycle(identity)
+        if lifecycle is None:
+            return TelegramResponse(messages.NOT_FOUND)
+        return await self._home_response(
+            identity,
+            lifecycle["status"],
+            prefix=prefix,
+        )
+
     async def _render_onboarding(
         self,
         identity: TelegramIdentity,
@@ -500,30 +882,50 @@ class CoachBotApplicationService:
     ) -> TelegramResponse:
         prefix = f"{messages.WELCOME_NEW}\n\n" if result.created else ""
         if result.kind == "step":
+            if (
+                result.current_step is OnboardingStep.FILE_IMPORT_COMPLETE
+                and self._apple_health is not None
+            ):
+                outcome = await self._apple_health.finish_onboarding_import(
+                    identity=identity
+                )
+                return TelegramResponse(
+                    messages.training_import_complete(
+                        activities_imported=outcome.activities_imported,
+                        activities_updated=outcome.activities_updated,
+                        activities_skipped=outcome.activities_skipped,
+                        discipline_counts=outcome.discipline_counts or {},
+                        baseline_limited=outcome.baseline_limited,
+                    ),
+                    keyboards.training_file_complete_keyboard(
+                        can_enrich_latest=outcome.activity_id is not None,
+                    ),
+                )
             if result.current_step is OnboardingStep.APPLE_HEALTH_IMPORT_COMPLETE:
-                outcome = (
+                legacy_outcome = (
                     await self._apple_health.latest_outcome(user_id=result.user_id)
                     if self._apple_health is not None
                     else None
                 )
-                if outcome is not None:
+                if legacy_outcome is not None:
                     return TelegramResponse(
                         messages.apple_health_import_success(
-                            workouts_found=outcome.workouts_found,
-                            activities_imported=outcome.activities_imported,
-                            activities_updated=outcome.activities_updated,
-                            activities_skipped=outcome.activities_skipped,
+                            workouts_found=legacy_outcome.workouts_found,
+                            activities_imported=legacy_outcome.activities_imported,
+                            activities_updated=legacy_outcome.activities_updated,
+                            activities_skipped=legacy_outcome.activities_skipped,
                             heart_rate_records_matched=(
-                                outcome.heart_rate_records_matched
+                                legacy_outcome.heart_rate_records_matched
                             ),
-                            warning_count=outcome.warning_count,
-                            discipline_counts=outcome.discipline_counts or {},
+                            warning_count=legacy_outcome.warning_count,
+                            discipline_counts=(legacy_outcome.discipline_counts or {}),
                         ),
                         keyboards.keyboard_for_step(
                             result.current_step,
                             result.answers,
                             strava_enabled=self._strava_enabled,
                             apple_health_enabled=self._apple_health_enabled,
+                            tcx_enabled=self._tcx_enabled,
                         ),
                     )
             text = messages.step_prompt(result.current_step)
@@ -542,6 +944,7 @@ class CoachBotApplicationService:
                     result.answers,
                     strava_enabled=self._strava_enabled,
                     apple_health_enabled=self._apple_health_enabled,
+                    tcx_enabled=self._tcx_enabled,
                 ),
             )
         if result.kind == "summary":
@@ -667,6 +1070,13 @@ class CoachBotApplicationService:
             return OnboardingStep(value)
         except ValueError as exc:
             raise OnboardingApplicationError("invalid_action") from exc
+
+    @staticmethod
+    def _workout_flow_step(value: str) -> WorkoutFlowStep:
+        try:
+            return WorkoutFlowStep(value.upper())
+        except ValueError as exc:
+            raise WorkoutFeedbackError("invalid_action") from exc
 
     @staticmethod
     def _split_callback(value: str, *, parts: int) -> tuple[str, ...]:

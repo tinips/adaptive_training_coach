@@ -427,6 +427,7 @@ async def test_ready_home_never_offers_sync_without_healthy_connection(
 
     assert labels == [
         keyboards.LABELS["reconnect_strava"],
+        keyboards.LABELS["add_workout"],
         keyboards.LABELS["view_baseline"],
         keyboards.LABELS["view_profile"],
         keyboards.LABELS["help"],

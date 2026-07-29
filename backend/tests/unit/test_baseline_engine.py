@@ -11,6 +11,7 @@ import pytest
 from app.domain.enums import (
     BaselineStatus,
     Discipline,
+    HeartRateSource,
     LevelLabel,
 )
 from app.schemas.baseline import BaselineActivity
@@ -209,6 +210,8 @@ class ActivityRecordFake:
     duration_seconds: int
     distance_meters: float | None
     average_heart_rate: float | None
+    average_heart_rate_source: HeartRateSource = HeartRateSource.UNAVAILABLE
+    heart_rate_reliable: bool = False
 
 
 class ActivityRepositoryFake:
@@ -281,3 +284,52 @@ async def test_baseline_service_never_reads_another_users_activity() -> None:
     assert activities.queried_users == [owner]
     assert run.total_duration_seconds == 3600
     assert baselines.created[0]["user_id"] == owner
+
+
+@pytest.mark.asyncio
+async def test_baseline_service_excludes_user_reported_manual_heart_rate() -> None:
+    owner = uuid4()
+    activities = ActivityRepositoryFake(
+        [
+            ActivityRecordFake(
+                id=uuid4(),
+                user_id=owner,
+                sport=Discipline.RUN,
+                started_at=END - timedelta(days=1),
+                duration_seconds=3600,
+                distance_meters=10_000,
+                average_heart_rate=172,
+                average_heart_rate_source=HeartRateSource.USER_REPORTED,
+                heart_rate_reliable=True,
+            ),
+            ActivityRecordFake(
+                id=uuid4(),
+                user_id=owner,
+                sport=Discipline.RUN,
+                started_at=END - timedelta(days=2),
+                duration_seconds=3600,
+                distance_meters=10_000,
+                average_heart_rate=148,
+                average_heart_rate_source=HeartRateSource.MEASURED_SENSOR,
+                heart_rate_reliable=True,
+            ),
+        ]
+    )
+    baselines = BaselineRepositoryFake()
+    service = BaselineService(
+        activities=activities,
+        baselines=baselines,
+        clock=lambda: END,
+    )
+
+    result = await service.recalculate(user_id=owner, analysis_end=END)
+
+    run = next(item for item in result.disciplines if item.discipline == Discipline.RUN)
+    assert run.sessions_count == 2
+    assert run.metrics["heart_rate_coverage"] == 0.5
+    persisted_run = next(
+        item
+        for item in baselines.created[0]["disciplines"]  # type: ignore[union-attr]
+        if item["discipline"] is Discipline.RUN
+    )
+    assert persisted_run["metrics"]["heart_rate_coverage"] == 0.5

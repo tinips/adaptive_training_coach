@@ -33,11 +33,13 @@ from app.db.models import (
 from app.domain.enums import (
     BaselinePreferenceStatus,
     BaselineSource,
+    BaselineStatus,
     ConnectionStatus,
     OnboardingStatus,
     OnboardingStep,
     UserStatus,
 )
+from app.repositories.baselines import BaselineRepository
 from app.repositories.onboarding import OnboardingRepository
 from app.repositories.strava import StravaRepository
 from app.repositories.users import UserRepository
@@ -132,6 +134,46 @@ async def test_finalization_is_atomic_and_idempotent(
     assert profile_count == 1
     assert onboarding is not None
     assert onboarding.status is OnboardingStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_file_import_baseline_finalizes_as_ready_source(
+    database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
+) -> None:
+    _, factory = database
+    answers = complete_answers()
+    answers["baseline_source"] = "FILE_IMPORT"
+    user_id = await stage_user(
+        factory,
+        telegram_id=103,
+        answers=answers,
+    )
+    now = datetime(2026, 7, 29, 12, tzinfo=UTC)
+    async with factory.begin() as session:
+        await BaselineRepository(session).create(
+            user_id=user_id,
+            generated_at=now,
+            analysis_start=now,
+            analysis_end=now,
+            source=BaselineSource.FILE_IMPORT,
+            status=BaselineStatus.INSUFFICIENT_DATA,
+            overall_confidence=0,
+            disciplines=[],
+        )
+
+    finalized = await ProfileService(factory).finalize(user_id=user_id)
+
+    async with factory() as session:
+        user = await session.get(User, user_id)
+        preference = await session.scalar(
+            select(BaselinePreference).where(BaselinePreference.user_id == user_id)
+        )
+    assert finalized.baseline_source is BaselineSource.FILE_IMPORT
+    assert user is not None
+    assert user.status is UserStatus.BASELINE_READY
+    assert preference is not None
+    assert preference.selected_source is BaselineSource.FILE_IMPORT
+    assert preference.status is BaselinePreferenceStatus.READY
 
 
 @pytest.mark.asyncio

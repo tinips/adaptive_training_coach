@@ -15,7 +15,6 @@ from app.bot.notifier import TelegramInitialSyncNotifier
 from app.config import Settings, get_settings
 from app.db.session import create_engine, create_session_factory
 from app.logging import configure_logging
-from app.services.apple_health import AppleHealthImportService
 from app.services.strava.orchestrator import StravaCoordinator
 
 logger = logging.getLogger(__name__)
@@ -45,17 +44,14 @@ def create_app(
         settings=runtime_settings,
         initial_sync_notifier=initial_sync_notifier,
     )
-    apple_health_import = AppleHealthImportService(
-        session_factory=session_factory,
-        settings=runtime_settings,
-    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         configure_logging(runtime_settings.log_level)
+        # Telegram upload recovery belongs to the bot delivery worker. Running
+        # it in the API process could cancel a live upload owned by that worker.
         try:
             await strava_coordinator.recover_stale_work()
-            await apple_health_import.recover_stale_work()
         except Exception as exc:
             logger.error(
                 "Startup work recovery failed type=%s",
@@ -78,7 +74,6 @@ def create_app(
     application.state.engine = runtime_engine
     application.state.session_factory = session_factory
     application.state.strava_coordinator = strava_coordinator
-    application.state.apple_health_import = apple_health_import
     application.include_router(health_router)
     application.include_router(strava_router)
     return application

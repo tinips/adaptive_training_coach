@@ -608,11 +608,11 @@ class OnboardingStateMachine:
             return OnboardingStep.COACH_TONE
         if current_step is OnboardingStep.BASELINE_SOURCE:
             source = answers.get(answer_key(OnboardingStep.BASELINE_SOURCE))
-            return (
-                OnboardingStep.APPLE_HEALTH_PRIVACY_NOTICE
-                if source == BaselineSource.APPLE_HEALTH_EXPORT.value
-                else OnboardingStep.SUMMARY
-            )
+            if source == BaselineSource.FILE_IMPORT.value:
+                return OnboardingStep.FILE_IMPORT_WAITING
+            if source == BaselineSource.APPLE_HEALTH_EXPORT.value:
+                return OnboardingStep.APPLE_HEALTH_PRIVACY_NOTICE
+            return OnboardingStep.SUMMARY
         raise OnboardingStateMachineError("unsupported_transition")
 
     @classmethod
@@ -685,6 +685,18 @@ class OnboardingStateMachine:
         if current_step is OnboardingStep.APPLE_HEALTH_PRIVACY_NOTICE:
             return OnboardingTransition(
                 current_step=OnboardingStep.BASELINE_SOURCE,
+                answers=dict(answers),
+                return_to_summary=return_to_summary,
+            )
+        if current_step is OnboardingStep.FILE_IMPORT_WAITING:
+            return OnboardingTransition(
+                current_step=OnboardingStep.BASELINE_SOURCE,
+                answers=dict(answers),
+                return_to_summary=return_to_summary,
+            )
+        if current_step is OnboardingStep.FILE_IMPORT_COMPLETE:
+            return OnboardingTransition(
+                current_step=OnboardingStep.FILE_IMPORT_WAITING,
                 answers=dict(answers),
                 return_to_summary=return_to_summary,
             )

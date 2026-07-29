@@ -72,6 +72,9 @@ class Settings(BaseSettings):
     )
     apple_health_import_temp_dir: Path | None = None
     apple_health_import_keep_original_files: bool = False
+    tcx_import_enabled: bool = True
+    tcx_import_max_size_mb: int = Field(default=25, ge=1, le=100)
+    workout_feedback_enabled: bool = True
 
     @field_validator("telegram_bot_username", mode="before")
     @classmethod
@@ -116,6 +119,8 @@ class Settings(BaseSettings):
             "strava_initial_sync_days": self.strava_initial_sync_days,
             "strava_sync_page_size": self.strava_sync_page_size,
             "apple_health_import_enabled": self.apple_health_import_enabled,
+            "tcx_import_enabled": self.tcx_import_enabled,
+            "workout_feedback_enabled": self.workout_feedback_enabled,
         }
 
 

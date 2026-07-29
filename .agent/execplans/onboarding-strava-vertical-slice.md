@@ -403,3 +403,309 @@ Final Apple Health follow-up validation:
   `git diff --check` reported only non-failing Windows line-ending notices.
 - No live Telegram upload was claimed. All Apple Health delivery tests used
   locally generated ZIP/XML data and an injected Telegram download boundary.
+
+## Follow-up: Unified training-file import and workout feedback
+
+Requested on 2026-07-29.
+
+### Objective and user-visible outcome
+
+Extend the existing Apple Health vertical slice without replacing its secure
+parser or canonical activity/baseline path. During onboarding, one persisted
+file-import session must accept an Apple Health ZIP, sequential TCX workouts,
+or both, and calculate the initial baseline only when the athlete chooses
+**Finish import**. After onboarding, a completed athlete may upload a TCX for
+one new workout or an Apple Health ZIP for historical backfill/enrichment.
+Single daily TCX imports optionally collect confirmed manual average heart
+rate, deterministic RPE, and non-diagnostic discomfort feedback.
+
+Strava remains optional and disabled by default. This follow-up does not add a
+queue, Redis, Celery, GPX/FIT support, planning, a dashboard, medical
+diagnosis, or a generic importer framework.
+
+### Repository state before this follow-up
+
+- The only worktree item was the user-owned untracked
+  `.env copy.example`; it will remain untouched.
+- The active implementation already had secure Apple Health ZIP parsing,
+  generated temporary paths, SHA-256 file replay protection, canonical
+  activities, deterministic baselines, durable onboarding, centralized
+  Telegram copy/keyboards, and migration head `0002_apple_health_import`.
+- The current Apple flow was deliberately single-file and onboarding-only:
+  every successful file recalculated immediately and moved onboarding to a
+  terminal Apple-import state. Import jobs required an onboarding session.
+- Canonical activities had no TCX source, cross-source provenance link,
+  quality-aware metric merge, manual-HR provenance, subjective feedback, or
+  durable post-onboarding workout flow.
+- The bare `pytest` command was not on `PATH`, and the first
+  `python -m pytest -q` attempt failed because dependencies were absent. The
+  declared editable development dependencies were reinstalled successfully.
+- A subsequent collection attempt exposed an invalid local
+  `TELEGRAM_BOT_USERNAME` value from the ignored user-owned `.env`. The file
+  was not read, printed, or changed. With a non-secret process-local username
+  override, the verified starting suite was `178 passed in 15.31s`.
+
+### Architecture and security decisions
+
+1. Keep one secure document boundary: resolve the Telegram owner and durable
+   flow before download, use a generated temporary path, bound the download,
+   calculate SHA-256, detect the actual content, parse in a worker thread, and
+   delete the temporary file after every outcome. Telegram names and MIME data
+   remain hints only.
+2. Reuse the Apple Health parser unchanged where possible and add one narrowly
+   scoped, entity/DTD/network-safe TCX parser. TCX source keys are stable across
+   metric enrichment and dated non-standard sport labels normalize
+   deterministically.
+3. Generalize the existing durable import job additively with detected format,
+   onboarding/daily context, optional onboarding ownership, and the canonical
+   activity produced by a single TCX. Exact-file replay remains scoped to
+   `user_id + SHA-256`.
+4. Add an ownership-scoped activity source-link table. One canonical activity
+   can therefore retain Apple Health and TCX identities without double-counting
+   the baseline.
+5. Centralize conservative cross-source matching thresholds. Automatic merge
+   requires one unambiguous owned candidate with compatible sport, close UTC
+   start, similar duration, and similar distance when both distances exist.
+6. Merge metrics non-destructively using the required precedence: reliable
+   sensor data, reliable provider summary, derived data, user-reported data,
+   then unavailable. A missing or lower-quality value never erases a better
+   canonical value.
+7. Store manual heart rate and subjective feedback in one owned
+   `activity_feedback` record per activity. Manual HR may be the displayed
+   canonical average only while no better measurement exists; it remains in
+   feedback history after later sensor enrichment and is excluded from
+   sample-based HR coverage.
+8. Persist the post-onboarding conversation separately from completed
+   onboarding. Its expected state, owned activity, staged manual HR, and staged
+   discomfort description survive restarts; callbacks carry intent rather than
+   personal identifiers.
+9. Onboarding files are bulk imports. Each file returns to the durable waiting
+   state and never creates per-workout questionnaires. **Finish import**
+   verifies at least one valid session activity, appends a `FILE_IMPORT`
+   baseline, presents cumulative discipline counts, then resumes the existing
+   onboarding summary.
+10. A post-onboarding TCX appends/recalculates the baseline before optional
+    feedback. A post-onboarding Apple ZIP recalculates after successful
+    backfill/enrichment and does not create per-workout questionnaires.
+
+### Implementation phases and progress
+
+- [x] Read the complete attached request and current ExecPlan.
+- [x] Inspect repository state, importer/security boundaries, persistence,
+  baseline engine, onboarding transitions, Telegram surfaces, tests, and
+  documentation before editing production code.
+- [x] Record the verified pre-change test baseline and environment failures.
+- [x] Add secure TCX parsing and synthetic parser tests.
+- [x] Add schema enums/fields, source links, feedback and durable workout-flow
+  persistence, plus migration `0003`.
+- [x] Add centralized activity matching and quality-aware enrichment.
+- [x] Generalize the import service for onboarding and daily ZIP/TCX behavior.
+- [x] Extend onboarding finish behavior and profile finalization for
+  `FILE_IMPORT`.
+- [x] Add `/add_workout`, direct document routing, resumable feedback, messages,
+  keyboards, and optional latest-workout enrichment.
+- [x] Add focused use-case, integration, scenario, handler, rendering, config,
+  and regression tests using synthetic data only.
+- [x] Update `.env.example` and README in English.
+- [x] Pass pytest, Ruff, formatting, strict mypy, portable empty/current
+  migrations, schema-drift, FastAPI health/readiness, Telegram construction,
+  cleanup, and tracked-data/secret checks.
+- [ ] Repeat the current and empty migration checks against PostgreSQL when a
+  Docker/PostgreSQL runtime is available; the Docker CLI was absent from this
+  execution environment.
+
+### Planned validation
+
+Run from `backend`, using module entry points because the user-level scripts
+directory is not on `PATH`:
+
+```powershell
+$env:TELEGRAM_BOT_USERNAME = "adaptive_coach_bot"
+python -m pytest -q
+python -m ruff check .
+python -m ruff format --check .
+python -m mypy app
+python -m alembic upgrade head
+python -m alembic current
+python -m alembic check
+```
+
+The final evidence will separately record current-database and disposable
+empty-database upgrades, API and Telegram construction, temporary-file
+cleanup, and the fact that no live Telegram upload is claimed without a real
+bot/file exchange.
+
+### Follow-up discoveries and final decisions
+
+- The ignored local `.env` contains a non-secret but invalid public Telegram
+  username value. It was neither printed nor changed. Test collection now uses
+  a process-local non-secret username fallback, so the repository test command
+  is hermetic without mutating user configuration.
+- Startup recovery originally used a 30-minute cutoff and was composed in both
+  FastAPI and Telegram. That could either strand a prompt restart or let the
+  API process cancel a live bot upload. Unified import recovery now runs only
+  in the Telegram delivery worker and immediately fails work owned by the
+  prior bot process before accepting updates.
+- The generated upload path is recorded on the durable import job before
+  document bytes are downloaded. Normal cleanup clears it; startup recovery
+  restores onboarding and deletes recorded files left by a terminated process.
+  Deletion accepts only the generated prefix/suffix inside the configured
+  temporary directory.
+- Actual file growth is monitored during the asynchronous Telegram download;
+  metadata remains only a hint. Format-specific compressed ZIP and TCX limits
+  are still enforced again after content detection.
+- Cancellation and restart races are guarded transactionally. A terminal job
+  is rechecked under lock before any activity write, and onboarding is restored
+  from `FILE_IMPORT_PROCESSING` to a recoverable state.
+- Feedback Back callbacks now include their rendered origin state. Replaying a
+  stale callback returns the current durable state instead of moving backward
+  twice. Leaving **Add workout** also cancels the durable waiting flow.
+- Daily file recalculation preserves an existing Strava/manual baseline-source
+  preference and lifecycle instead of silently replacing it with
+  `FILE_IMPORT`; onboarding completion still persists `FILE_IMPORT` as
+  required.
+- Reliable Apple Health short-interval samples retain measured-sensor
+  provenance. Unreliable provider data remains below reliable measured or
+  provider summaries, while confirmed manual HR remains separately auditable.
+- Completion and daily-result copy now states when the deterministic baseline
+  is partial and disciplines remain `UNKNOWN`. Apple Health daily copy no
+  longer tells a completed athlete to finish onboarding.
+
+### Unified training-file follow-up validation evidence
+
+Validated on 2026-07-29:
+
+- `python -m pytest -q`: 288 passed in 15.94 seconds.
+- `python -m ruff check .`: passed.
+- `python -m ruff format --check .`: 125 files already formatted.
+- `python -m mypy app`: no issues in 98 application source files.
+- `python -m pytest -q tests/integration/test_persistence_migration.py
+  tests/api/test_health.py tests/bot/test_main.py`: 10 passed in 7.64 seconds.
+  These cover empty migration upgrade/downgrade, a data-preserving
+  `0002`-to-`0003` upgrade, real FastAPI lifespan with `/health` and `/ready`,
+  Strava-disabled startup without credentials, Telegram runtime recovery and
+  construction, and the registered document handler.
+- A disposable empty SQLite database upgraded through
+  `0003_unified_training_import (head)` and `python -m alembic check` reported
+  `No new upgrade operations detected`; the disposable file was removed after
+  validation.
+- Real PostgreSQL current/empty upgrades could not be repeated because
+  `Get-Command docker` reported that the Docker CLI is unavailable. The
+  migration remains covered by both portable empty and populated-`0002`
+  integration tests, but this is not represented as live PostgreSQL evidence.
+- Temp-file tests cover success, failure, cancellation, actual-size overflow,
+  and bot-restart cleanup of a recorded file. The tracked-file scan found zero
+  ZIP/TCX/FIT/GPX/export XML artifacts, zero tracked `.env` files, and zero
+  files matching the high-risk token/private-key patterns.
+- The local `.env` remains ignored. No real Apple Health export, personal TCX,
+  credential, live provider call, or live Telegram document was used or
+  claimed.
+
+## Follow-up: complete local Docker Compose application
+
+### Objective and decisions
+
+The complete local application should start from the repository root with
+`docker compose up --build`. One Python 3.12 backend image is reused for the
+one-shot migration, FastAPI, and Telegram long-polling services. Compose
+contains exactly four services:
+
+- `db`: PostgreSQL 17 with a persistent development volume and health check.
+- `migrate`: waits for PostgreSQL and runs `alembic upgrade head` once.
+- `api`: waits for a successful migration and serves FastAPI on port 8000.
+- `bot`: waits for a successful migration and API health, then starts exactly
+  one polling process without exposing a port.
+
+The Compose environment overrides only `DATABASE_URL` so containers use the
+internal `db` hostname. Runtime configuration and local credentials continue
+to come from the ignored root `.env`; no secret or environment file is copied
+into the backend image. Default feature flags keep Strava disabled and Apple
+Health and TCX imports enabled.
+
+### Progress
+
+- [x] Add one minimal `backend/Dockerfile` based on Python 3.12 slim.
+- [x] Exclude local environments, tests, caches, databases, and `.env` from the
+  backend build context.
+- [x] Expand Compose to the exact `db`, `migrate`, `api`, and `bot` topology
+  with health/completion-gated dependencies.
+- [x] Document the one-command PowerShell startup, health checks, migration
+  logs, persistent database behavior, and destructive `down -v` warning.
+- [ ] Validate Compose parsing, image build, migrations, API readiness, and
+  single bot runtime when a Docker CLI and valid local Telegram configuration
+  are available.
+- [x] Re-run pytest, Ruff, formatting, and strict mypy for the completed
+  infrastructure follow-up.
+
+### Validation evidence
+
+Validated on 2026-07-29:
+
+- A PyYAML structural check confirmed exactly `db`, `migrate`, `api`, and
+  `bot`; one shared backend image/build definition; the internal PostgreSQL
+  URL; `.env` inheritance; and the required database-health and
+  migration-success dependency conditions. The bot is explicitly limited to
+  one replica and starts only after API readiness.
+- Dockerfile invariants confirmed Python 3.12 slim, `/app`, unbuffered output,
+  only explicit backend source/package copies, and no `.env` copy.
+- `python -m pytest -q`: 288 passed in 19.29 seconds.
+- `python -m ruff check .`: passed.
+- `python -m ruff format --check .`: 125 files already formatted.
+- `python -m mypy app`: no issues in 98 application source files.
+- `git diff --check`: passed. The root `.env` remains ignored, and a
+  filename-only tracked-file scan found zero files matching high-risk token or
+  private-key patterns.
+- `docker compose config`, image build, live PostgreSQL migration, API
+  readiness, and bot polling could not be executed because `Get-Command
+  docker` reported that the Docker CLI is unavailable. No live-container,
+  live-Telegram, or live-provider result is claimed.
+
+## Follow-up: local Adminer database inspection
+
+Requested on 2026-07-29.
+
+### Objective and decisions
+
+Add the official Adminer image as one local-development Compose service without
+changing application code, database configuration, credentials, schema, or the
+PostgreSQL volume. Adminer binds only to `127.0.0.1:8080`, waits for the
+existing `db` health check, and reaches PostgreSQL through the Compose hostname
+`db`.
+
+### Progress
+
+- [x] Inspect the existing Compose file and preserve the current `db`,
+  `migrate`, `api`, and `bot` configuration.
+- [x] Add exactly one `adminer` service with a loopback-only port binding and
+  healthy-database dependency.
+- [x] Document startup, browser access, local login fields, direct-access
+  warnings, and volume-preserving versus destructive shutdown.
+- [x] Validate the rendered Compose configuration and live five-service stack.
+
+### Validation evidence
+
+Validated on 2026-07-29:
+
+- `docker compose config` rendered successfully. The Adminer port is published
+  with host IP `127.0.0.1`, and its `db` dependency requires
+  `service_healthy`.
+- `docker compose config --services` listed `db`, `adminer`, `migrate`, `api`,
+  and `bot`: the original four services plus exactly one new service.
+- `docker compose up -d` pulled `adminer:latest`, preserved the existing
+  startup gates, and started the stack successfully.
+- `docker compose ps -a` showed healthy `db`, exited-zero `migrate`, healthy
+  running `api`, running `bot`, and running `adminer` bound only to
+  `127.0.0.1:8080`.
+- `docker compose logs adminer` showed the PHP server listening on container
+  port 8080 without startup errors.
+- `http://localhost:8080`, `/health`, and `/ready` each returned HTTP 200.
+- A PHP PDO query executed inside the Adminer container connected to
+  `pgsql:host=db;dbname=adaptive_coach` as `coach` and returned `1`. This
+  verifies the Adminer runtime can reach PostgreSQL with the documented local
+  connection values.
+- The first two inline PHP connection probes failed because PowerShell/Docker
+  argument quoting removed the PHP string delimiters. Rewriting the probe with
+  PowerShell double quotes and PHP single-quoted strings fixed the command; no
+  repository or runtime configuration changed.
+- No controllable browser was available, so a browser-form login was not
+  performed or claimed.

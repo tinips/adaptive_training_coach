@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.api.dependencies import get_session_factory
 from app.api.main import create_app
 from app.config import Settings
+from app.db.base import Base
 
 
 @pytest.fixture
@@ -55,6 +56,45 @@ async def test_ready_reports_database_success(test_settings: Settings) -> None:
     assert response.status_code == 200
     assert response.json() == {"status": "ready"}
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_lifespan_health_and_readiness_start_without_strava_credentials() -> None:
+    settings = Settings(
+        environment="test",
+        database_url="sqlite+aiosqlite:///:memory:",
+        telegram_bot_token=None,
+        telegram_bot_username="adaptive_training_coach_bot",
+        llm_mode="mock",
+        llm_api_key=None,
+        strava_enabled=False,
+        strava_client_id=None,
+        strava_client_secret=None,
+        strava_webhook_verify_token=None,
+        strava_webhook_subscription_id=None,
+    )
+    engine = create_async_engine(settings.database_url)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    application = create_app(settings, engine=engine)
+    transport = httpx.ASGITransport(app=application)
+
+    assert settings.strava_enabled is False
+    assert settings.strava_client_id is None
+    assert settings.strava_client_secret is None
+
+    async with application.router.lifespan_context(application):
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            health_response = await client.get("/health")
+            ready_response = await client.get("/ready")
+
+    assert health_response.status_code == 200
+    assert health_response.json() == {"status": "ok"}
+    assert ready_response.status_code == 200
+    assert ready_response.json() == {"status": "ready"}
 
 
 @pytest.mark.asyncio

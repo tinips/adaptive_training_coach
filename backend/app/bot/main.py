@@ -19,10 +19,11 @@ from app.config import Settings, get_settings
 from app.db.session import create_engine, create_session_factory
 from app.logging import configure_logging
 from app.services.accounts import AccountQueryService, AccountService
-from app.services.apple_health import AppleHealthImportService
 from app.services.onboarding import OnboardingService
 from app.services.profiles import ProfileService
 from app.services.strava.orchestrator import StravaCoordinator
+from app.services.training_import import TrainingFileImportService
+from app.services.workout_feedback import WorkoutFeedbackService
 from app.workflows.onboarding_text.graph import create_onboarding_text_parser
 
 TelegramApplication = Application[Any, Any, Any, Any, Any, Any]
@@ -35,7 +36,7 @@ class BotRuntime:
     settings: Settings
     engine: AsyncEngine
     strava: StravaCoordinator
-    apple_health: AppleHealthImportService
+    apple_health: TrainingFileImportService
     service: CoachBotApplicationService
 
     async def recover(self) -> None:
@@ -78,7 +79,7 @@ def build_runtime(
         settings=runtime_settings,
         initial_sync_notifier=initial_sync_notifier,
     )
-    apple_health = AppleHealthImportService(
+    apple_health = TrainingFileImportService(
         session_factory=session_factory,
         settings=runtime_settings,
     )
@@ -93,8 +94,11 @@ def build_runtime(
         accounts=AccountService(session_factory),
         strava=strava,
         apple_health=apple_health,
+        workout_feedback=WorkoutFeedbackService(session_factory),
         strava_enabled=runtime_settings.strava_enabled,
         apple_health_enabled=runtime_settings.apple_health_import_enabled,
+        tcx_enabled=runtime_settings.tcx_import_enabled,
+        workout_feedback_enabled=runtime_settings.workout_feedback_enabled,
     )
     return BotRuntime(
         settings=runtime_settings,

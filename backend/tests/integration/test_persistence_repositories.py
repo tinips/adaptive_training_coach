@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
@@ -17,6 +18,9 @@ from sqlalchemy.ext.asyncio import (
 
 from app.db.base import Base
 from app.db.models import (
+    Activity,
+    ActivityFeedback,
+    ActivitySourceLink,
     AthleteBaseline,
     BaselinePreference,
     BodyArea,
@@ -29,6 +33,7 @@ from app.db.models import (
     HealthConstraint,
     HealthConstraintType,
     OnboardingSession,
+    WorkoutFlowSession,
 )
 from app.domain.enums import (
     ActivitySource,
@@ -41,6 +46,8 @@ from app.domain.enums import (
     DetailLevel,
     Discipline,
     GoalPriority,
+    HeartRateSource,
+    HeartRateTemporalQuality,
     LevelLabel,
     OAuthProvider,
     OnboardingStep,
@@ -51,7 +58,9 @@ from app.domain.enums import (
     WebhookObjectType,
     WebhookProcessingStatus,
 )
+from app.integrations.apple_health.models import ParsedWorkout
 from app.integrations.strava.exceptions import StravaAuthenticationError
+from app.integrations.tcx.models import ParsedTCXActivity, ParsedTCXPosition
 from app.repositories import (
     AvailabilityRuleInput,
     BaselineRepository,
@@ -62,6 +71,7 @@ from app.repositories import (
     StravaRepository,
     UserRepository,
 )
+from app.repositories.activities import TrainingActivityRepository
 from app.repositories.errors import OwnedRecordNotFoundError
 from app.schemas.strava import StravaTokenResponse
 from app.security.encryption import TokenCipher
@@ -106,6 +116,8 @@ async def create_user(
 def test_model_metadata_has_every_entity_and_postgresql_jsonb() -> None:
     assert set(Base.metadata.tables) == {
         "activities",
+        "activity_feedback",
+        "activity_source_links",
         "apple_health_import_jobs",
         "athlete_baselines",
         "athlete_profiles",
@@ -124,6 +136,7 @@ def test_model_metadata_has_every_entity_and_postgresql_jsonb() -> None:
         "strava_webhook_events",
         "training_goals",
         "users",
+        "workout_flow_sessions",
     }
     answers_type = OnboardingSession.__table__.c.answers.type.dialect_impl(
         dialect(),
@@ -136,6 +149,9 @@ def test_model_metadata_has_every_entity_and_postgresql_jsonb() -> None:
     )
     assert active_index.unique
     assert active_index.dialect_options["postgresql"]["where"] is not None
+    assert ActivitySourceLink.__table__.c.file_sha256.nullable
+    assert ActivityFeedback.__table__.c.feedback_created_at.nullable
+    assert WorkoutFlowSession.__table__.c.activity_id.nullable
 
 
 async def test_onboarding_resumes_and_never_crosses_user_scope(
@@ -660,3 +676,169 @@ async def test_baseline_versions_and_reads_are_user_owned(
                 overall_confidence=0.65,
                 disciplines=[discipline],
             )
+
+
+async def test_training_activity_import_merges_sources_idempotently_per_user(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    started_at = datetime(2026, 7, 29, 6, 30, tzinfo=UTC)
+    apple = ParsedWorkout(
+        source_record_key="apple-workout-1",
+        source_workout_type="HKWorkoutActivityTypeRunning",
+        discipline=Discipline.RUN,
+        source_name="Watch",
+        source_version=None,
+        device=None,
+        started_at=started_at,
+        ended_at=started_at + timedelta(hours=1),
+        duration_seconds=3600,
+        distance_meters=10_000,
+        calories_kcal=650,
+    )
+    tcx = ParsedTCXActivity(
+        source_record_key="tcx-workout-1",
+        activity_id="workout-1",
+        source_sport_type="Running",
+        discipline=Discipline.RUN,
+        started_at=started_at + timedelta(seconds=20),
+        ended_at=started_at + timedelta(seconds=3625),
+        duration_seconds=3605,
+        distance_meters=10_020,
+        calories_kcal=None,
+        elevation_gain_meters=120,
+        minimum_altitude_meters=10,
+        maximum_altitude_meters=55,
+        average_heart_rate=150,
+        max_heart_rate=175,
+        heart_rate_sample_count=120,
+        heart_rate_quality=HeartRateTemporalQuality.EXACT_SAMPLE,
+        heart_rate_reliable=True,
+        heart_rate_provenance=HeartRateSource.MEASURED_SENSOR.value,
+        average_cadence=172,
+        cadence_sample_count=120,
+        route_positions=(
+            ParsedTCXPosition(
+                timestamp=started_at,
+                latitude_degrees=41.39,
+                longitude_degrees=2.17,
+                altitude_meters=10,
+                distance_meters=0,
+            ),
+        ),
+        warnings=(),
+    )
+
+    async with session_factory() as session:
+        user_id = await create_user(session, telegram_user_id=909)
+        other_user_id = await create_user(session, telegram_user_id=910)
+        repository = TrainingActivityRepository(session)
+
+        canonical, apple_outcome = await repository.import_apple_workout(
+            user_id=user_id,
+            workout=apple,
+            file_sha256="a" * 64,
+            import_job_id=None,
+        )
+        merged, tcx_outcome, match_kind = await repository.import_tcx_activity(
+            user_id=user_id,
+            parsed=tcx,
+            file_sha256="b" * 64,
+            import_job_id=None,
+        )
+        replayed, replay_outcome, replay_kind = await repository.import_tcx_activity(
+            user_id=user_id,
+            parsed=tcx,
+            file_sha256="b" * 64,
+            import_job_id=None,
+        )
+        sibling, sibling_outcome, sibling_kind = await repository.import_tcx_activity(
+            user_id=user_id,
+            parsed=replace(
+                tcx,
+                source_record_key="tcx-workout-2",
+                activity_id="workout-2",
+            ),
+            file_sha256="c" * 64,
+            import_job_id=None,
+        )
+        (
+            isolated,
+            isolated_outcome,
+            isolated_kind,
+        ) = await repository.import_tcx_activity(
+            user_id=other_user_id,
+            parsed=tcx,
+            file_sha256="b" * 64,
+            import_job_id=None,
+        )
+        await session.flush()
+
+        owned_activity_count = await session.scalar(
+            select(func.count())
+            .select_from(Activity)
+            .where(Activity.user_id == user_id)
+        )
+        owned_source_link_count = await session.scalar(
+            select(func.count())
+            .select_from(ActivitySourceLink)
+            .where(ActivitySourceLink.user_id == user_id)
+        )
+
+        assert apple_outcome == "inserted"
+        assert merged.id == canonical.id
+        assert (tcx_outcome, match_kind) == ("updated", "cross_source")
+        assert merged.source is ActivitySource.APPLE_HEALTH
+        assert merged.distance_meters == 10_000
+        assert merged.elevation_gain_meters == 120
+        assert merged.average_heart_rate == 150
+        assert merged.average_heart_rate_source is HeartRateSource.MEASURED_SENSOR
+        assert merged.average_cadence == 172
+        assert merged.route_points
+        assert replayed.id == canonical.id
+        assert (replay_outcome, replay_kind) == ("unchanged", "source_key")
+        assert sibling.id != canonical.id
+        assert (sibling_outcome, sibling_kind) == ("inserted", "new")
+        assert isolated.id != canonical.id
+        assert (isolated_outcome, isolated_kind) == ("inserted", "new")
+        assert owned_activity_count == 2
+        assert owned_source_link_count == 3
+
+
+@pytest.mark.asyncio
+async def test_apple_short_interval_samples_keep_measured_sensor_provenance(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    started_at = datetime(2026, 7, 29, 7, tzinfo=UTC)
+    workout = ParsedWorkout(
+        source_record_key="apple-short-interval",
+        source_workout_type="HKWorkoutActivityTypeRunning",
+        discipline=Discipline.RUN,
+        source_name="Synthetic Watch",
+        source_version=None,
+        device=None,
+        started_at=started_at,
+        ended_at=started_at + timedelta(minutes=45),
+        duration_seconds=2700,
+        distance_meters=7500,
+        calories_kcal=450,
+        average_heart_rate=146,
+        max_heart_rate=169,
+        heart_rate_sample_count=24,
+        heart_rate_quality=HeartRateTemporalQuality.SHORT_INTERVAL,
+        heart_rate_reliable=True,
+    )
+
+    async with session_factory() as session:
+        user_id = await create_user(session, telegram_user_id=911)
+        activity, outcome = await TrainingActivityRepository(
+            session
+        ).import_apple_workout(
+            user_id=user_id,
+            workout=workout,
+            file_sha256="d" * 64,
+            import_job_id=None,
+        )
+
+        assert outcome == "inserted"
+        assert activity.average_heart_rate_source is HeartRateSource.MEASURED_SENSOR
+        assert activity.heart_rate_reliable is True

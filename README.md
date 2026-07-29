@@ -2,9 +2,11 @@
 
 Adaptive Endurance Coach is a modular Python application that creates a
 persisted athlete profile through Telegram and establishes an activity-data
-baseline from an Apple Health export or, when enabled, Strava. This repository
-contains the first complete product vertical slice: onboarding and baseline
-measurement.
+baseline from Apple Health ZIP or TCX files. After onboarding, athletes can
+continue their workout history with the same file-import path. Strava remains
+an optional source when explicitly enabled. This repository contains the first
+complete product vertical slice: onboarding, file-based workout logging, and
+deterministic baseline measurement.
 
 The interface is English-only for this milestone. Explicit free-text answers
 may be written in any language, including English, Catalan, and Spanish.
@@ -23,17 +25,19 @@ emergencies, and does not diagnose fitness or health conditions.
 - Explicit confirmation before an interpreted answer enters onboarding staging.
 - Database-backed live-LLM rolling-hour rate limiting.
 - Atomic, idempotent profile finalization into normalized records.
-- Secure Apple Health ZIP import with a privacy notice, persisted progress,
-  streaming XML parsing, activity/heart-rate deduplication, and automatic
-  baseline recalculation.
+- Unified Apple Health ZIP and TCX import for resumable onboarding, multiple
+  sequential files, daily workout logging, content-based format detection,
+  activity enrichment, and deterministic baseline recalculation.
+- Durable optional post-workout feedback for manual average heart rate,
+  perceived effort, and non-diagnostic discomfort details.
 - Strava OAuth 2.0 with random expiring one-time state, scope validation, and
   Fernet-encrypted tokens.
 - Token refresh and rotation, paginated activity import, deduplication, manual
   synchronization, disconnect, rate-limit handling, and webhook ingestion.
 - Deterministic discipline baselines with visible confidence and data freshness.
 - FastAPI liveness, readiness, OAuth, callback, and webhook routes.
-- Telegram `/start`, `/help`, `/profile`, `/baseline`, `/strava`, `/cancel`, and
-  `/delete_me` commands.
+- Telegram `/start`, `/help`, `/profile`, `/baseline`, `/add_workout`,
+  `/strava`, `/cancel`, and `/delete_me` commands.
 - Async SQLAlchemy persistence, PostgreSQL, Alembic, Docker Compose, tests, Ruff,
   and mypy.
 
@@ -46,9 +50,12 @@ not shown because no real calibration workflow exists yet.
 This version does not implement training-plan generation, adaptive replanning,
 daily workout advice, a conversational coaching agent, RAG, embeddings, a
 vector database, dashboards, Telegram Mini Apps, payments, nutrition planning,
-medical diagnosis, or Garmin/Coros/Xiaomi integrations.
+medical diagnosis, or live Garmin/Coros/Xiaomi sync integrations.
 
 Planning and the adaptive coach are the next product milestone.
+
+See [Current product flow](docs/current-product-flow.md) for the editable,
+as-implemented Telegram, import, feedback, and persistence flows.
 
 ## Architecture
 
@@ -65,7 +72,8 @@ Telegram handlers ─┐
                    ├─ application services ─ repositories ─ PostgreSQL
 FastAPI routes ────┘          │
                               ├─ LangGraph ─ LangChain model
-                              ├─ Apple Health ZIP/XML parser
+                              ├─ Apple Health ZIP/XML and TCX parsers
+                              ├─ deterministic workout-feedback flow
                               ├─ Strava HTTP client
                               └─ deterministic baseline engine
 ```
@@ -114,21 +122,22 @@ are excluded from observer metadata.
 
 ### Persistence and ownership
 
-The initial Alembic migration creates:
+The Alembic migrations create:
 
 - users and resumable onboarding sessions;
 - athlete profiles, training goals, availability, equipment, non-diagnostic
   health constraints, coaching preferences, and baseline preferences;
-- Apple Health import jobs, normalized heart-rate observations, OAuth states,
-  encrypted Strava connections, normalized activities, sync jobs, and webhook
-  events;
+- training-file import jobs, normalized heart-rate observations, OAuth states,
+  encrypted Strava connections, normalized activities, source-provenance
+  links, optional activity feedback, resumable workout-flow state, sync jobs,
+  and webhook events;
 - versioned athlete and discipline baselines;
 - safe LLM usage records.
 
 Personal-data repository methods always include the owning internal user. OAuth
-states are hashed, time-limited, and single-use. Imported activities are unique
-by owner, provider, and stable source key. Active Apple Health imports and
-Strava sync jobs are serialized per user.
+states are hashed, time-limited, and single-use. Imported activities and source
+links are scoped by owner and stable source key. Active training-file imports
+and Strava sync jobs are serialized per user.
 
 ## Repository layout
 
@@ -203,28 +212,85 @@ Copy the output into `APP_ENCRYPTION_KEY` in `.env`. Never commit that file or
 reuse a development key in production. Losing or changing the key makes stored
 Strava tokens unreadable and requires users to reconnect.
 
-## Start PostgreSQL and run migrations
+## Start the complete local application with Docker
 
-Start Docker Desktop, then from the repository root:
+Start Docker Desktop, then run these commands from the repository root. Run
+the copy command only when `.env` does not already exist:
 
 ```powershell
-docker compose up -d db
+Copy-Item .env.example .env
+notepad .env
+docker compose up --build
+```
+
+Before starting, set `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`, and
+`APP_ENCRYPTION_KEY` in the ignored `.env`. The default `LLM_MODE=mock` needs no
+live LLM credentials. Strava remains disabled, while Apple Health and TCX
+imports remain enabled.
+
+Compose starts PostgreSQL, waits for it to become healthy, runs
+`alembic upgrade head` once, and only then starts FastAPI and one Telegram
+long-polling bot. The API is available at `http://localhost:8000`; PostgreSQL is
+also exposed at `localhost:55432` for local tools.
+
+In another PowerShell terminal:
+
+```powershell
+Invoke-RestMethod http://localhost:8000/health
+Invoke-RestMethod http://localhost:8000/ready
 docker compose ps
-
-cd backend
-.\.venv\Scripts\Activate.ps1
-alembic upgrade head
+docker compose logs migrate
 ```
 
-To inspect migration state:
+Stop the application with `docker compose down`. PostgreSQL data survives that
+command in the named volume. `docker compose down -v` permanently deletes the
+local database, including all imported activities, profiles, and onboarding
+progress.
+
+For detached startup and log following:
 
 ```powershell
-alembic current
-alembic history
+docker compose up -d --build
+docker compose ps
+docker compose logs -f bot
+docker compose logs -f api
+docker compose down
 ```
 
-The default local database is exposed on `localhost:55432` with the disposable
-Docker development credentials shown in `docker-compose.yml`.
+Use the following destructive reset only when all local imported data may be
+discarded:
+
+```powershell
+docker compose down -v
+```
+
+## Inspecting PostgreSQL with Adminer
+
+Start the local Compose stack and confirm its services:
+
+```powershell
+docker compose up -d
+docker compose ps
+```
+
+Open `http://localhost:8080` in a browser and use:
+
+- System: `PostgreSQL`
+- Server: `db`
+- Username: `coach`
+- Password: `coach`
+- Database: `adaptive_coach`
+
+The Server field must be `db`, not `localhost`, because Adminer runs inside the
+Compose network.
+
+Adminer provides direct database access. Editing or deleting rows bypasses
+application validation. Prefer read-only inspection and `SELECT` queries.
+Never expose port 8080 publicly. Do not use this Adminer setup as a production
+admin panel.
+
+`docker compose down` preserves PostgreSQL data in the named volume.
+`docker compose down -v` deletes the PostgreSQL volume and all local data.
 
 ## Telegram BotFather setup
 
@@ -241,6 +307,7 @@ start - Start or resume onboarding
 help - Show help and safety information
 profile - View the saved athlete profile
 baseline - View the current activity baseline
+add_workout - Import a workout or training history
 strava - View or manage Strava
 cancel - Cancel active onboarding
 delete_me - Request account deletion
@@ -248,14 +315,149 @@ delete_me - Request account deletion
 
 Telegram uses long polling locally; no Telegram webhook is required.
 
-## Apple Health export import
+## Training-file import
 
-Apple Health import is enabled by default. During the baseline-source step,
-choose **Import Apple Health data**, review the privacy notice, choose
-**Continue**, then send the export as a Telegram document. A ZIP sent before
-the notice is accepted is rejected without parsing.
+Apple Health ZIP and TCX import are enabled by default. Telegram filenames and
+MIME types are treated only as hints: the service downloads to a generated
+temporary path, monitors actual file growth against the configured ceiling,
+inspects the actual content, calculates SHA-256, and then dispatches to the
+appropriate bounded parser outside the async event loop. Unsupported, unsafe,
+or oversized content fails without being interpreted as another format.
 
-On iPhone, create the file in:
+### Onboarding bulk import
+
+At **How would you like to establish your initial training baseline?**, choose
+**Import training history**. The persisted onboarding state then accepts:
+
+- one Apple Health export ZIP;
+- one or more TCX files, uploaded sequentially;
+- an Apple Health ZIP followed by TCX files, or the reverse.
+
+The other default choices are **Enter baseline manually**, **Decide later**,
+and **Back**. **Connect Strava** appears only when `STRAVA_ENABLED=true`;
+file import does not require Strava.
+
+Each document is processed independently and returns concise imported, updated,
+and skipped counts. The bot remains in the import state across uploads and
+process restarts until **Finish import** is selected. Bulk Apple Health and
+multi-TCX onboarding do not start a questionnaire for every historical
+activity.
+
+**Finish import** recalculates the deterministic baseline from owned canonical
+activities in the configured analysis window, persists `FILE_IMPORT` as the
+baseline source, reports discipline coverage, and allows onboarding to continue
+to the existing summary.
+If the current import session contains no valid activity, the baseline remains
+incomplete and the user can upload another file, choose manual entry, decide
+later, or go back. When at least one activity exists, the bot may offer
+**Add details to the most recent workout**; this is optional.
+
+### Daily workout logging and feedback
+
+After onboarding, use the **Add workout** menu action or `/add_workout`, then
+send a TCX file or Apple Health export ZIP as a Telegram document. A supported
+document sent directly while the profile is complete enters the same owned,
+persisted import flow.
+
+A single daily TCX import shows the normalized workout summary and then:
+
+1. asks for manual average heart rate only when no reliable average exists;
+2. asks optional perceived effort;
+3. asks optional pain or unusual discomfort.
+
+Apple Health ZIP is treated as historical backfill or enrichment and never
+creates one questionnaire per imported activity. The deterministic baseline is
+recalculated after a successful daily import and after measured data enriches
+an activity. A daily file does not silently replace an existing Strava or
+manual baseline-source preference.
+
+Manual average heart rate accepts a whole number from 30 through 250 bpm and is
+not persisted until the user confirms it. It is retained in the activity
+feedback record and can become the canonical average only when no better metric
+exists. Its provenance is `USER_REPORTED`, its temporal quality is `MANUAL`,
+and it is not marked reliable. It is therefore not used for time in zones,
+heart-rate distributions, maximum heart rate, cardiac drift, or other
+sample-based metrics. A later reliable measured import may replace the
+canonical average without deleting the reported value.
+
+Perceived effort stores both the display label and this deterministic numeric
+mapping:
+
+| Button | Stored RPE |
+| --- | ---: |
+| Very easy | 2 |
+| Easy | 4 |
+| Moderate | 6 |
+| Hard | 8 |
+| Very hard | 10 |
+
+RPE can be skipped. Discomfort can be stored as `No`, `Yes`, or unknown when
+skipped. A `Yes` answer can include Shoulder, Back, Hip, Knee, Ankle or foot, or
+Other; optional Mild, Moderate, or Severe intensity; and, for Other, a short
+confirmed free-text description of at most 500 characters. These values are
+subjective workout feedback, not a diagnosis. Back, skip, cancel, repeated
+callbacks, and restart/resume use database-backed flow state rather than
+in-memory Telegram state. RPE and discomfort are retained for future coaching
+and load interpretation; they do not generate a diagnosis or training plan in
+this milestone.
+
+### TCX support and limits
+
+The deterministic TCX parser accepts UTF-8 (with an optional UTF-8 BOM) Garmin
+Training Center Database v1, v2, and unnamespaced documents containing exactly
+one `Activity` and one or more `Lap` elements. Multiple laps and trackpoints
+are supported. An empty `Track` is valid when lap summaries contain enough
+information to identify and import the workout.
+
+| TCX data | Import behavior |
+| --- | --- |
+| Identity and time | Uses `Activity/Id`, lap start time, and timezone-aware trackpoint timestamps. |
+| Duration | Uses complete lap `TotalTimeSeconds`; otherwise derives a lap duration only from valid trackpoint timestamps. |
+| Distance | Uses complete lap `DistanceMeters`; otherwise uses available cumulative trackpoint distance. |
+| Heart rate | Uses timed trackpoint samples as measured data or complete lap summaries as provider data; missing HR remains `NULL`. |
+| Calories | Sums complete lap summaries; incomplete totals remain `NULL`. |
+| Cadence | Reads lap cadence, trackpoint cadence, and supported `RunCadence` extension values. |
+| Altitude and route | Reads altitude and valid latitude/longitude trackpoints; elevation gain is derived from positive changes within contiguous altitude samples. |
+| Sport | Preserves the original value and normalizes run, cycling/biking, swim, walking/hiking, strength, and other. A leading `YYYYMMDD` prefix is ignored for mapping. |
+
+The importer does not support GPX, FIT, arbitrary XML, unsupported TCX
+namespaces, or more than one `Activity` in a single TCX file. It does not
+fabricate missing moving time, pace, speed, power, SWOLF, heart rate, cadence,
+elevation, or route data. Missing optional metrics remain `NULL`. Malformed
+XML, DTD/entity declarations, unsupported roots, invalid required identity, and
+files above the configured limit are rejected safely. UTF-16 and other
+unsupported XML encodings are rejected rather than decoded heuristically.
+
+### Deduplication, matching, and metric precedence
+
+Exact file replays are detected per user by SHA-256. Apple Health workouts and
+TCX activities also receive stable source keys, so a cumulative export or the
+same TCX can be uploaded again without duplicating its source record.
+
+Cross-source merging is deliberately conservative. Two records are merged
+automatically only when they belong to the same user, have the same normalized
+sport, start within five minutes, have durations within the greater of five
+minutes or 10 percent, and, when both distances exist, have distances within
+the greater of 500 metres or 10 percent. Exactly one candidate must satisfy
+all available evidence. Ambiguous matches remain separate.
+
+Source links preserve provider identities while the canonical activity is
+enriched non-destructively. Metric precedence is:
+
+1. reliable measured sensor data;
+2. reliable provider summary;
+3. derived data;
+4. user-reported data;
+5. unavailable.
+
+`NULL` never erases an existing metric, and lower-quality data never replaces a
+higher-quality value. For example, Apple Health measured heart rate may replace
+a manual value, TCX route/elevation can fill missing Apple Health fields, and a
+TCX without heart rate cannot erase existing Apple Health heart rate.
+
+### Apple Health ZIP details
+
+On iPhone, create the export in:
 
 ```text
 Health → profile picture → Export All Health Data
@@ -282,14 +484,18 @@ Exact and short observations may contribute to averages. Coarse intervals are
 preserved and flagged, may contribute only to a maximum, and never become
 invented samples or exact averages.
 
-Uploaded files use generated temporary paths, never the Telegram filename, and
-are deleted after success or failure by default. Raw ZIP/XML content is not
-stored in PostgreSQL or application logs. Normalized activities, relevant
-heart-rate observations, safe import counters, and baseline versions are
-persisted. Re-importing cumulative exports adds or enriches records without
-duplicating or deleting earlier activities.
+Uploaded ZIP, XML, and TCX content uses generated temporary paths, never the
+Telegram filename, and is deleted after success or failure. Raw file content is
+not stored in PostgreSQL or application logs. Only normalized activities,
+relevant heart-rate observations, provenance, optional feedback, safe counters,
+and baseline versions are persisted. The generated path is associated with the
+durable import job before document bytes are downloaded. On bot startup, prior
+process jobs are failed, onboarding is restored to its waiting state, and any
+recorded temporary uploads are deleted before new updates are accepted.
 
-Resource ceilings can be adjusted without adding secrets:
+Resource ceilings and enablement flags can be adjusted without adding secrets.
+Keep original-file retention disabled so the documented cleanup contract
+remains in force:
 
 ```dotenv
 APPLE_HEALTH_IMPORT_ENABLED=true
@@ -298,7 +504,11 @@ APPLE_HEALTH_IMPORT_MAX_UNCOMPRESSED_SIZE_MB=1024
 APPLE_HEALTH_IMPORT_MAX_ZIP_MEMBERS=100
 APPLE_HEALTH_IMPORT_MAX_COMPRESSION_RATIO=200
 APPLE_HEALTH_IMPORT_TEMP_DIR=
+# Keep false: raw training uploads must not be retained.
 APPLE_HEALTH_IMPORT_KEEP_ORIGINAL_FILES=false
+TCX_IMPORT_ENABLED=true
+TCX_IMPORT_MAX_SIZE_MB=25
+WORKOUT_FEEDBACK_ENABLED=true
 ```
 
 ## Strava developer application setup
@@ -410,7 +620,16 @@ confirms or overwrites an onboarding answer. See DeepSeek's official
 [thinking-mode](https://api-docs.deepseek.com/guides/thinking_mode)
 documentation.
 
-## Start both processes
+## Run the processes without Compose (optional)
+
+For local Python development, first start only PostgreSQL and migrate it:
+
+```powershell
+docker compose up -d db
+Set-Location backend
+.\.venv\Scripts\Activate.ps1
+alembic upgrade head
+```
 
 Terminal 1 — FastAPI:
 
@@ -437,7 +656,71 @@ python -m app.bot.main
 
 The API and bot must use the same `DATABASE_URL`, `APP_ENCRYPTION_KEY`,
 `TELEGRAM_BOT_TOKEN`, and `TELEGRAM_BOT_USERNAME`. The API uses the Telegram
-token only to notify the OAuth owner after a successful initial import.
+token only to notify the OAuth owner after a successful initial Strava import.
+
+## First live Telegram import test
+
+No credentialed Telegram upload is performed by the automated suite. For the
+first live test, use a development bot and a non-sensitive TCX file whose
+metrics you can verify. Do not commit the bot token, `.env`, Apple Health
+export, or TCX file.
+
+From the repository root, prepare configuration:
+
+```powershell
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+notepad .env
+```
+
+In `.env`, set a real `TELEGRAM_BOT_TOKEN`, the BotFather username without
+`@` in `TELEGRAM_BOT_USERNAME`, and a generated `APP_ENCRYPTION_KEY`. Keep:
+
+```dotenv
+LLM_MODE=mock
+STRAVA_ENABLED=false
+APPLE_HEALTH_IMPORT_ENABLED=true
+TCX_IMPORT_ENABLED=true
+WORKOUT_FEEDBACK_ENABLED=true
+```
+
+Start the complete application:
+
+```powershell
+docker compose up --build
+```
+
+Confirm runtime health and the completed migration in a second PowerShell
+terminal:
+
+```powershell
+Invoke-RestMethod http://localhost:8000/health
+Invoke-RestMethod http://localhost:8000/ready
+docker compose ps
+docker compose logs migrate
+```
+
+Then perform the live chat test:
+
+1. Send `/start`, complete onboarding to the baseline-source question, and
+   choose **Import training history**.
+2. Send one TCX as a Telegram **Document**, verify the sport, date, duration,
+   distance, and average-HR summary, then send a second file to verify
+   sequential import.
+3. Select **Finish import**, confirm that the discipline summary appears, and
+   complete the existing onboarding summary.
+4. Send `/add_workout`, upload a single new TCX, and verify that reliable HR
+   skips manual entry while missing HR offers the confirmed 30–250 bpm path.
+5. Exercise one RPE choice and one discomfort choice, then use `/baseline` to
+   confirm that a new deterministic baseline is available.
+6. With the profile complete and no `/add_workout` prompt active, send another
+   supported document directly and confirm content-based dispatch.
+7. Optionally upload an Apple Health export ZIP to verify historical backfill;
+   use only a file whose privacy implications you have reviewed.
+
+Record the observed bot responses and check application logs only for safe
+event metadata. Successful startup alone does not validate live document
+delivery; the test is complete only after the real bot receives and processes
+the document.
 
 ## Product journey
 
@@ -446,17 +729,21 @@ token only to notify the OAuth owner after a successful initial import.
 3. Complete button-first onboarding.
 4. For an `Other`/`Write answer` path, review the structured interpretation and
    choose `Correct` before it is staged.
-5. Choose Apple Health import, manual entry, decide later, or Strava when
+5. Choose training-history import, manual entry, decide later, or Strava when
    `STRAVA_ENABLED=true`.
-6. For Apple Health, accept the privacy notice and upload the ZIP document.
-   Review the real import counters, then continue to the profile summary.
-7. Review and confirm the full profile.
-8. If using Strava, open the opaque one-time connection link and authenticate
+6. For file import, upload Apple Health ZIP and/or sequential TCX documents,
+   review each result, then select **Finish import**.
+7. Review the imported discipline summary and confirm the full profile.
+8. After onboarding, use `/add_workout`, **Add workout**, or direct supported
+   document delivery to update workout history.
+9. For a daily TCX, complete or skip the persisted HR, RPE, and discomfort
+   questions.
+10. If using Strava, open the opaque one-time connection link and authenticate
    directly on Strava. Never send Strava credentials in Telegram.
-9. After the callback, use **Open Telegram** on the success page. The bot sends
+11. After the callback, use **Open Telegram** on the success page. The bot sends
    the correct Telegram user an English confirmation after the initial import
    completes.
-10. Return to Telegram to view sync state, the imported-data summary, and
+12. Return to Telegram to view sync state, the imported-data summary, and
    discipline confidence.
 
 Progress is stored after each confirmed step and survives process restarts.
@@ -495,40 +782,59 @@ For each discipline, the engine calculates:
 - a visible confidence score;
 - `UNKNOWN`, `BEGINNER`, `DEVELOPING`, `INTERMEDIATE`, or `ADVANCED`.
 
+The shared default analysis window is 56 days for file and Strava sources.
 Thresholds are centralized and tested. They are provisional product heuristics,
 not scientifically validated fitness classifications and not physiological or
 medical diagnoses. Missing data is shown rather than inferred. The LLM never
 calculates numeric baseline metrics.
 
-A new baseline version is generated after initial sync, successful manual sync,
-meaningful webhook changes, or an explicit recalculation.
-Apple Health import also generates a deterministic baseline version after its
-normalized activity transaction succeeds. Insufficient data remains visibly
-unknown rather than being inferred.
+A new baseline version is generated after onboarding file import is finished,
+a successful daily training-file import, measured activity enrichment, initial
+Strava sync, successful manual Strava sync, meaningful webhook changes, or an
+explicit recalculation. Manual average HR alone does not create precise zones
+or thresholds. Insufficient data remains visibly partial or `UNKNOWN` rather
+than being inferred.
 
 ## Testing and static analysis
 
 From `backend` with the virtual environment active:
 
 ```powershell
-pytest
+pytest -q
 ruff check .
 ruff format --check .
 mypy app
+alembic check
 ```
 
 Focused examples:
 
 ```powershell
-pytest tests/unit
-pytest tests/use_cases
-pytest tests/integration
-pytest tests/scenarios
+pytest -q tests/unit
+pytest -q tests/use_cases
+pytest -q tests/integration
+pytest -q tests/scenarios
 ```
 
 The default suite must not make real provider calls. OAuth, token rotation,
 activity pages, rate limits, webhook events, and model outcomes use test
-doubles.
+doubles. TCX and Apple Health tests use synthetic fixtures only.
+
+For the PostgreSQL migration and runtime checks, start from the repository root:
+
+```powershell
+docker compose config --quiet
+docker compose build
+docker compose up -d
+docker compose ps
+docker compose logs migrate
+Invoke-RestMethod http://localhost:8000/health
+Invoke-RestMethod http://localhost:8000/ready
+```
+
+Constructing the Telegram application or running unit tests does not prove that
+a real bot received a document; use the explicit live procedure above for that
+claim.
 
 ## Privacy and security notes
 
@@ -543,10 +849,14 @@ doubles.
 - Raw LLM prompts and raw health descriptions are not written to `llm_usage`.
 - Interpreted values require confirmation, and low-confidence values are not
   stored.
-- OAuth state, callbacks, records, activities, baselines, and profile reads are
-  ownership-scoped.
-- Apple Health ZIPs and XML are deleted after processing and are never stored
-  as raw database payloads; only matched training observations are retained.
+- OAuth state, callbacks, import jobs, source links, activities, feedback,
+  baselines, and profile reads are ownership-scoped.
+- Apple Health ZIP/XML and TCX content is deleted after processing and is never
+  stored as a raw database payload. Generated temporary paths do not use the
+  Telegram filename; cleanup runs after success or failure and is retried from
+  recorded import metadata after a bot-process restart.
+- File contents, raw health data, complete profiles, OAuth tokens, and
+  unredacted workout-feedback text are excluded from application logs.
 - Strava usernames and passwords are never requested or accepted in Telegram;
   credentials are entered only on Strava's authorization page.
 - Disconnect and account deletion both require explicit confirmation.
@@ -565,12 +875,17 @@ cloud deployment is outside this milestone.
   be enabled only for athletes who consent to that read-only import.
 - Manual-baseline measurement is a next-milestone extension point and creates
   no fabricated metrics. Calibration is hidden until a real workflow exists.
-- Automated tests exercise Apple Health document delivery with local fixtures.
-  A real Telegram bot receiving a real Apple Health export was not validated
-  in this environment.
+- TCX supports exactly one activity per file. GPX, FIT, multiple-activity TCX,
+  moving-time inference, pace, power, speed, and SWOLF are outside this goal.
+- Automated tests use synthetic Apple Health and TCX data. A real Telegram bot
+  receiving a real Apple Health ZIP or TCX document was not validated in this
+  environment.
 - Background sync and webhook work uses a durable PostgreSQL inbox/lease with
   startup recovery, not a distributed task queue. Running multiple production
   worker processes would require an explicit deployment review.
+- Training-file recovery is intentionally owned by the single Telegram delivery
+  worker, not the FastAPI process. Multiple Telegram bot workers would require
+  an explicit lease/ownership design before deployment.
 - Baseline labels are deterministic provisional heuristics, not scientific
   fitness classifications.
 

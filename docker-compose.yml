@@ -1,3 +1,13 @@
+x-backend-service: &backend-service
+  build:
+    context: ./backend
+    dockerfile: Dockerfile
+  image: adaptive-training-coach-backend:local
+  env_file:
+    - .env
+  environment:
+    DATABASE_URL: postgresql+asyncpg://coach:coach@db:5432/adaptive_coach
+
 services:
   db:
     image: postgres:17-alpine
@@ -14,6 +24,65 @@ services:
       retries: 20
     volumes:
       - adaptive_coach_postgres:/var/lib/postgresql/data
+
+  migrate:
+    <<: *backend-service
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    <<: *backend-service
+    command:
+      [
+        "uvicorn",
+        "app.api.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+      ]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready', timeout=3)",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+    restart: unless-stopped
+
+  bot:
+    <<: *backend-service
+    command: ["python", "-m", "app.bot.main"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      api:
+        condition: service_healthy
+    deploy:
+      replicas: 1
+    restart: unless-stopped
+
+  adminer:
+    image: adminer:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
 
 volumes:
   adaptive_coach_postgres:

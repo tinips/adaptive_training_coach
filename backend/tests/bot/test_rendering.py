@@ -7,7 +7,7 @@ from datetime import UTC, date, datetime
 from telegram import InlineKeyboardMarkup
 
 from app.bot import keyboards, messages
-from app.domain.enums import OnboardingStep, SyncStatus
+from app.domain.enums import OnboardingStep, SyncStatus, WorkoutFlowStep
 
 
 def _button_labels(markup: InlineKeyboardMarkup) -> list[str]:
@@ -19,6 +19,16 @@ def _callback_values(markup: InlineKeyboardMarkup) -> list[str]:
     rows = markup.inline_keyboard
     return [
         button.callback_data
+        for row in rows
+        for button in row
+        if button.callback_data is not None
+    ]
+
+
+def _button_pairs(markup: InlineKeyboardMarkup) -> list[tuple[str, str]]:
+    rows = markup.inline_keyboard
+    return [
+        (button.text, button.callback_data)
         for row in rows
         for button in row
         if button.callback_data is not None
@@ -63,6 +73,15 @@ def test_every_callback_value_fits_telegram_limit() -> None:
             keyboards.strava_keyboard(connected=True),
             keyboards.disconnect_confirmation_keyboard(),
             keyboards.state_menu("ready", connected=True),
+            keyboards.add_workout_keyboard(),
+            keyboards.feedback_text_entry_keyboard(),
+            keyboards.manual_heart_rate_offer_keyboard(),
+            keyboards.manual_heart_rate_confirmation_keyboard(),
+            keyboards.rpe_keyboard(),
+            keyboards.discomfort_keyboard(),
+            keyboards.discomfort_area_keyboard(),
+            keyboards.discomfort_description_confirmation_keyboard(),
+            keyboards.discomfort_severity_keyboard(),
         ]
     )
 
@@ -77,6 +96,149 @@ def test_every_callback_value_fits_telegram_limit() -> None:
     assert max(len(value.encode("utf-8")) for value in callbacks) <= 64
 
 
+def test_unified_onboarding_import_copy_and_buttons_match_product_contract() -> None:
+    baseline = keyboards.keyboard_for_step(
+        OnboardingStep.BASELINE_SOURCE,
+        {},
+        strava_enabled=False,
+        apple_health_enabled=True,
+    )
+    waiting = keyboards.keyboard_for_step(
+        OnboardingStep.FILE_IMPORT_WAITING,
+        {},
+    )
+
+    assert baseline is not None
+    assert waiting is not None
+    assert messages.step_prompt(OnboardingStep.BASELINE_SOURCE) == (
+        "How would you like to establish your initial training baseline?"
+    )
+    assert _button_labels(baseline)[:4] == [
+        "Import training history",
+        "Enter baseline manually",
+        "Decide later",
+        "Back",
+    ]
+    assert _callback_values(baseline)[:4] == [
+        "ob:v1:set:BASELINE_SOURCE:FILE_IMPORT",
+        "ob:v1:set:BASELINE_SOURCE:MANUAL",
+        "ob:v1:set:BASELINE_SOURCE:SKIP_FOR_NOW",
+        "ob:v1:back:BASELINE_SOURCE",
+    ]
+    assert messages.step_prompt(OnboardingStep.FILE_IMPORT_WAITING) == (
+        "Send an Apple Health export ZIP or one or more TCX workout files.\n\n"
+        "Apple Health ZIP is recommended for importing previous history.\n"
+        "TCX is useful for individual workouts.\n\n"
+        "You can upload multiple files and finish when you are done."
+    )
+    assert _button_pairs(waiting) == [
+        ("Finish import", "ob:v1:import:finish"),
+        ("Choose another method", "ob:v1:apple:choose_other"),
+        ("Back", "ob:v1:apple:back"),
+    ]
+
+
+def test_limited_import_copy_names_partial_unknown_baseline() -> None:
+    completion = messages.training_import_complete(
+        activities_imported=1,
+        activities_updated=0,
+        activities_skipped=0,
+        discipline_counts={"RUN": 1},
+        baseline_limited=True,
+    )
+    daily_apple = messages.apple_health_file_result(
+        activities_imported=1,
+        activities_updated=0,
+        activities_skipped=0,
+        onboarding=False,
+        baseline_limited=True,
+    )
+
+    assert "partial" in completion
+    assert "UNKNOWN" in completion
+    assert "finish the import" not in daily_apple
+    assert "partial" in daily_apple
+
+
+def test_ready_menu_exposes_daily_workout_action_and_required_home_actions() -> None:
+    markup = keyboards.state_menu(
+        "ready",
+        connected=False,
+        strava_enabled=False,
+    )
+
+    assert _button_pairs(markup) == [
+        ("Add workout", "menu:v1:add_workout"),
+        ("View baseline", "menu:v1:baseline"),
+        ("View profile", "menu:v1:profile"),
+        ("Help", "menu:v1:help"),
+    ]
+
+
+def test_daily_feedback_keyboards_use_deterministic_callback_namespaces() -> None:
+    assert _button_pairs(keyboards.add_workout_keyboard()) == [
+        ("Cancel", "wf:v1:cancel"),
+        ("Back", "wf:v1:back:waiting_for_file"),
+    ]
+    assert _button_pairs(keyboards.feedback_text_entry_keyboard()) == [
+        ("Back", "wf:v1:back:hr_entry"),
+        ("Cancel", "wf:v1:cancel"),
+    ]
+    assert _button_pairs(
+        keyboards.feedback_text_entry_keyboard(state=WorkoutFlowStep.DESCRIPTION_ENTRY)
+    ) == [
+        ("Back", "wf:v1:back:description_entry"),
+        ("Cancel", "wf:v1:cancel"),
+    ]
+    assert _button_pairs(keyboards.manual_heart_rate_offer_keyboard()) == [
+        ("Enter average HR", "wf:v1:hr:enter"),
+        ("Continue without HR", "wf:v1:hr:skip"),
+        ("Cancel", "wf:v1:cancel"),
+    ]
+    assert _button_pairs(keyboards.manual_heart_rate_confirmation_keyboard()) == [
+        ("Confirm", "wf:v1:hr:confirm"),
+        ("Change", "wf:v1:hr:change"),
+        ("Skip", "wf:v1:hr:skip"),
+    ]
+    assert _button_pairs(keyboards.rpe_keyboard()) == [
+        ("Very easy", "wf:v1:rpe:very_easy"),
+        ("Easy", "wf:v1:rpe:easy"),
+        ("Moderate", "wf:v1:rpe:moderate"),
+        ("Hard", "wf:v1:rpe:hard"),
+        ("Very hard", "wf:v1:rpe:very_hard"),
+        ("Skip", "wf:v1:rpe:skip"),
+        ("Back", "wf:v1:back:rpe"),
+    ]
+    assert _button_pairs(keyboards.discomfort_keyboard()) == [
+        ("No", "wf:v1:discomfort:no"),
+        ("Yes", "wf:v1:discomfort:yes"),
+        ("Skip", "wf:v1:discomfort:skip"),
+        ("Back", "wf:v1:back:discomfort"),
+    ]
+    assert _button_pairs(keyboards.discomfort_area_keyboard()) == [
+        ("Shoulder", "wf:v1:area:shoulder"),
+        ("Back", "wf:v1:area:back"),
+        ("Hip", "wf:v1:area:hip"),
+        ("Knee", "wf:v1:area:knee"),
+        ("Ankle or foot", "wf:v1:area:ankle_foot"),
+        ("Other", "wf:v1:area:other"),
+        ("Skip details", "wf:v1:area:skip"),
+        ("Back", "wf:v1:back:body_area"),
+    ]
+    assert _button_pairs(keyboards.discomfort_description_confirmation_keyboard()) == [
+        ("Confirm", "wf:v1:description:confirm"),
+        ("Change", "wf:v1:description:change"),
+        ("Skip", "wf:v1:description:skip"),
+    ]
+    assert _button_pairs(keyboards.discomfort_severity_keyboard()) == [
+        ("Mild", "wf:v1:severity:mild"),
+        ("Moderate", "wf:v1:severity:moderate"),
+        ("Severe", "wf:v1:severity:severe"),
+        ("Skip", "wf:v1:severity:skip"),
+        ("Back", "wf:v1:back:severity"),
+    ]
+
+
 def test_state_aware_menu_exposes_only_valid_import_actions() -> None:
     labels = _button_labels(
         keyboards.state_menu(
@@ -87,7 +249,13 @@ def test_state_aware_menu_exposes_only_valid_import_actions() -> None:
         )
     )
 
-    assert labels == ["View sync status", "View profile", "Help"]
+    assert labels == [
+        "Add workout",
+        "View sync status",
+        "View baseline",
+        "View profile",
+        "Help",
+    ]
     assert "Sync now" not in labels
 
 
@@ -102,6 +270,7 @@ def test_ready_disconnected_menu_offers_reconnect_without_sync_actions() -> None
 
     assert labels == [
         "Reconnect Strava",
+        "Add workout",
         "View baseline",
         "View profile",
         "Help",
@@ -127,12 +296,32 @@ def test_baseline_keyboard_respects_flags_and_has_no_calibration() -> None:
             apple_health_enabled=True,
         )
     )
+    tcx_only = _button_labels(
+        keyboards.keyboard_for_step(
+            OnboardingStep.BASELINE_SOURCE,
+            {},
+            strava_enabled=False,
+            apple_health_enabled=False,
+            tcx_enabled=True,
+        )
+    )
+    file_import_disabled = _button_labels(
+        keyboards.keyboard_for_step(
+            OnboardingStep.BASELINE_SOURCE,
+            {},
+            strava_enabled=False,
+            apple_health_enabled=False,
+            tcx_enabled=False,
+        )
+    )
 
     assert disabled[:3] == [
-        "Import Apple Health data",
+        "Import training history",
         "Enter baseline manually",
         "Decide later",
     ]
+    assert tcx_only[:3] == disabled[:3]
+    assert "Import training history" not in file_import_disabled
     assert "Connect Strava" not in disabled
     assert enabled[0] == "Connect Strava"
     assert "Calibration period" not in enabled

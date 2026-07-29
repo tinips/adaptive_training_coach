@@ -18,6 +18,7 @@ from app.repositories.profiles import (
 )
 from app.repositories.strava import ActivityUpsertOutcome, StravaRepository
 from app.repositories.users import UserRepository
+from app.repositories.workout_feedback import WorkoutFeedbackRepository
 
 __all__ = [
     "ActivityUpsertOutcome",
@@ -35,4 +36,5 @@ __all__ = [
     "RepositoryError",
     "StravaRepository",
     "UserRepository",
+    "WorkoutFeedbackRepository",
 ]

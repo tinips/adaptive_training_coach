@@ -7,7 +7,7 @@ from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from app.domain.enums import OnboardingStep
+from app.domain.enums import OnboardingStep, WorkoutFlowStep
 
 LABELS = {
     "continue": "Continue",
@@ -43,11 +43,33 @@ LABELS = {
     "view_sync": "View sync status",
     "strava_settings": "Strava settings",
     "manual_baseline": "Manual baseline",
-    "apple_health_import": "Import Apple Health data",
+    "training_history_import": "Import training history",
     "choose_other_method": "Choose another method",
     "cancel_import": "Cancel import",
     "retry_import": "Retry import",
     "continue_onboarding": "Continue onboarding",
+    "finish_import": "Finish import",
+    "add_latest_details": "Add details to the most recent workout",
+    "add_workout": "Add workout",
+    "enter_average_hr": "Enter average HR",
+    "continue_without_hr": "Continue without HR",
+    "change": "Change",
+    "confirm": "Confirm",
+    "very_easy": "Very easy",
+    "easy": "Easy",
+    "moderate": "Moderate",
+    "hard": "Hard",
+    "very_hard": "Very hard",
+    "yes": "Yes",
+    "no": "No",
+    "shoulder": "Shoulder",
+    "back_area": "Back",
+    "hip": "Hip",
+    "knee": "Knee",
+    "ankle_foot": "Ankle or foot",
+    "skip_details": "Skip details",
+    "mild": "Mild",
+    "severe": "Severe",
     "help": "Help",
 }
 
@@ -197,6 +219,7 @@ def keyboard_for_step(
     *,
     strava_enabled: bool = False,
     apple_health_enabled: bool = True,
+    tcx_enabled: bool = True,
 ) -> InlineKeyboardMarkup | None:
     """Build the appropriate inline keyboard for a persisted step."""
 
@@ -220,10 +243,8 @@ def keyboard_for_step(
         return _single_options(step, options, other=True)
     if step is OnboardingStep.BASELINE_SOURCE:
         baseline_options: list[tuple[str, str]] = []
-        if apple_health_enabled:
-            baseline_options.append(
-                (LABELS["apple_health_import"], "APPLE_HEALTH_EXPORT")
-            )
+        if apple_health_enabled or tcx_enabled:
+            baseline_options.append((LABELS["training_history_import"], "FILE_IMPORT"))
         baseline_options.extend(
             [
                 ("Enter baseline manually", "MANUAL"),
@@ -250,6 +271,10 @@ def keyboard_for_step(
         )
     if step is OnboardingStep.APPLE_HEALTH_IMPORT_FAILED:
         return apple_health_failure_keyboard()
+    if step is OnboardingStep.FILE_IMPORT_WAITING:
+        return training_file_import_keyboard()
+    if step is OnboardingStep.FILE_IMPORT_COMPLETE:
+        return training_file_complete_keyboard()
     if step in SIMPLE_OPTIONS:
         allow_other = step is OnboardingStep.GOAL_PRIORITY
         return _single_options(step, SIMPLE_OPTIONS[step], other=allow_other)
@@ -360,6 +385,48 @@ def apple_health_failure_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def training_file_import_keyboard() -> InlineKeyboardMarkup:
+    """Keep onboarding in one persisted multi-file import session."""
+
+    return _rows(
+        [
+            [(LABELS["finish_import"], "ob:v1:import:finish")],
+            [
+                (
+                    LABELS["choose_other_method"],
+                    "ob:v1:apple:choose_other",
+                )
+            ],
+            [(LABELS["back"], "ob:v1:apple:back")],
+        ]
+    )
+
+
+def training_file_complete_keyboard(
+    *,
+    can_enrich_latest: bool = True,
+) -> InlineKeyboardMarkup:
+    rows: list[list[tuple[str, str]]] = []
+    if can_enrich_latest:
+        rows.append(
+            [
+                (
+                    LABELS["add_latest_details"],
+                    "ob:v1:import:enrich_latest",
+                )
+            ]
+        )
+    rows.append(
+        [
+            (
+                LABELS["continue_onboarding"],
+                "ob:v1:apple:continue",
+            )
+        ]
+    )
+    return _rows(rows)
+
+
 def summary_keyboard() -> InlineKeyboardMarkup:
     """Build final profile confirmation and section-edit actions."""
 
@@ -448,6 +515,119 @@ def disconnect_confirmation_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def add_workout_keyboard() -> InlineKeyboardMarkup:
+    return _rows(
+        [
+            [(LABELS["cancel"], "wf:v1:cancel")],
+            [
+                (
+                    LABELS["back"],
+                    _feedback_back(WorkoutFlowStep.WAITING_FOR_FILE),
+                )
+            ],
+        ]
+    )
+
+
+def feedback_text_entry_keyboard(
+    *,
+    state: WorkoutFlowStep = WorkoutFlowStep.HR_ENTRY,
+) -> InlineKeyboardMarkup:
+    if state not in {
+        WorkoutFlowStep.HR_ENTRY,
+        WorkoutFlowStep.DESCRIPTION_ENTRY,
+    }:
+        raise ValueError("Unsupported feedback text-entry state.")
+    return _rows(
+        [
+            [(LABELS["back"], _feedback_back(state))],
+            [(LABELS["cancel"], "wf:v1:cancel")],
+        ]
+    )
+
+
+def manual_heart_rate_offer_keyboard() -> InlineKeyboardMarkup:
+    return _rows(
+        [
+            [(LABELS["enter_average_hr"], "wf:v1:hr:enter")],
+            [(LABELS["continue_without_hr"], "wf:v1:hr:skip")],
+            [(LABELS["cancel"], "wf:v1:cancel")],
+        ]
+    )
+
+
+def manual_heart_rate_confirmation_keyboard() -> InlineKeyboardMarkup:
+    return _rows(
+        [
+            [(LABELS["confirm"], "wf:v1:hr:confirm")],
+            [(LABELS["change"], "wf:v1:hr:change")],
+            [(LABELS["skip"], "wf:v1:hr:skip")],
+        ]
+    )
+
+
+def rpe_keyboard() -> InlineKeyboardMarkup:
+    return _rows(
+        [
+            [(LABELS["very_easy"], "wf:v1:rpe:very_easy")],
+            [(LABELS["easy"], "wf:v1:rpe:easy")],
+            [(LABELS["moderate"], "wf:v1:rpe:moderate")],
+            [(LABELS["hard"], "wf:v1:rpe:hard")],
+            [(LABELS["very_hard"], "wf:v1:rpe:very_hard")],
+            [(LABELS["skip"], "wf:v1:rpe:skip")],
+            [(LABELS["back"], _feedback_back(WorkoutFlowStep.RPE))],
+        ]
+    )
+
+
+def discomfort_keyboard() -> InlineKeyboardMarkup:
+    return _rows(
+        [
+            [(LABELS["no"], "wf:v1:discomfort:no")],
+            [(LABELS["yes"], "wf:v1:discomfort:yes")],
+            [(LABELS["skip"], "wf:v1:discomfort:skip")],
+            [(LABELS["back"], _feedback_back(WorkoutFlowStep.DISCOMFORT))],
+        ]
+    )
+
+
+def discomfort_area_keyboard() -> InlineKeyboardMarkup:
+    return _rows(
+        [
+            [(LABELS["shoulder"], "wf:v1:area:shoulder")],
+            [(LABELS["back_area"], "wf:v1:area:back")],
+            [(LABELS["hip"], "wf:v1:area:hip")],
+            [(LABELS["knee"], "wf:v1:area:knee")],
+            [(LABELS["ankle_foot"], "wf:v1:area:ankle_foot")],
+            [(LABELS["other"], "wf:v1:area:other")],
+            [(LABELS["skip_details"], "wf:v1:area:skip")],
+            [(LABELS["back"], _feedback_back(WorkoutFlowStep.BODY_AREA))],
+        ]
+    )
+
+
+def discomfort_description_confirmation_keyboard() -> InlineKeyboardMarkup:
+    return _rows(
+        [
+            [(LABELS["confirm"], "wf:v1:description:confirm")],
+            [(LABELS["change"], "wf:v1:description:change")],
+            [(LABELS["skip"], "wf:v1:description:skip")],
+        ]
+    )
+
+
+def discomfort_severity_keyboard() -> InlineKeyboardMarkup:
+    return _rows(
+        [
+            [(LABELS["mild"], "wf:v1:severity:mild")],
+            [(LABELS["moderate"], "wf:v1:severity:moderate")],
+            [(LABELS["severe"], "wf:v1:severity:severe")],
+            [(LABELS["skip"], "wf:v1:severity:skip")],
+            [(LABELS["back"], _feedback_back(WorkoutFlowStep.SEVERITY))],
+        ]
+    )
+
+
 def state_menu(
     state: str,
     *,
@@ -469,13 +649,18 @@ def state_menu(
         )
         return _rows(
             [
+                [(LABELS["add_workout"], "menu:v1:add_workout")],
                 [strava_action],
+                [(LABELS["view_baseline"], "menu:v1:baseline")],
                 [(LABELS["view_profile"], "menu:v1:profile")],
                 [(LABELS["help"], "menu:v1:help")],
             ]
         )
     if state == "ready":
-        rows = [[(LABELS["view_baseline"], "menu:v1:baseline")]]
+        rows = [
+            [(LABELS["add_workout"], "menu:v1:add_workout")],
+            [(LABELS["view_baseline"], "menu:v1:baseline")],
+        ]
         if connected and strava_enabled:
             if syncing:
                 rows.append([(LABELS["view_sync"], "st:v1:status")])
@@ -509,12 +694,18 @@ def state_menu(
         rows.append([(LABELS["connect_strava"], "menu:v1:strava")])
     rows.extend(
         [
+            [(LABELS["add_workout"], "menu:v1:add_workout")],
+            [(LABELS["view_baseline"], "menu:v1:baseline")],
             [(LABELS["view_profile"], "menu:v1:profile")],
             [(LABELS["manual_baseline"], "menu:v1:manual")],
             [(LABELS["help"], "menu:v1:help")],
         ]
     )
     return _rows(rows)
+
+
+def _feedback_back(state: WorkoutFlowStep) -> str:
+    return f"wf:v1:back:{state.value.lower()}"
 
 
 def _single_options(
