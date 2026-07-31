@@ -16,9 +16,10 @@ from app.repositories.profiles import (
     ProfileBundle,
     ProfileRepository,
 )
-from app.repositories.strava import ActivityUpsertOutcome, StravaRepository
+from app.repositories.strava import StravaRepository
 from app.repositories.users import UserRepository
 from app.repositories.workout_feedback import WorkoutFeedbackRepository
+from app.services.activities.contracts import ActivityUpsertOutcome
 
 __all__ = [
     "ActivityUpsertOutcome",

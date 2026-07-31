@@ -3,15 +3,16 @@
 ## 1. Scope and source of truth
 
 This document describes the product as implemented in the current worktree on
-2026-07-29. The current database migration head is
-`0003_unified_training_import`.
+2026-07-30. The current database migration head is
+`0004_discipline_workout_models`.
 
 The source of truth is the application code and automated tests, especially the
 Telegram registration and facade, centralized messages and keyboards,
 onboarding state machine and application service, normalized-profile
-finalization, Apple Health and TCX import services and parsers, activity
-matching, workout feedback, baseline calculation, repositories, SQLAlchemy
-models, and scenario/use-case tests.
+finalization, Apple Health and TCX import services and parsers, workout
+normalization and matching, discipline-specific workout schemas, workout
+feedback, baseline calculation, repositories, SQLAlchemy models, migrations,
+and scenario/use-case tests.
 
 This is not a design for the future planner. A state, button, branch, or
 aspiration is not presented as current behavior unless it is supported by the
@@ -24,8 +25,13 @@ Important terminology:
   editable until profile confirmation.
 - **Normalized profile data** is written atomically only when the user chooses
   **Confirm profile**.
-- **Canonical activity** is the owned `activities` record used by baseline
-  calculation. Source links preserve Apple Health or TCX identities.
+- **Canonical workout** is the owned `workouts` record plus exactly one
+  discipline detail record used by baseline calculation. Source links preserve
+  imported identities and raw provider metadata.
+- **Canonical disciplines** are `RUNNING`, `CYCLING`, `HIKING`, `SWIMMING`,
+  `STRENGTH`, and `OTHER`. Imported source values are `STRAVA`,
+  `APPLE_HEALTH`, `TCX`, `FIT`, and `OTHER_IMPORT`; `MANUAL` is the
+  user-entered source.
 - **Reliable heart rate** means the value is marked reliable and comes from
   measured sensor data or a provider summary. Only reliable heart rate enters
   baseline calculation.
@@ -45,7 +51,7 @@ non-command text are also registered globally.
 | `/strava` | Command is always registered; operational flow requires `STRAVA_ENABLED=true` and a completed-profile lifecycle | Strava/account services | Disabled message; incomplete-profile resume; connect/reconnect; sync/status/disconnect menu | A connect action may create `oauth_states`; command display alone does not write |
 | `/cancel` | Active onboarding | Onboarding snapshot; confirmation callback performs cancel | Confirmation; already-cancelled restart menu; completed-profile notice | Confirmation sets `onboarding_sessions.status=CANCELLED`; answers remain until restart |
 | `/delete_me` | Any known user | Account query; confirmed callback invokes account deletion | Confirmation; keep account; delete or safe failure | Confirmed deletion removes the owned account data; external Strava revocation is attempted first |
-| Direct Telegram document | Active onboarding at a supported import state, or completed onboarding/profile lifecycle | `handle_document` → `TrainingFileImportService.process_upload` | Apple Health ZIP or TCX import; unsupported/unsafe/oversized/failure response; duplicate replay | Creates an import job; may create/enrich activities, source links, observations, baselines, and feedback flow |
+| Direct Telegram document | Active onboarding at a supported import state, or completed onboarding/profile lifecycle | `handle_document` → `TrainingFileImportService.process_upload` | Apple Health ZIP or TCX import; unsupported/unsafe/oversized/failure response; duplicate replay | Creates an import job; may create/enrich workouts and discipline details, source links, observations, baselines, and feedback flow |
 | Inline callback actions | State-specific; stale callbacks are rejected or replay the current durable feedback state | Callback router dispatches `ob:v1:*`, `wf:v1:*`, `menu:v1:*`, `st:v1:*`, `acct:v1:*` | Deterministic transition, text interpretation confirmation, menu action, Strava action, or safe expired-action message | Depends on action; every personal-data write is owner-scoped |
 | Non-command text | Direct onboarding text step; explicitly armed free-text path; feedback `HR_ENTRY` or `DESCRIPTION_ENTRY` | Onboarding or workout-feedback service | Validated deterministic answer; LLM interpretation; manual HR/description staging; safe validation error | Saves deterministic answer or pending value; LLM output is not staged as an answer until confirmed |
 
@@ -242,9 +248,9 @@ file-import flow.
 | `APPLE_HEALTH_PROCESSING` | No current keyboard; restart recovery | Legacy transient state | Active import job | Completion/failure through service or recovery | No rendered Back button | Startup recovery sets legacy import failed |
 | `APPLE_HEALTH_IMPORT_COMPLETE` | Continue | Legacy completed import | Existing import/baseline retained | `SUMMARY` | No rendered Back button | Missing outcome renders only available legacy information |
 | `APPLE_HEALTH_IMPORT_FAILED` | Retry, choose another, Back | Legacy failed state | Failed job retained | Waiting or baseline source | `BASELINE_SOURCE` | Stale action rejected |
-| `FILE_IMPORT_WAITING` | Upload another file or Finish import | Supported file; Finish requires at least one valid activity | Import jobs and staged source | Returns to waiting after each file; Finish → `FILE_IMPORT_COMPLETE` | `BASELINE_SOURCE` and source answer removed | Failure job recorded; session returns to waiting |
+| `FILE_IMPORT_WAITING` | Upload another file or Finish import | Supported file; Finish requires at least one valid workout | Import jobs and staged source | Returns to waiting after each file; Finish → `FILE_IMPORT_COMPLETE` | `BASELINE_SOURCE` and source answer removed | Failure job recorded; session returns to waiting |
 | `FILE_IMPORT_PROCESSING` | Import runs; supported service actions may cancel/back | Active owned job | Current step plus job `RECEIVED/PROCESSING` | Restored to waiting on terminal job | Service supports Back, but no processing keyboard is rendered | Restart marks job interrupted and restores waiting |
-| `FILE_IMPORT_COMPLETE` | Add latest details, Continue, Back | Baseline must already exist | Source fixed to `FILE_IMPORT`; optional feedback flow | `SUMMARY`, feedback, or waiting | `FILE_IMPORT_WAITING` | Missing latest activity blocks enrichment |
+| `FILE_IMPORT_COMPLETE` | Add latest details, Continue, Back | Baseline must already exist | Source fixed to `FILE_IMPORT`; optional feedback flow | `SUMMARY`, feedback, or waiting | `FILE_IMPORT_WAITING` | Missing latest workout blocks enrichment |
 | `SUMMARY` | Confirm profile or edit section | Complete `FinalOnboardingAnswers`; file source also requires baseline | On confirm, normalized tables and completion status | Completed home | Edit callbacks enter bounded section; Cancel available | Incomplete data rolls back all normalized writes |
 
 ### Staged versus normalized writes
@@ -270,16 +276,16 @@ flowchart TD
     imp_process["Persist FILE_IMPORT_PROCESSING<br/>Download to generated temporary file"]
     imp_detect{"Content detection"}
     imp_apple["Apple Health ZIP bulk import<br/>May contain many workouts"]
-    imp_tcx["TCX onboarding import<br/>Exactly one activity per file"]
+    imp_tcx["TCX onboarding import<br/>Exactly one source Activity per file"]
     imp_unsupported["Unsupported, unsafe, oversized, or malformed<br/>Job FAILED"]
     imp_duplicate{"Exact successful file hash already exists?"}
-    imp_copy["Copy prior safe counts/activity result<br/>Mark new job SUCCEEDED"]
-    imp_save["Create, enrich, or skip canonical activities<br/>Mark job SUCCEEDED"]
+    imp_copy["Copy prior safe counts/workout result<br/>Mark new job SUCCEEDED"]
+    imp_save["Create, enrich, or skip canonical workouts<br/>One discipline detail each"]
     imp_return["Return to FILE_IMPORT_WAITING<br/>Show imported, updated, skipped counts"]
     imp_more{"User choice"}
     imp_finish["Finish import callback"]
-    imp_valid{"At least one valid session activity?"}
-    imp_none["Show no-valid-activities message<br/>Remain FILE_IMPORT_WAITING"]
+    imp_valid{"At least one valid session workout?"}
+    imp_none["Show no-valid-workouts message<br/>Remain FILE_IMPORT_WAITING"]
     imp_baseline["Recalculate deterministic baseline<br/>Source FILE_IMPORT"]
     imp_complete["Persist FILE_IMPORT_COMPLETE<br/>Show discipline counts"]
     imp_enrich{"Add details to latest workout?"}
@@ -299,14 +305,14 @@ flowchart TD
     imp_more -->|Finish import| imp_finish --> imp_valid
     imp_valid -->|No| imp_none --> imp_wait
     imp_valid -->|Yes| imp_baseline --> imp_complete --> imp_enrich
-    imp_enrich -->|Yes and latest activity exists| imp_feedback --> imp_summary
+    imp_enrich -->|Yes and latest workout exists| imp_feedback --> imp_summary
     imp_enrich -->|No| imp_summary
 ```
 
 Apple Health ZIP onboarding imports are bulk imports. TCX files are uploaded
 sequentially. Neither path starts a questionnaire for every historical
 workout. Only after **Finish import** may the user optionally add details to
-the most recently imported activity.
+the most recently imported workout.
 
 ## 7. Apple Health processing
 
@@ -318,14 +324,14 @@ flowchart TD
     ah_zip_ok{"Safe ZIP?"}
     ah_discover["Inspect XML roots<br/>Find one HealthData document"]
     ah_found{"HealthData found?"}
-    ah_workouts["Streaming workout pass<br/>Normalize supported sports, units, duration, distance, calories"]
+    ah_workouts["Streaming workout pass<br/>Normalize units and map canonical discipline or OTHER"]
     ah_duplicates["Deduplicate source workout keys<br/>Count duplicate export entries"]
     ah_hr["Streaming heart-rate pass<br/>Match observations to workout interval and source"]
-    ah_quality{"Heart-rate temporal quality"}
-    ah_exact["Exact or short interval<br/>May produce reliable measured HR"]
-    ah_coarse["Coarse interval<br/>Preserve observation; do not invent exact average"]
-    ah_match["Owner-scoped source-key and conservative cross-source matching"]
-    ah_persist["Create or enrich activities and source links<br/>Persist relevant heart_rate_observations"]
+    ah_quality{"Heart-rate interval classification"}
+    ah_exact["Exact or short interval<br/>Summarize matched average/max HR"]
+    ah_coarse["Coarse interval<br/>Classify/count; do not invent exact average"]
+    ah_match["Owner-scoped exact identity<br/>Source plus provider ID or normalized fingerprint"]
+    ah_persist["Create or refresh the source-owned workout<br/>Persist average/max HR directly on its discipline detail"]
     ah_context{"Import context"}
     ah_daily["Daily completed-profile import<br/>Recalculate baseline immediately"]
     ah_onboard["Onboarding bulk import<br/>Return to waiting; no baseline until Finish"]
@@ -355,9 +361,16 @@ Data-integrity rules:
   external DTDs, entity declarations, and unsafe encodings are rejected.
 - XML discovery is by root element, not only by filename.
 - Raw ZIP/XML content is never written to the database.
-- Exact and short heart-rate intervals may contribute reliable measurements.
-  Coarse observations may preserve a maximum but do not fabricate samples or
-  an average.
+- Plain walking is not assumed to be hiking. Swimming is typed as `SWIMMING`
+  only when pool or open-water evidence is explicit; an unknown environment, or
+  pool evidence without a positive pool length, is stored as `OTHER`.
+- `OTHER` retains an understandable activity name, raw sport/sub-sport, known
+  distance and heart rate, unsupported metrics, and the normalization fallback.
+  Source links retain the raw provider values and metadata.
+- Exact and short heart-rate intervals may contribute average and maximum
+  values. Coarse observations may preserve a maximum but do not fabricate
+  samples or an average. The interval classification is transient parser state,
+  not persisted confidence metadata.
 - A daily Apple Health ZIP recalculates the baseline but does not start
   per-workout feedback. An onboarding ZIP waits for **Finish import**.
 
@@ -373,18 +386,15 @@ flowchart TD
     tcx_summary{"Trackpoint data available?"}
     tcx_summary_only["Summary-only TCX or empty Track<br/>Valid when lap summary supplies identity and duration"]
     tcx_track["Trackpoints may derive duration/distance and measured HR"]
-    tcx_sport["Normalize sport<br/>Run, Ride, Swim, Walk/Hike, Strength, Other"]
+    tcx_sport["Map discipline conservatively<br/>RUNNING, CYCLING, HIKING, SWIMMING, STRENGTH, OTHER"]
     tcx_hr{"Heart-rate evidence"}
-    tcx_reliable["Timed trackpoint samples<br/>MEASURED_SENSOR and reliable"]
-    tcx_provider["Complete lap summaries<br/>PROVIDER_SUMMARY"]
-    tcx_missing["Missing/incomplete HR<br/>UNAVAILABLE or unreliable"]
-    tcx_key["Stable source key<br/>Activity Id, else start identity"]
+    tcx_samples["Trackpoint samples<br/>Calculate average/max HR"]
+    tcx_provider["Complete lap summaries<br/>Read average/max HR"]
+    tcx_missing["Missing/incomplete HR<br/>Leave canonical fields empty"]
+    tcx_key["Exact TCX identity<br/>Stable Activity Id, else normalized fingerprint"]
     tcx_exact{"Owned TCX source key already linked?"}
-    tcx_update["Idempotently enrich same canonical activity<br/>source_key match"]
-    tcx_candidates["Find other-source candidates<br/>Same sport and start within 5 minutes"]
-    tcx_match{"Exactly one candidate also matches duration and distance?"}
-    tcx_enrich["Cross-source match<br/>Enrich canonical activity and add TCX source link"]
-    tcx_ambiguous["Zero or multiple matches<br/>Create separate TCX activity; ambiguous remains unmerged"]
+    tcx_update["Idempotently refresh the same TCX workout"]
+    tcx_create["Create a separate TCX workout<br/>Never merge another source"]
     tcx_baseline{"Context"}
     tcx_daily["Daily import<br/>Recalculate baseline, then feedback if enabled"]
     tcx_onboard["Onboarding import<br/>Return to waiting without feedback"]
@@ -397,17 +407,22 @@ flowchart TD
     tcx_summary -->|No trackpoints but complete lap summary| tcx_summary_only --> tcx_sport
     tcx_summary -->|Trackpoints| tcx_track --> tcx_sport
     tcx_sport --> tcx_hr
-    tcx_hr -->|Timed samples| tcx_reliable --> tcx_key
+    tcx_hr -->|Trackpoint samples| tcx_samples --> tcx_key
     tcx_hr -->|Complete summaries| tcx_provider --> tcx_key
-    tcx_hr -->|Missing or unreliable| tcx_missing --> tcx_key
+    tcx_hr -->|Missing or incomplete| tcx_missing --> tcx_key
     tcx_key --> tcx_exact
     tcx_exact -->|Yes| tcx_update --> tcx_baseline
-    tcx_exact -->|No| tcx_candidates --> tcx_match
-    tcx_match -->|One compatible| tcx_enrich --> tcx_baseline
-    tcx_match -->|None or ambiguous| tcx_ambiguous --> tcx_baseline
+    tcx_exact -->|No| tcx_create --> tcx_baseline
     tcx_baseline -->|DAILY| tcx_daily --> tcx_cleanup
     tcx_baseline -->|ONBOARDING| tcx_onboard --> tcx_cleanup
 ```
+
+TCX retains the original sport label, provider summaries, calories, cadence,
+elevation, and route evidence in the typed detail where supported and otherwise
+in source metadata. Plain walking and a swim without explicit pool/open-water
+evidence become `OTHER`. Pace or speed is canonical only when derived from
+positive distance and moving duration; a conflicting provider value is retained
+with a normalization warning instead of replacing the derived value.
 
 ## 9. Daily workout flow
 
@@ -422,14 +437,15 @@ flowchart TD
     wf_file["Send supported document"]
     wf_type{"Detected format"}
     wf_apple["Apple Health ZIP<br/>Bulk import and baseline recalculation"]
-    wf_tcx["TCX<br/>One activity and baseline recalculation"]
-    wf_hr_reliable{"Canonical activity already has reliable average HR?"}
+    wf_tcx["TCX<br/>One workout and baseline recalculation"]
+    wf_hr_reliable{"Canonical workout already has reliable average HR?"}
     wf_offer["Average HR missing<br/>HR_OFFER<br/>Enter average HR, Continue without HR, Cancel"]
     wf_entry["Enter average HR<br/>HR_ENTRY<br/>Text must be whole number 30 to 250"]
     wf_invalid["Invalid HR message<br/>Remain HR_ENTRY"]
     wf_confirm["Review bpm<br/>HR_CONFIRM<br/>Confirm, Change, Skip"]
     wf_save_hr["Save ActivityFeedback.manual_average_heart_rate<br/>May fill canonical HR as USER_REPORTED and unreliable"]
     wf_rpe["How did the session feel?<br/>RPE<br/>Very easy 2, Easy 4, Moderate 6, Hard 8, Very hard 10, Skip"]
+    wf_mobility["Did you do any mobility or stretching?<br/>MOBILITY<br/>Yes, No, Skip"]
     wf_discomfort["Pain or unusual discomfort?<br/>DISCOMFORT<br/>No, Yes, Skip"]
     wf_done_no["No or Skip<br/>Persist false or null<br/>COMPLETE"]
     wf_area["Where did you feel it?<br/>BODY_AREA<br/>Shoulder, Back, Hip, Knee, Ankle or foot, Other, Skip details"]
@@ -455,7 +471,8 @@ flowchart TD
     wf_confirm -->|Change| wf_entry
     wf_confirm -->|Skip| wf_rpe
     wf_confirm -->|Confirm| wf_save_hr --> wf_rpe
-    wf_rpe -->|Any value or Skip| wf_discomfort
+    wf_rpe -->|Any value or Skip| wf_mobility
+    wf_mobility -->|Yes, No, or Skip| wf_discomfort
     wf_discomfort -->|No or Skip| wf_done_no
     wf_discomfort -->|Yes| wf_area --> wf_other
     wf_other -->|Other| wf_desc --> wf_desc_confirm
@@ -467,15 +484,23 @@ flowchart TD
     wf_entry -. Cancel .-> wf_cancel
     wf_start -. Back or Cancel .-> wf_cancel
     wf_rpe -. Back .-> wf_back
+    wf_mobility -. Back .-> wf_back
     wf_discomfort -. Back .-> wf_back
     wf_area -. Back .-> wf_back
     wf_severity -. Back .-> wf_back
     wf_restart -. Resume .-> wf_offer
     wf_restart -. Resume .-> wf_entry
     wf_restart -. Resume .-> wf_rpe
+    wf_restart -. Resume .-> wf_mobility
     wf_restart -. Resume .-> wf_area
     wf_replay -. No duplicate mutation .-> wf_complete
 ```
+
+The flow has 13 persisted states, including `MOBILITY` between `RPE` and
+`DISCOMFORT`. `activity_feedback.mobility_done` is nullable: **Yes** stores
+`true`, **No** stores `false`, and **Skip** preserves unknown as `NULL`. Stale
+callbacks replay the current persisted state and do not overwrite the saved
+answer.
 
 ### Feedback Back behavior
 
@@ -486,58 +511,102 @@ flowchart TD
 | `HR_ENTRY` | `HR_OFFER` |
 | `HR_CONFIRM` | `HR_ENTRY` and pending HR is cleared |
 | `RPE` | `CANCELLED` if reliable HR skipped the offer; otherwise `HR_OFFER` |
-| `DISCOMFORT` | `RPE` |
+| `MOBILITY` | `RPE` |
+| `DISCOMFORT` | `MOBILITY` |
 | `BODY_AREA` | `DISCOMFORT` |
 | `DESCRIPTION_ENTRY` | `BODY_AREA` |
 | `DESCRIPTION_CONFIRM` | `DESCRIPTION_ENTRY` and pending description is cleared |
 | `SEVERITY` | `BODY_AREA` |
 | `COMPLETE` or `CANCELLED` | No transition |
 
-## 10. Data precedence and activity matching
+## 10. Exact workout identity and source refresh
 
-### Metric precedence
+Imported workouts have one deduplication rule:
 
-The implemented quality order is:
+```text
+athlete_id + source + external_id
+```
 
-1. reliable `MEASURED_SENSOR`;
-2. reliable `PROVIDER_SUMMARY`;
-3. `DERIVED`;
-4. `USER_REPORTED`;
-5. `UNAVAILABLE`.
+TCX and Strava use their stable provider identity. When no stable provider ID
+exists, Apple Health and ID-less TCX imports generate a deterministic
+`fingerprint:` value from normalized source, discipline, UTC start, duration,
+and distance. There are no time, duration, distance, confidence, rank, or
+ambiguity thresholds.
 
-Unreliable measured/provider data is ranked below user-reported data. A null
-incoming value never erases an existing value, and a lower-quality value never
-replaces a higher-quality value. Manual heart rate remains in
-`activity_feedback` even if later measured data replaces the canonical
-activity average.
+An exact reimport refreshes that source-owned workout and its matching
+discipline detail. A different external ID creates another workout. A different
+source always creates another workout even when all normalized values match.
+Average and maximum heart rate are ordinary discipline-detail fields; provider
+confidence, quality, source rank, sample count, and replacement precedence are
+not persisted.
 
-### Matching thresholds
-
-Automatic Apple Health/TCX cross-source matching requires all available
-evidence to agree:
-
-| Evidence | Current threshold |
-| --- | --- |
-| Owner | Same `user_id` |
-| Source | Candidate must be from a different primary source and must not already carry the incoming source link |
-| Sport | Exact normalized `Discipline` match |
-| Start time | Absolute difference no more than 5 minutes |
-| Duration | Difference no more than the greater of 5 minutes or 10% of the larger duration |
-| Distance | When both distances exist, difference no more than the greater of 500 metres or 10% of the larger distance |
-| Ambiguity | Exactly one compatible candidate is required; multiple candidates are not merged |
-
-### Same-workout scenarios
+### Exact-identity scenarios
 
 | Scenario | Current behavior |
 | --- | --- |
-| Apple Health only | Creates or updates one Apple-owned canonical activity, Apple source link, and relevant heart-rate observations |
-| TCX only | Creates or updates one TCX-owned canonical activity and TCX source link |
-| Apple Health and TCX, one high-confidence match | Enriches one canonical activity non-destructively and attaches both source identities |
-| Apple Health and TCX, ambiguous match | Does not merge; creates a separate incoming activity with match kind `ambiguous` |
-| Repeated identical TCX bytes | Creates a new import-job record, copies the prior successful safe outcome, counts the activity as skipped, and does not duplicate the activity |
-| Same TCX source key with enriched metrics | Reuses the source-linked activity and applies non-destructive same-source enrichment |
-| Later Apple measured HR after manual HR | Measured reliable HR replaces canonical user-reported HR; the manual value remains auditable in `activity_feedback` |
-| Later lower-quality or null metric | Existing higher-quality/non-null canonical value remains |
+| Apple Health workout reimport | Reuses the same Apple fingerprint and refreshes one Apple-owned workout |
+| TCX with `Activity/Id` reimport | Reuses the same TCX identity and refreshes one TCX-owned workout |
+| TCX without `Activity/Id` reimport | Reuses the same normalized fingerprint |
+| Strava provider activity reimport | Reuses the same Strava external ID |
+| Same source with another external ID | Creates a separate workout |
+| Equivalent Apple Health, TCX, and Strava records | Creates three separate workouts because their sources differ |
+| Repeated identical file bytes | Reuses the prior safe import-job result and does not duplicate its source workouts |
+| Imported average/max HR | Stores the values directly on the source workout's discipline detail |
+| Missing imported HR | Leaves the corresponding discipline-detail fields empty on that exact-source refresh |
+| Manual feedback HR | Stored in `activity_feedback`; it populates a missing canonical average but does not replace an imported average |
+
+### Discipline persistence contract
+
+The universal `workouts` row stores only identity and fields shared by every
+discipline: owner, canonical discipline, timezone-aware start, positive elapsed
+duration, source, optional title/notes, external identity, and audit timestamps.
+Manual workouts have no `external_id`; imported workouts require one. Strict
+boundary schemas reject extra fields, naive start times, a non-positive duration,
+negative optional metrics, or a detail type that does not match the discipline.
+The repository-level manual creation path uses the same contract, including
+`OtherWorkoutDetails` for a manual unknown activity. No new Telegram manual
+workout flow or public API route is introduced by this redesign.
+
+Each workout has exactly one one-to-one main detail:
+
+| Discipline | Main detail | Required subtype/environment |
+| --- | --- | --- |
+| `RUNNING` | `running_workout_details` | `OUTDOOR`, `TRAIL`, `TRACK`, or `TREADMILL` |
+| `CYCLING` | `cycling_workout_details` | `ROAD`, `MTB`, `GRAVEL`, `STATIONARY`, or `OTHER` |
+| `HIKING` | `hiking_workout_details` | `HIKING`, `TREKKING`, `MOUNTAINEERING`, `SNOWSHOEING`, or `OTHER` |
+| `SWIMMING` | `swimming_workout_details` | `POOL` or `OPEN_WATER` |
+| `STRENGTH` | `strength_workout_details` | `GYM`, `CALISTHENICS`, or `OTHER` |
+| `OTHER` | `other_workout_details` | Understandable activity name plus raw labels and available metrics |
+
+All main detail primary keys are cascading foreign keys to `workouts.id`. A
+`POOL` swim also requires `pool_swimming_details` with a positive pool length;
+its key references both the workout and its swimming detail so neither can
+exist independently. An `OPEN_WATER` swim forbids that row. Strength exercises use validated JSON:
+each exercise contains only `exercise` and `sets`, and each set contains only
+non-negative `reps` and `kg`. An imported strength workout may use an empty
+exercise list when the source has no structured set data.
+
+Import normalization is intentionally loss-averse. Unknown sports, plain
+walking, ambiguous swimming, and pool-labelled swimming without a valid pool
+length become `OTHER` rather than being rejected or guessed. The source link
+retains raw sport/sub-sport, source start and duration, provider metrics,
+file/job provenance, reliability metadata, and normalization warnings;
+`other_workout_details.metrics_jsonb` retains source-specific values needed to
+understand the fallback. A replay without file context cannot erase an existing
+source link's file hash or import-job identity. Reimporting a migrated source
+keeps the complete legacy envelope under `migration_provenance`, so refreshing
+current provider metadata cannot erase legacy-only values.
+
+Migration `0004_discipline_workout_models` replaces `activities` with this
+structure. It preserves workout UUIDs and timestamps, rewires owned child
+foreign keys to `workout_id`, and records the complete legacy row in source
+metadata. A legacy zero-second duration becomes the minimum valid one second
+while the original zero remains in provenance. Downgrade reconstructs the
+legacy row from that provenance and refuses before mutation when post-`0004`
+data cannot be represented safely, including mobility feedback, an active
+`MOBILITY` state, a new source enum, missing/ambiguous provenance, or any
+workout, main-detail, pool-detail, source-link, or source-metadata change since
+the migration snapshot.
 
 ## 11. Persistence map
 
@@ -560,11 +629,11 @@ flowchart LR
     t_coach[("coach_preferences<br/>tone and detail")]
     t_pref[("baseline_preferences<br/>selected source and readiness")]
     t_jobs[("apple_health_import_jobs<br/>unified file job, context, format, counts, safe error")]
-    t_activities[("activities<br/>canonical normalized workouts")]
-    t_links[("activity_source_links<br/>Apple or TCX provenance and stable source key")]
-    t_hr[("heart_rate_observations<br/>matched Apple HR observations and temporal quality")]
+    t_workouts[("workouts<br/>universal owned identity and shared fields")]
+    t_details[("discipline detail tables<br/>running, cycling, hiking, swimming, strength, other; pool extension")]
+    t_links[("activity_source_links<br/>provider identity, raw labels, metadata and warnings")]
     t_flow[("workout_flow_sessions<br/>resumable feedback state and pending values")]
-    t_feedback[("activity_feedback<br/>manual HR, RPE, discomfort")]
+    t_feedback[("activity_feedback<br/>manual HR, RPE, mobility, discomfort")]
     t_athlete_base[("athlete_baselines<br/>versioned analysis window, source, confidence")]
     t_discipline[("discipline_baselines<br/>per-discipline level and metrics")]
 
@@ -580,23 +649,32 @@ flowchart LR
     p_confirm --> t_coach
     p_confirm --> t_pref
     p_upload --> t_jobs
-    p_upload --> t_activities
+    p_upload --> t_workouts
+    p_upload --> t_details
     p_upload --> t_links
-    p_upload --> t_hr
     p_upload --> t_flow
     p_finish --> t_onboarding
     p_finish --> p_baseline
     p_feedback --> t_flow
     p_feedback --> t_feedback
-    p_feedback --> t_activities
+    p_feedback --> t_workouts
+    p_feedback --> t_details
     p_baseline --> t_athlete_base
     t_athlete_base --> t_discipline
+    t_workouts -->|Exactly one main detail| t_details
+    t_workouts --> t_links
+    t_workouts --> t_feedback
 ```
 
 Only existing tables are shown. The actual schema also includes Strava OAuth,
 connection, synchronization, webhook, and LLM usage tables; they are outside
 the minimum persistence map above but are used by the registered Strava and
 explicit free-text paths.
+
+Apple Health heart-rate records exist only during parsing and matching.
+Canonical average and maximum heart rate are stored on the matching discipline
+detail. Source quality, reliability, and matched-record counts remain
+provenance/counter metadata; individual observations are not persisted.
 
 ## 12. Restart and idempotency behavior
 
@@ -606,12 +684,12 @@ explicit free-text paths.
 | Awaiting explicit free text | `pending_free_text_step`; parse-in-flight marker may exist in answers | Resume awaiting text or current parse state; in-flight marker expires after 10 minutes | One active parse run owns its result; stale result is rejected | Not applicable |
 | Interpreted answer awaiting confirmation | `pending_parsed_value` | `/start` renders confirmation again | Confirm/retry/back require pending state | Not applicable |
 | Waiting for import | `FILE_IMPORT_WAITING` | `/start` renders the import request and buttons | Telegram update ID and exact file hash are owner-scoped | No active file expected |
-| Import processing | Job `RECEIVED/PROCESSING`, onboarding `FILE_IMPORT_PROCESSING`, recorded generated path | Bot startup marks every prior-process active job `FAILED` with `import_interrupted` and restores onboarding to waiting | Update ID prevents replay; terminal job is rechecked under lock before activity writes | Recovery deletes only generated paths in the configured/system temp directory and clears metadata |
+| Import processing | Job `RECEIVED/PROCESSING`, onboarding `FILE_IMPORT_PROCESSING`, recorded generated path | Bot startup marks every prior-process active job `FAILED` with `import_interrupted` and restores onboarding to waiting | Update ID prevents replay; terminal job is rechecked under lock before workout writes | Recovery deletes only generated paths in the configured/system temp directory and clears metadata |
 | Profile confirmation | Staged answers remain until one atomic transaction completes | If transaction failed, onboarding remains incomplete; if completed, normalized profile is returned idempotently | Finalize returns existing bundle when onboarding is already completed | Not applicable |
 | Feedback flow | One `workout_flow_sessions` row plus confirmed `activity_feedback` values | `/start` or `/add_workout` renders the saved non-terminal state | Callback actions compare expected rendered state; a repeated callback returns current state without applying twice | Import temp cleanup is independent of feedback |
 | Duplicate Telegram callback | Current durable onboarding or feedback state | Current state remains authoritative | Onboarding uses expected step; feedback uses expected origin state | Not applicable |
 | Duplicate document update | Existing job keyed by owner and Telegram update ID | Prior outcome is returned without claiming a new job | `(user_id, telegram_update_id)` lookup | The replay does not need a new download |
-| Duplicate document bytes with new update | New job plus prior successful job found by owner and SHA-256 | Safe counts/result copied; daily baseline may be recalculated | Owner-scoped successful hash lookup; no duplicate activity | New generated upload is deleted |
+| Duplicate document bytes with new update | New job plus prior successful job found by owner and SHA-256 | Safe counts/result copied; daily baseline may be recalculated | Owner-scoped successful hash lookup; no duplicate workout | New generated upload is deleted |
 
 ## 13. Errors and recovery
 
@@ -642,7 +720,7 @@ flowchart TD
     er_input --> er_kind
     er_kind -->|Invalid format or malformed TCX| er_invalid --> er_job_failed
     er_kind -->|Unsafe ZIP, XML, size, encoding| er_unsafe --> er_job_failed
-    er_kind -->|Parser or activity validation| er_parser --> er_job_failed
+    er_kind -->|Parser or workout validation| er_parser --> er_job_failed
     er_kind -->|Processing persistence or baseline error| er_persist --> er_job_failed
     er_job_failed -->|Onboarding| er_wait
     er_job_failed -->|Daily| er_daily_home
@@ -660,7 +738,7 @@ flowchart TD
 
 Important exception-boundary detail:
 
-- Expected parser, format, archive, activity-validation, and onboarding import
+- Expected parser, format, archive, workout-validation, and onboarding import
   errors are converted to a failed import job and a safe user message.
 - Unexpected exceptions inside file processing are logged by exception type and
   the service attempts to mark the job failed.
@@ -680,7 +758,7 @@ Important exception-boundary detail:
 | `APPLE_HEALTH_IMPORT_ENABLED` | ZIP detection and Apple parser are allowed | Detected ZIP returns Apple-import-disabled error | **Import training history** remains if TCX is enabled | Parser/service still construct with limits; no credentials required |
 | `TCX_IMPORT_ENABLED` | TCX detection/parser are allowed | Detected TCX returns TCX-disabled error | **Import training history** remains if Apple Health is enabled | Parser/service still construct; no credentials required |
 | Both file flags false | No supported training file | Document import reports disabled | **Import training history** is absent; `/add_workout` reports disabled | Bot still starts |
-| `WORKOUT_FEEDBACK_ENABLED` | `/add_workout` persists `WAITING_FOR_FILE`; daily TCX runs HR/RPE/discomfort flow; optional onboarding latest-activity enrichment is usable | `/add_workout` still shows the upload request but does not create the durable feedback wait; successful daily files return home without questionnaire | **Add workout** remains visible | Feedback service still constructs; facade bypasses it |
+| `WORKOUT_FEEDBACK_ENABLED` | `/add_workout` persists `WAITING_FOR_FILE`; daily TCX runs HR/RPE/mobility/discomfort flow; optional onboarding latest-workout enrichment is usable | `/add_workout` still shows the upload request but does not create the durable feedback wait; successful daily files return home without questionnaire | **Add workout** remains visible | Feedback service still constructs; facade bypasses it |
 | `LLM_MODE=mock` | Explicit free-text uses deterministic fake structured outcomes through the same graph | Not applicable | No menu change | No live LLM API key required |
 | `LLM_MODE=live` | Explicit free-text uses the OpenAI-compatible adapter, structured output, and rolling hourly limit | Provider failure returns safe recovery copy | No menu change; only explicit Other/Write answer paths invoke it | Live adapter is constructed; missing/invalid provider configuration can fail when invoked |
 
@@ -776,6 +854,7 @@ connection.
 | `HR_ENTRY` | Back; Cancel |
 | `HR_CONFIRM` | Confirm; Change; Skip |
 | `RPE` | Very easy; Easy; Moderate; Hard; Very hard; Skip; Back |
+| `MOBILITY` | Yes; No; Skip; Back |
 | `DISCOMFORT` | No; Yes; Skip; Back |
 | `BODY_AREA` | Shoulder; Back; Hip; Knee; Ankle or foot; Other; Skip details; Back |
 | `DESCRIPTION_ENTRY` | Back; Cancel |
@@ -806,13 +885,14 @@ The audit included, at minimum:
 - `backend/app/domain/enums.py`;
 - onboarding state machine, application service, schemas, repositories, and
   profile finalization;
-- unified training-file service, Apple Health parser, TCX parser, activity
-  matching, import-job repository, workout-feedback service/repository, and
-  baseline service;
+- unified training-file service, Apple Health parser, TCX parser, workout
+  normalization/matching and schema serialization, import-job repository,
+  workout-feedback service/repository, and baseline service;
 - `backend/app/config.py`;
 - `backend/app/db/models.py` and Alembic migrations through
-  `0003_unified_training_import`;
-- onboarding, profile, import, parser, activity-matching, feedback, Telegram
+  `0004_discipline_workout_models`;
+- onboarding, profile, import, parser, workout-matching, discipline schema,
+  migration, feedback, Telegram
   handler/rendering, runtime, and end-to-end bot-journey tests.
 
 # Proposed changes

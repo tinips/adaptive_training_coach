@@ -580,6 +580,17 @@ def rpe_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def mobility_keyboard() -> InlineKeyboardMarkup:
+    return _rows(
+        [
+            [(LABELS["yes"], "wf:v1:mobility:yes")],
+            [(LABELS["no"], "wf:v1:mobility:no")],
+            [(LABELS["skip"], "wf:v1:mobility:skip")],
+            [(LABELS["back"], _feedback_back(WorkoutFlowStep.MOBILITY))],
+        ]
+    )
+
+
 def discomfort_keyboard() -> InlineKeyboardMarkup:
     return _rows(
         [

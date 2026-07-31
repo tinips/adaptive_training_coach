@@ -91,8 +91,9 @@ def test_discovers_unicode_healthdata_and_normalizes_supported_units(
     assert workout.calories_kcal == pytest.approx(100)
     assert workout.average_heart_rate == 150
     assert workout.max_heart_rate == 150
-    assert workout.heart_rate_quality is HeartRateTemporalQuality.EXACT_SAMPLE
-    assert workout.heart_rate_reliable is True
+    assert workout.observations[0].temporal_quality is (
+        HeartRateTemporalQuality.EXACT_SAMPLE
+    )
 
 
 def test_coarse_heart_rate_is_preserved_without_fake_average(
@@ -103,11 +104,12 @@ def test_coarse_heart_rate_is_preserved_without_fake_average(
 
     workout = parser().parse(archive).workouts[0]
 
-    assert workout.heart_rate_sample_count == 1
+    assert len(workout.observations) == 1
     assert workout.max_heart_rate == 150
     assert workout.average_heart_rate is None
-    assert workout.heart_rate_quality is HeartRateTemporalQuality.COARSE_INTERVAL
-    assert workout.heart_rate_reliable is False
+    assert workout.observations[0].temporal_quality is (
+        HeartRateTemporalQuality.COARSE_INTERVAL
+    )
 
 
 @pytest.mark.parametrize(
@@ -133,6 +135,14 @@ def test_coarse_heart_rate_is_preserved_without_fake_average(
         (
             "HKWorkoutActivityTypeTraditionalStrengthTraining",
             Discipline.STRENGTH,
+            "2",
+            "min",
+            120,
+        ),
+        ("HKWorkoutActivityTypeCrossTraining", Discipline.STRENGTH, "2", "min", 120),
+        (
+            "HKWorkoutActivityTypeCrossCountrySkiing",
+            Discipline.OTHER,
             "2",
             "min",
             120,
@@ -167,6 +177,59 @@ def test_maps_supported_sports_and_duration_units(
     assert workout.calories_kcal == 100
 
 
+def test_preserves_direct_metadata_and_only_classifies_proven_swims(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "swimming-metadata.zip"
+    write_archive(
+        archive,
+        """<HealthData>
+          <Workout workoutActivityType="HKWorkoutActivityTypeSwimming"
+            duration="30" durationUnit="min" sourceName="Athlete Watch"
+            sourceVersion="11.2" device="Apple Watch"
+            startDate="2026-07-20 08:00:00 +0000"
+            endDate="2026-07-20 08:30:00 +0000">
+            <MetadataEntry key="HKSwimmingLocationType" value="1"/>
+            <MetadataEntry key="HKLapLength" value="25 m"/>
+            <MetadataEntry key="HKWorkoutSubActivityType" value="Lap swimming"/>
+            <WorkoutEvent>
+              <MetadataEntry key="NestedOnly" value="must-not-be-collected"/>
+            </WorkoutEvent>
+          </Workout>
+          <Workout workoutActivityType="HKWorkoutActivityTypeSwimming"
+            duration="30" durationUnit="min" sourceName="Athlete Watch"
+            startDate="2026-07-21 08:00:00 +0000"
+            endDate="2026-07-21 08:30:00 +0000">
+            <MetadataEntry key="HKSwimmingLocationType" value="unknown"/>
+          </Workout>
+          <Workout workoutActivityType="HKWorkoutActivityTypeSwimming"
+            duration="30" durationUnit="min" sourceName="Athlete Watch"
+            startDate="2026-07-22 08:00:00 +0000"
+            endDate="2026-07-22 08:30:00 +0000">
+            <MetadataEntry key="HKSwimmingLocationType" value="Open Water"/>
+          </Workout>
+        </HealthData>""",
+    )
+
+    pool, unknown, open_water = parser().parse(archive).workouts
+
+    assert pool.source_name == "Athlete Watch"
+    assert pool.source_version == "11.2"
+    assert pool.device == "Apple Watch"
+    assert pool.source_metadata == {
+        "HKSwimmingLocationType": "1",
+        "HKLapLength": "25 m",
+        "HKWorkoutSubActivityType": "Lap swimming",
+    }
+    assert pool.raw_sub_sport == "Lap swimming"
+    assert pool.swimming_environment == "POOL"
+    assert pool.pool_length_meters == 25
+    assert unknown.source_metadata == {"HKSwimmingLocationType": "unknown"}
+    assert unknown.swimming_environment is None
+    assert unknown.pool_length_meters is None
+    assert open_water.swimming_environment == "OPEN_WATER"
+
+
 def test_heart_rate_matching_prefers_same_source_and_short_interval_is_reliable(
     tmp_path: Path,
 ) -> None:
@@ -190,10 +253,11 @@ def test_heart_rate_matching_prefers_same_source_and_short_interval_is_reliable(
     result = parser().parse(archive)
     by_source = {workout.source_name: workout for workout in result.workouts}
 
-    assert by_source["Phone"].heart_rate_sample_count == 0
-    assert by_source["Watch"].heart_rate_sample_count == 1
+    assert len(by_source["Phone"].observations) == 0
+    assert len(by_source["Watch"].observations) == 1
     assert (
-        by_source["Watch"].heart_rate_quality is HeartRateTemporalQuality.SHORT_INTERVAL
+        by_source["Watch"].observations[0].temporal_quality
+        is HeartRateTemporalQuality.SHORT_INTERVAL
     )
     assert by_source["Watch"].average_heart_rate == 155
 

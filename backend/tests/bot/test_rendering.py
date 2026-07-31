@@ -78,6 +78,7 @@ def test_every_callback_value_fits_telegram_limit() -> None:
             keyboards.manual_heart_rate_offer_keyboard(),
             keyboards.manual_heart_rate_confirmation_keyboard(),
             keyboards.rpe_keyboard(),
+            keyboards.mobility_keyboard(),
             keyboards.discomfort_keyboard(),
             keyboards.discomfort_area_keyboard(),
             keyboards.discomfort_description_confirmation_keyboard(),
@@ -143,7 +144,7 @@ def test_limited_import_copy_names_partial_unknown_baseline() -> None:
         activities_imported=1,
         activities_updated=0,
         activities_skipped=0,
-        discipline_counts={"RUN": 1},
+        discipline_counts={"RUNNING": 1},
         baseline_limited=True,
     )
     daily_apple = messages.apple_health_file_result(
@@ -156,8 +157,26 @@ def test_limited_import_copy_names_partial_unknown_baseline() -> None:
 
     assert "partial" in completion
     assert "UNKNOWN" in completion
+    assert "Runs: 1" in completion
+    assert "Rides: 0" in completion
     assert "finish the import" not in daily_apple
     assert "partial" in daily_apple
+
+
+def test_apple_health_summary_uses_canonical_discipline_keys() -> None:
+    summary = messages.apple_health_import_success(
+        workouts_found=3,
+        activities_imported=3,
+        activities_updated=0,
+        activities_skipped=0,
+        heart_rate_records_matched=0,
+        warning_count=0,
+        discipline_counts={"CYCLING": 2, "HIKING": 1},
+    )
+
+    assert "Rides: 2" in summary
+    assert "Hikes: 1" in summary
+    assert "Runs: 0" in summary
 
 
 def test_ready_menu_exposes_daily_workout_action_and_required_home_actions() -> None:
@@ -208,6 +227,12 @@ def test_daily_feedback_keyboards_use_deterministic_callback_namespaces() -> Non
         ("Very hard", "wf:v1:rpe:very_hard"),
         ("Skip", "wf:v1:rpe:skip"),
         ("Back", "wf:v1:back:rpe"),
+    ]
+    assert _button_pairs(keyboards.mobility_keyboard()) == [
+        ("Yes", "wf:v1:mobility:yes"),
+        ("No", "wf:v1:mobility:no"),
+        ("Skip", "wf:v1:mobility:skip"),
+        ("Back", "wf:v1:back:mobility"),
     ]
     assert _button_pairs(keyboards.discomfort_keyboard()) == [
         ("No", "wf:v1:discomfort:no"),

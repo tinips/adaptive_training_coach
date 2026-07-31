@@ -10,16 +10,14 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.models import (
-    Activity,
     ActivityFeedback,
     BodyArea,
     User,
+    Workout,
     WorkoutFlowSession,
 )
 from app.domain.enums import (
     DiscomfortSeverity,
-    HeartRateSource,
-    HeartRateTemporalQuality,
     UserStatus,
     WorkoutFlowStep,
 )
@@ -27,6 +25,7 @@ from app.repositories.errors import OwnedRecordNotFoundError
 from app.repositories.users import UserRepository
 from app.repositories.workout_feedback import WorkoutFeedbackRepository
 from app.schemas.common import TelegramIdentity
+from app.schemas.workouts import workout_metrics
 
 _COMPLETED_PROFILE_STATUSES = {
     UserStatus.PROFILE_COMPLETED,
@@ -74,6 +73,7 @@ class ActivityFeedbackData(BaseModel):
     manual_average_heart_rate: int | None = None
     reported_rpe: int | None = None
     reported_rpe_label: str | None = None
+    mobility_done: bool | None = None
     reported_discomfort: bool | None = None
     discomfort_body_area: BodyArea | None = None
     discomfort_severity: DiscomfortSeverity | None = None
@@ -100,9 +100,6 @@ class WorkoutFeedbackResult(BaseModel):
     )
     feedback: ActivityFeedbackData | None = None
     average_heart_rate: float | None = None
-    average_heart_rate_source: HeartRateSource | None = None
-    heart_rate_quality: HeartRateTemporalQuality | None = None
-    heart_rate_reliable: bool | None = None
     completed: bool = False
 
 
@@ -172,7 +169,7 @@ class WorkoutFeedbackService:
 
             initial_state = (
                 WorkoutFlowStep.RPE
-                if self._has_reliable_average_heart_rate(activity)
+                if self._has_average_heart_rate(activity)
                 else WorkoutFlowStep.HR_OFFER
             )
             flow = await repository.begin_for_activity(
@@ -334,7 +331,7 @@ class WorkoutFeedbackService:
                 value=value,
                 label=display_label,
             )
-            await repository.set_state(flow=flow, state=WorkoutFlowStep.DISCOMFORT)
+            await repository.set_state(flow=flow, state=WorkoutFlowStep.MOBILITY)
             return await self._result(repository, flow)
 
     async def skip_rpe(
@@ -354,8 +351,48 @@ class WorkoutFeedbackService:
                 value=None,
                 label=None,
             )
+            await repository.set_state(flow=flow, state=WorkoutFlowStep.MOBILITY)
+            return await self._result(repository, flow)
+
+    async def select_mobility(
+        self,
+        identity: TelegramIdentity,
+        mobility_done: bool | None,
+        *,
+        expected_state: WorkoutFlowStep = WorkoutFlowStep.MOBILITY,
+    ) -> WorkoutFeedbackResult:
+        if mobility_done is not None and not isinstance(mobility_done, bool):
+            raise WorkoutFeedbackError("invalid_mobility")
+        async with self._session_factory.begin() as session:
+            repository, flow = await self._locked_flow(session, identity)
+            replay = await self._replay(repository, flow, expected_state)
+            if replay is not None:
+                return replay
+            await repository.save_mobility(
+                user_id=flow.user_id,
+                activity_id=self._activity_id(flow),
+                mobility_done=mobility_done,
+            )
             await repository.set_state(flow=flow, state=WorkoutFlowStep.DISCOMFORT)
             return await self._result(repository, flow)
+
+    async def report_no_mobility(
+        self,
+        identity: TelegramIdentity,
+    ) -> WorkoutFeedbackResult:
+        return await self.select_mobility(identity, False)
+
+    async def report_mobility(
+        self,
+        identity: TelegramIdentity,
+    ) -> WorkoutFeedbackResult:
+        return await self.select_mobility(identity, True)
+
+    async def skip_mobility(
+        self,
+        identity: TelegramIdentity,
+    ) -> WorkoutFeedbackResult:
+        return await self.select_mobility(identity, None)
 
     async def select_discomfort(
         self,
@@ -578,7 +615,8 @@ class WorkoutFeedbackService:
                 WorkoutFlowStep.HR_OFFER: WorkoutFlowStep.CANCELLED,
                 WorkoutFlowStep.HR_ENTRY: WorkoutFlowStep.HR_OFFER,
                 WorkoutFlowStep.HR_CONFIRM: WorkoutFlowStep.HR_ENTRY,
-                WorkoutFlowStep.DISCOMFORT: WorkoutFlowStep.RPE,
+                WorkoutFlowStep.MOBILITY: WorkoutFlowStep.RPE,
+                WorkoutFlowStep.DISCOMFORT: WorkoutFlowStep.MOBILITY,
                 WorkoutFlowStep.BODY_AREA: WorkoutFlowStep.DISCOMFORT,
                 WorkoutFlowStep.DESCRIPTION_ENTRY: WorkoutFlowStep.BODY_AREA,
                 WorkoutFlowStep.DESCRIPTION_CONFIRM: (
@@ -594,7 +632,7 @@ class WorkoutFeedbackService:
                 )
                 target = (
                     WorkoutFlowStep.CANCELLED
-                    if self._has_reliable_average_heart_rate(activity)
+                    if self._has_average_heart_rate(activity)
                     else WorkoutFlowStep.HR_OFFER
                 )
             else:
@@ -672,16 +710,17 @@ class WorkoutFeedbackService:
         flow: WorkoutFlowSession,
     ) -> WorkoutFeedbackResult:
         feedback: ActivityFeedback | None = None
-        activity: Activity | None = None
+        workout: Workout | None = None
         if flow.activity_id is not None:
             feedback = await repository.get_feedback(
                 user_id=flow.user_id,
                 activity_id=flow.activity_id,
             )
-            activity = await repository.get_activity(
+            workout = await repository.get_activity(
                 user_id=flow.user_id,
                 activity_id=flow.activity_id,
             )
+        metrics = workout_metrics(workout) if workout is not None else None
         return WorkoutFeedbackResult(
             user_id=flow.user_id,
             activity_id=flow.activity_id,
@@ -691,16 +730,7 @@ class WorkoutFeedbackService:
             pending_discomfort_description=flow.pending_discomfort_description,
             feedback=self._feedback_data(feedback),
             average_heart_rate=(
-                activity.average_heart_rate if activity is not None else None
-            ),
-            average_heart_rate_source=(
-                activity.average_heart_rate_source if activity is not None else None
-            ),
-            heart_rate_quality=(
-                activity.heart_rate_quality if activity is not None else None
-            ),
-            heart_rate_reliable=(
-                activity.heart_rate_reliable if activity is not None else None
+                metrics.average_heart_rate if metrics is not None else None
             ),
             completed=flow.state in _TERMINAL_STATES,
         )
@@ -715,6 +745,7 @@ class WorkoutFeedbackService:
             manual_average_heart_rate=feedback.manual_average_heart_rate,
             reported_rpe=feedback.reported_rpe,
             reported_rpe_label=feedback.reported_rpe_label,
+            mobility_done=feedback.mobility_done,
             reported_discomfort=feedback.reported_discomfort,
             discomfort_body_area=feedback.discomfort_body_area,
             discomfort_severity=feedback.discomfort_severity,
@@ -722,8 +753,8 @@ class WorkoutFeedbackService:
         )
 
     @staticmethod
-    def _has_reliable_average_heart_rate(activity: Activity) -> bool:
-        return activity.average_heart_rate is not None and activity.heart_rate_reliable
+    def _has_average_heart_rate(workout: Workout) -> bool:
+        return workout_metrics(workout).average_heart_rate is not None
 
     @staticmethod
     def _activity_id(flow: WorkoutFlowSession) -> uuid.UUID:

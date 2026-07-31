@@ -1,7 +1,7 @@
 # Adaptive Endurance Coach
 
 Adaptive Endurance Coach is a modular Python application that creates a
-persisted athlete profile through Telegram and establishes an activity-data
+persisted athlete profile through Telegram and establishes a workout-data
 baseline from Apple Health ZIP or TCX files. After onboarding, athletes can
 continue their workout history with the same file-import path. Strava remains
 an optional source when explicitly enabled. This repository contains the first
@@ -27,9 +27,10 @@ emergencies, and does not diagnose fitness or health conditions.
 - Atomic, idempotent profile finalization into normalized records.
 - Unified Apple Health ZIP and TCX import for resumable onboarding, multiple
   sequential files, daily workout logging, content-based format detection,
-  activity enrichment, and deterministic baseline recalculation.
+  workout enrichment, and deterministic baseline recalculation.
 - Durable optional post-workout feedback for manual average heart rate,
-  perceived effort, and non-diagnostic discomfort details.
+  perceived effort, mobility or stretching, and non-diagnostic discomfort
+  details.
 - Strava OAuth 2.0 with random expiring one-time state, scope validation, and
   Fernet-encrypted tokens.
 - Token refresh and rotation, paginated activity import, deduplication, manual
@@ -127,17 +128,111 @@ The Alembic migrations create:
 - users and resumable onboarding sessions;
 - athlete profiles, training goals, availability, equipment, non-diagnostic
   health constraints, coaching preferences, and baseline preferences;
-- training-file import jobs, normalized heart-rate observations, OAuth states,
-  encrypted Strava connections, normalized activities, source-provenance
-  links, optional activity feedback, resumable workout-flow state, sync jobs,
+- training-file import jobs, OAuth states, encrypted Strava connections,
+  universal workouts, discipline-specific workout details, source-provenance
+  links, optional workout feedback, resumable workout-flow state, sync jobs,
   and webhook events;
 - versioned athlete and discipline baselines;
 - safe LLM usage records.
 
 Personal-data repository methods always include the owning internal user. OAuth
-states are hashed, time-limited, and single-use. Imported activities and source
+states are hashed, time-limited, and single-use. Imported workouts and source
 links are scoped by owner and stable source key. Active training-file imports
 and Strava sync jobs are serialized per user.
+
+### Workout persistence model
+
+`workouts` contains only fields shared by every supported discipline:
+
+| Field | Meaning |
+| --- | --- |
+| `id` | Stable workout UUID |
+| `athlete_id` | Owning `users.id`; every owned read/write checks this boundary |
+| `discipline` | `RUNNING`, `CYCLING`, `HIKING`, `SWIMMING`, `STRENGTH`, or `OTHER` |
+| `started_at` | Timezone-aware workout start |
+| `duration_seconds` | Positive elapsed duration |
+| `source` | `MANUAL`, `STRAVA`, `APPLE_HEALTH`, `TCX`, `FIT`, or `OTHER_IMPORT` |
+| `external_id` | Nullable for manual workouts; required for imported source identities |
+| `title`, `notes` | Optional user-readable text |
+| `created_at`, `updated_at` | UTC audit timestamps |
+
+Distance, moving duration, heart rate, calories, elevation, pace, speed,
+cadence, pool data, strength sets, mobility, RPE, and discomfort are not generic
+workout columns. Each workout has exactly one main detail record whose
+`workout_id` is both its primary key and a cascading foreign key:
+
+| Detail table | Subtype values and explicit units |
+| --- | --- |
+| `running_workout_details` | `OUTDOOR`, `TRAIL`, `TRACK`, `TREADMILL`; metres, seconds, seconds/km, metres of gain/loss, bpm, steps/minute |
+| `cycling_workout_details` | `ROAD`, `MTB`, `GRAVEL`, `STATIONARY`, `OTHER`; metres, seconds, km/h, metres of gain/loss, bpm, revolutions/minute |
+| `hiking_workout_details` | `HIKING`, `TREKKING`, `MOUNTAINEERING`, `SNOWSHOEING`, `OTHER`; metres, seconds, seconds/km, gain/loss metres, bpm, pack kg |
+| `swimming_workout_details` | `POOL` or `OPEN_WATER`; metres, seconds, seconds/100 m, bpm |
+| `strength_workout_details` | `GYM`, `CALISTHENICS`, `OTHER`; optional focus and validated exercise JSON |
+| `other_workout_details` | Understandable activity name, optional description, raw sport/sub-sport, recognised distance/heart rate, and source-specific JSON metrics |
+
+A `POOL` swim also requires one `pool_swimming_details` row with a positive
+`pool_length_meters`; optional fields are total lengths, primary stroke
+(`FREESTYLE`, `BREASTSTROKE`, `BACKSTROKE`, `BUTTERFLY`, `MIXED`, or `OTHER`),
+average SWOLF, and total strokes. Its key references both `workouts.id` and the
+matching swimming-detail key. `OPEN_WATER` swims must not have pool details.
+
+Strength exercises are stored as validated JSON rather than separate tables:
+
+```json
+[
+  {
+    "exercise": "Pull-up",
+    "sets": [
+      {"reps": 10, "kg": 0},
+      {"reps": 8, "kg": 10}
+    ]
+  }
+]
+```
+
+Each exercise contains only its name and `sets`; each set contains only
+non-negative `reps` and `kg`. An imported strength workout with no structured
+exercise data uses an empty list and remains a valid workout.
+
+When distance and moving duration are positive, running/hiking pace, swimming
+pace per 100 metres, and cycling speed are derived from those SI values and
+become canonical. A conflicting provider pace or speed does not replace the
+derived value; the imported value and a normalization warning remain in source
+metadata. Optional wearable metrics may remain `NULL`.
+
+Unknown sports, plain walking, and swimming records whose pool/open-water
+environment cannot be established conservatively are stored as `OTHER`, not
+rejected or guessed. The original sport, sub-sport, provider summary, unsupported
+metrics, and normalization fallback are retained in `activity_source_links`
+and/or `other_workout_details.metrics_jsonb`. `FIT` is a supported source value,
+but this milestone does not add a FIT parser.
+
+Every source link also retains its source start, duration, raw metrics, and
+file/import-job provenance. Reimporting a migrated workout keeps the complete
+`0004` legacy envelope under `migration_provenance` while exposing the latest
+provider snapshot at the top level, so legacy-only metrics are not overwritten.
+
+The repository also exposes validated manual workout creation through the same
+schema boundary. A manual unknown activity uses `OTHER` plus
+`OtherWorkoutDetails`; it has no external ID. This persistence capability does
+not add a new Telegram manual-workout conversation or public API route.
+
+Migration `0004_discipline_workout_models` preserves workout UUIDs, ownership,
+timestamps, source identities, feedback, import jobs, and baseline links while
+replacing legacy `activities` with `workouts` plus detail rows. It creates
+exactly one main detail per migrated workout, maps legacy discipline names to
+the canonical values, retains the complete legacy row in source metadata, and
+uses `OTHER` for an ambiguous swim instead of inventing an environment. A
+legacy zero-second workout is retained with the minimum valid one-second
+duration while its original value remains in migration provenance.
+The downgrade reconstructs `0003` only while the canonical workout, detail,
+pool detail, and all source-link state still match their migration snapshots;
+otherwise it refuses before schema mutation instead of discarding post-upgrade
+changes.
+
+Migration `0005_remove_hr_observations` drops the obsolete
+`heart_rate_observations` table without a backfill. Canonical average and
+maximum heart rate already live on the matching workout discipline detail.
 
 ## Repository layout
 
@@ -244,7 +339,7 @@ docker compose logs migrate
 
 Stop the application with `docker compose down`. PostgreSQL data survives that
 command in the named volume. `docker compose down -v` permanently deletes the
-local database, including all imported activities, profiles, and onboarding
+local database, including all imported workouts, profiles, and onboarding
 progress.
 
 For detached startup and log following:
@@ -341,15 +436,15 @@ Each document is processed independently and returns concise imported, updated,
 and skipped counts. The bot remains in the import state across uploads and
 process restarts until **Finish import** is selected. Bulk Apple Health and
 multi-TCX onboarding do not start a questionnaire for every historical
-activity.
+workout.
 
 **Finish import** recalculates the deterministic baseline from owned canonical
-activities in the configured analysis window, persists `FILE_IMPORT` as the
+workouts in the configured analysis window, persists `FILE_IMPORT` as the
 baseline source, reports discipline coverage, and allows onboarding to continue
 to the existing summary.
-If the current import session contains no valid activity, the baseline remains
+If the current import session contains no valid workout, the baseline remains
 incomplete and the user can upload another file, choose manual entry, decide
-later, or go back. When at least one activity exists, the bot may offer
+later, or go back. When at least one workout exists, the bot may offer
 **Add details to the most recent workout**; this is optional.
 
 ### Daily workout logging and feedback
@@ -363,12 +458,13 @@ A single daily TCX import shows the normalized workout summary and then:
 
 1. asks for manual average heart rate only when no reliable average exists;
 2. asks optional perceived effort;
-3. asks optional pain or unusual discomfort.
+3. asks whether mobility or stretching was completed;
+4. asks optional pain or unusual discomfort.
 
 Apple Health ZIP is treated as historical backfill or enrichment and never
-creates one questionnaire per imported activity. The deterministic baseline is
+creates one questionnaire per imported workout. The deterministic baseline is
 recalculated after a successful daily import and after measured data enriches
-an activity. A daily file does not silently replace an existing Strava or
+a workout. A daily file does not silently replace an existing Strava or
 manual baseline-source preference.
 
 Manual average heart rate accepts a whole number from 30 through 250 bpm and is
@@ -391,15 +487,18 @@ mapping:
 | Hard | 8 |
 | Very hard | 10 |
 
-RPE can be skipped. Discomfort can be stored as `No`, `Yes`, or unknown when
-skipped. A `Yes` answer can include Shoulder, Back, Hip, Knee, Ankle or foot, or
-Other; optional Mild, Moderate, or Severe intensity; and, for Other, a short
-confirmed free-text description of at most 500 characters. These values are
-subjective workout feedback, not a diagnosis. Back, skip, cancel, repeated
-callbacks, and restart/resume use database-backed flow state rather than
-in-memory Telegram state. RPE and discomfort are retained for future coaching
-and load interpretation; they do not generate a diagnosis or training plan in
-this milestone.
+RPE can be skipped. The mobility answer is stored in the feedback record as
+`true` for **Yes**, `false` for **No**, or `NULL` for **Skip** or unknown.
+Discomfort uses the same `true`/`false`/`NULL` distinction. A `Yes` discomfort
+answer can include Shoulder, Back, Hip, Knee, Ankle or foot, or Other; optional
+Mild, Moderate, or Severe intensity; and, for Other, a short confirmed free-text
+description of at most 500 characters. These values are subjective workout
+feedback, not a diagnosis. Back, skip, cancel, repeated callbacks, and
+restart/resume use database-backed flow state rather than in-memory Telegram
+state. Back from discomfort returns to mobility, and Back from mobility returns
+to RPE. RPE, mobility, and discomfort are retained for future coaching and load
+interpretation; they do not generate a diagnosis or training plan in this
+milestone.
 
 ### TCX support and limits
 
@@ -418,42 +517,40 @@ information to identify and import the workout.
 | Calories | Sums complete lap summaries; incomplete totals remain `NULL`. |
 | Cadence | Reads lap cadence, trackpoint cadence, and supported `RunCadence` extension values. |
 | Altitude and route | Reads altitude and valid latitude/longitude trackpoints; elevation gain is derived from positive changes within contiguous altitude samples. |
-| Sport | Preserves the original value and normalizes run, cycling/biking, swim, walking/hiking, strength, and other. A leading `YYYYMMDD` prefix is ignored for mapping. |
+| Sport | Preserves the original value and maps supported evidence to `RUNNING`, `CYCLING`, `HIKING`, `SWIMMING`, `STRENGTH`, or `OTHER`. Plain walking and swimming without explicit pool/open-water evidence use `OTHER`. A leading `YYYYMMDD` prefix is ignored for mapping. |
 
-The importer does not support GPX, FIT, arbitrary XML, unsupported TCX
-namespaces, or more than one `Activity` in a single TCX file. It does not
-fabricate missing moving time, pace, speed, power, SWOLF, heart rate, cadence,
-elevation, or route data. Missing optional metrics remain `NULL`. Malformed
-XML, DTD/entity declarations, unsupported roots, invalid required identity, and
-files above the configured limit are rejected safely. UTF-16 and other
-unsupported XML encodings are rejected rather than decoded heuristically.
+The importer does not parse GPX or FIT and does not support arbitrary XML,
+unsupported TCX namespaces, or more than one `Activity` in a single TCX file.
+`FIT` is accepted as a persisted source enum for future imports, but no FIT file
+parser exists in this milestone. The importer does not fabricate missing moving
+time, power, SWOLF, heart rate, cadence, elevation, or route data. When positive
+distance and moving duration are both available, the workout schema derives
+canonical pace or speed; otherwise those optional metrics remain `NULL`.
+Malformed XML, DTD/entity declarations, unsupported roots, invalid required
+identity, and files above the configured limit are rejected safely. UTF-16 and
+other unsupported XML encodings are rejected rather than decoded heuristically.
 
-### Deduplication, matching, and metric precedence
+### Exact import deduplication
 
-Exact file replays are detected per user by SHA-256. Apple Health workouts and
-TCX activities also receive stable source keys, so a cumulative export or the
-same TCX can be uploaded again without duplicating its source record.
+Exact file replays are detected per user by SHA-256. Workout persistence then
+uses one exact identity: `athlete_id + source + external_id`. Stable provider
+identities are retained for TCX and Strava. When a source has no stable
+external ID, Apple Health and ID-less TCX records receive a deterministic
+`fingerprint:` identity derived from normalized source, discipline, UTC start,
+duration, and distance.
 
-Cross-source merging is deliberately conservative. Two records are merged
-automatically only when they belong to the same user, have the same normalized
-sport, start within five minutes, have durations within the greater of five
-minutes or 10 percent, and, when both distances exist, have distances within
-the greater of 500 metres or 10 percent. Exactly one candidate must satisfy
-all available evidence. Ambiguous matches remain separate.
+Reimporting the same Apple Health workout, TCX activity, or Strava provider
+activity refreshes that source record instead of creating another workout.
+Different external IDs from one source remain separate, and different sources
+are never merged automatically even when their timestamps and metrics are
+identical. There are no time, duration, distance, ambiguity, confidence, or
+metric-quality thresholds in workout deduplication.
 
-Source links preserve provider identities while the canonical activity is
-enriched non-destructively. Metric precedence is:
-
-1. reliable measured sensor data;
-2. reliable provider summary;
-3. derived data;
-4. user-reported data;
-5. unavailable.
-
-`NULL` never erases an existing metric, and lower-quality data never replaces a
-higher-quality value. For example, Apple Health measured heart rate may replace
-a manual value, TCX route/elevation can fill missing Apple Health fields, and a
-TCX without heart rate cannot erase existing Apple Health heart rate.
+Average and maximum heart rate are stored directly on the matching
+discipline-specific workout detail. Source links retain exact identity, raw
+sport/sub-sport, import traceability, provider metadata, and soft-deletion
+state; they do not store heart-rate confidence, quality, sample count, source
+rank, or replacement precedence.
 
 ### Apple Health ZIP details
 
@@ -465,11 +562,13 @@ Health → profile picture → Export All Health Data
 
 The import reads only `Workout`, child `WorkoutStatistics`, and heart-rate
 `Record` elements needed for training analysis. Clinical records and unrelated
-health categories are ignored. It normalizes run, ride, swim, walk/hike,
-strength, and other workouts; preserves the Apple workout type; and converts
-documented duration, distance, energy, and heart-rate units deterministically.
-Unsupported units are omitted with a warning or fail safely when the field is
-required.
+health categories are ignored. It maps supported evidence to the same six
+canonical disciplines, preserves the Apple workout type and raw source
+metadata, and converts documented duration, distance, energy, and heart-rate
+units deterministically. Plain walking and swimming whose environment cannot be
+established are retained as `OTHER`, including their understandable activity
+name and available metrics. Unsupported units are omitted with a warning or
+fail safely when the field is required.
 
 Before XML parsing, the service verifies ZIP magic and configured limits,
 rejects traversal/absolute/drive paths, links, encryption, nested archives,
@@ -479,15 +578,17 @@ Parsing uses two bounded streaming passes on a worker thread. External DTDs,
 entity declarations, network resolution, malformed XML, and unsafe expansion
 are rejected; ordinary internal Apple-style DTD declarations are tolerated.
 
-Heart-rate records are matched by workout overlap with same-source preference.
-Exact and short observations may contribute to averages. Coarse intervals are
-preserved and flagged, may contribute only to a maximum, and never become
-invented samples or exact averages.
+Heart-rate records are matched transiently by workout overlap with same-source
+preference. Exact and short observations may contribute to the detail model's
+average and maximum. Coarse intervals are classified and counted, may
+contribute only to the maximum, and never become invented samples or exact
+averages. Individual heart-rate records are not persisted.
 
 Uploaded ZIP, XML, and TCX content uses generated temporary paths, never the
 Telegram filename, and is deleted after success or failure. Raw file content is
-not stored in PostgreSQL or application logs. Only normalized activities,
-relevant heart-rate observations, provenance, optional feedback, safe counters,
+not stored in PostgreSQL or application logs. Only normalized workouts, their
+discipline details (including canonical average/maximum heart rate),
+source identity and provider traceability, optional feedback, safe counters,
 and baseline versions are persisted. The generated path is associated with the
 durable import job before document bytes are downloaded. On bot startup, prior
 process jobs are failed, onboarding is restored to its waiting state, and any
@@ -710,8 +811,9 @@ Then perform the live chat test:
    complete the existing onboarding summary.
 4. Send `/add_workout`, upload a single new TCX, and verify that reliable HR
    skips manual entry while missing HR offers the confirmed 30–250 bpm path.
-5. Exercise one RPE choice and one discomfort choice, then use `/baseline` to
-   confirm that a new deterministic baseline is available.
+5. Exercise one RPE choice, one mobility choice, and one discomfort choice,
+   then use `/baseline` to confirm that a new deterministic baseline is
+   available.
 6. With the profile complete and no `/add_workout` prompt active, send another
    supported document directly and confirm content-based dispatch.
 7. Optionally upload an Apple Health export ZIP to verify historical backfill;
@@ -736,8 +838,8 @@ the document.
 7. Review the imported discipline summary and confirm the full profile.
 8. After onboarding, use `/add_workout`, **Add workout**, or direct supported
    document delivery to update workout history.
-9. For a daily TCX, complete or skip the persisted HR, RPE, and discomfort
-   questions.
+9. For a daily TCX, complete or skip the persisted HR, RPE, mobility, and
+   discomfort questions.
 10. If using Strava, open the opaque one-time connection link and authenticate
    directly on Strava. Never send Strava credentials in Telegram.
 11. After the callback, use **Open Telegram** on the success page. The bot sends
@@ -755,9 +857,11 @@ Telegram users are isolated by stable Telegram identity and internal UUID.
 - Activity summaries are paginated until an empty page and locally checked
   against the cutoff.
 - Optional distance, elevation, heart-rate, speed, and power fields may be
-  absent.
-- Run, ride, swim, strength, walk/hike, and other categories are normalized;
-  the original Strava sport type is retained.
+  absent. Provider speed and power are retained in source metadata; typed pace
+  or speed is derived only when positive distance and moving duration exist.
+- Supported evidence maps to `RUNNING`, `CYCLING`, `HIKING`, `SWIMMING`,
+  `STRENGTH`, or `OTHER`. Plain walking and swimming with no defensible
+  environment use `OTHER`; the original Strava sport and sub-sport are retained.
 - Before an authenticated request, expiring credentials are refreshed and both
   rotated tokens are stored atomically.
 - All overall and read-specific rate-limit headers are captured. `429` stops
@@ -773,7 +877,7 @@ Telegram users are isolated by stable Telegram identity and internal UUID.
 
 For each discipline, the engine calculates:
 
-- activity count and active weeks;
+- workout count and active weeks;
 - total and average weekly duration;
 - total and average weekly distance where meaningful;
 - longest duration and distance;
@@ -849,7 +953,7 @@ claim.
 - Raw LLM prompts and raw health descriptions are not written to `llm_usage`.
 - Interpreted values require confirmation, and low-confidence values are not
   stored.
-- OAuth state, callbacks, import jobs, source links, activities, feedback,
+- OAuth state, callbacks, import jobs, source links, workouts, feedback,
   baselines, and profile reads are ownership-scoped.
 - Apple Health ZIP/XML and TCX content is deleted after processing and is never
   stored as a raw database payload. Generated temporary paths do not use the
@@ -875,8 +979,11 @@ cloud deployment is outside this milestone.
   be enabled only for athletes who consent to that read-only import.
 - Manual-baseline measurement is a next-milestone extension point and creates
   no fabricated metrics. Calibration is hidden until a real workflow exists.
-- TCX supports exactly one activity per file. GPX, FIT, multiple-activity TCX,
-  moving-time inference, pace, power, speed, and SWOLF are outside this goal.
+- TCX supports exactly one activity per file. GPX and FIT parsing,
+  multiple-activity TCX, moving-time inference, power, and SWOLF are outside
+  this goal. Pace and speed are derived only from available positive distance
+  and moving duration; provider conflicts are retained as warnings rather than
+  overriding the derived value.
 - Automated tests use synthetic Apple Health and TCX data. A real Telegram bot
   receiving a real Apple Health ZIP or TCX document was not validated in this
   environment.

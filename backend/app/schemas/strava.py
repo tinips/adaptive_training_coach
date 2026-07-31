@@ -145,15 +145,15 @@ def discipline_for_sport_type(sport_type: str) -> Discipline:
     """Map Strava's evolving sport taxonomy into stable product disciplines."""
 
     if sport_type in _RUN_TYPES:
-        return Discipline.RUN
+        return Discipline.RUNNING
     if sport_type in _RIDE_TYPES:
-        return Discipline.RIDE
+        return Discipline.CYCLING
     if sport_type in _SWIM_TYPES:
-        return Discipline.SWIM
+        return Discipline.SWIMMING
     if sport_type in _STRENGTH_TYPES:
         return Discipline.STRENGTH
     if sport_type in _WALK_HIKE_TYPES:
-        return Discipline.WALK_HIKE
+        return Discipline.HIKING
     return Discipline.OTHER
 
 
@@ -174,6 +174,8 @@ class NormalizedStravaActivity(BaseModel):
     average_heart_rate: float | None = None
     max_heart_rate: float | None = None
     average_speed: float | None = None
+    max_speed: float | None = None
+    average_cadence: float | None = None
     average_watts: float | None = None
     trainer: bool = False
     commute: bool = False
@@ -199,6 +201,8 @@ class StravaActivitySummary(BaseModel):
     average_heartrate: float | None = None
     max_heartrate: float | None = None
     average_speed: float | None = None
+    max_speed: float | None = None
+    average_cadence: float | None = None
     average_watts: float | None = None
     trainer: bool = False
     commute: bool = False
@@ -223,11 +227,7 @@ class StravaActivitySummary(BaseModel):
                 return None
             return max(value, 0)
 
-        raw_summary: dict[str, object] = {
-            "id": self.id,
-            "sport_type": source_type,
-            "start_date": self.start_date.isoformat(),
-        }
+        raw_summary: dict[str, object] = self.model_dump(mode="json")
         return NormalizedStravaActivity(
             external_id=str(self.id),
             sport=discipline_for_sport_type(source_type),
@@ -264,6 +264,16 @@ class StravaActivitySummary(BaseModel):
             average_speed=(
                 float(value)
                 if (value := nonnegative(self.average_speed)) is not None
+                else None
+            ),
+            max_speed=(
+                float(value)
+                if (value := nonnegative(self.max_speed)) is not None
+                else None
+            ),
+            average_cadence=(
+                float(value)
+                if (value := nonnegative(self.average_cadence)) is not None
                 else None
             ),
             average_watts=(

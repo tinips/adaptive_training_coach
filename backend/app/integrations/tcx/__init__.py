@@ -1,7 +1,6 @@
 """Secure TCX workout ingestion."""
 
 from app.integrations.tcx.models import (
-    HeartRateProvenance,
     ParsedTCXActivity,
     ParsedTCXPosition,
 )
@@ -12,7 +11,6 @@ from app.integrations.tcx.parser import (
 )
 
 __all__ = [
-    "HeartRateProvenance",
     "ParsedTCXActivity",
     "ParsedTCXPosition",
     "TCXParser",

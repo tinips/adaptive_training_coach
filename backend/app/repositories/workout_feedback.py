@@ -6,25 +6,26 @@ import uuid
 from datetime import datetime
 from typing import cast
 
-from sqlalchemy import select
+from sqlalchemy import exists, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.base import utc_now
 from app.db.models import (
-    Activity,
     ActivityFeedback,
+    ActivitySourceLink,
     BodyArea,
     User,
+    Workout,
     WorkoutFlowSession,
 )
 from app.domain.enums import (
+    ActivitySource,
     DiscomfortSeverity,
-    HeartRateSource,
-    HeartRateTemporalQuality,
     WorkoutFlowStep,
 )
 from app.repositories.errors import OwnedRecordNotFoundError
+from app.schemas.workouts import main_detail
 
 
 class WorkoutFeedbackRepository:
@@ -183,15 +184,25 @@ class WorkoutFeedbackRepository:
         user_id: uuid.UUID,
         activity_id: uuid.UUID,
         for_update: bool = False,
-    ) -> Activity | None:
-        statement = select(Activity).where(
-            Activity.user_id == user_id,
-            Activity.id == activity_id,
-            Activity.deleted_at.is_(None),
+    ) -> Workout | None:
+        active_source_exists = exists(
+            select(ActivitySourceLink.id).where(
+                ActivitySourceLink.workout_id == Workout.id,
+                ActivitySourceLink.user_id == user_id,
+                ActivitySourceLink.deleted_at.is_(None),
+            )
+        )
+        statement = select(Workout).where(
+            Workout.athlete_id == user_id,
+            Workout.id == activity_id,
+            or_(
+                Workout.source == ActivitySource.MANUAL,
+                active_source_exists,
+            ),
         )
         if for_update:
             statement = statement.with_for_update()
-        return cast(Activity | None, await self._session.scalar(statement))
+        return cast(Workout | None, await self._session.scalar(statement))
 
     async def require_activity(
         self,
@@ -199,7 +210,7 @@ class WorkoutFeedbackRepository:
         user_id: uuid.UUID,
         activity_id: uuid.UUID,
         for_update: bool = False,
-    ) -> Activity:
+    ) -> Workout:
         activity = await self.get_activity(
             user_id=user_id,
             activity_id=activity_id,
@@ -218,7 +229,7 @@ class WorkoutFeedbackRepository:
     ) -> ActivityFeedback | None:
         statement = select(ActivityFeedback).where(
             ActivityFeedback.user_id == user_id,
-            ActivityFeedback.activity_id == activity_id,
+            ActivityFeedback.workout_id == activity_id,
         )
         if for_update:
             statement = statement.with_for_update()
@@ -245,7 +256,7 @@ class WorkoutFeedbackRepository:
         )
         if existing is not None:
             return existing
-        feedback = ActivityFeedback(user_id=user_id, activity_id=activity_id)
+        feedback = ActivityFeedback(user_id=user_id, workout_id=activity_id)
         try:
             async with self._session.begin_nested():
                 self._session.add(feedback)
@@ -267,7 +278,7 @@ class WorkoutFeedbackRepository:
         user_id: uuid.UUID,
         activity_id: uuid.UUID,
         beats_per_minute: int | None,
-    ) -> tuple[ActivityFeedback, Activity]:
+    ) -> tuple[ActivityFeedback, Workout]:
         activity = await self.require_activity(
             user_id=user_id,
             activity_id=activity_id,
@@ -277,21 +288,27 @@ class WorkoutFeedbackRepository:
             user_id=user_id,
             activity_id=activity_id,
         )
+        prior_manual = feedback.manual_average_heart_rate
+        detail = main_detail(activity)
+        manual_was_canonical = bool(
+            prior_manual is not None
+            and hasattr(detail, "average_heart_rate")
+            and detail.average_heart_rate == float(prior_manual)
+        )
         feedback.manual_average_heart_rate = beats_per_minute
         self._touch(feedback)
-        if beats_per_minute is not None and self._manual_can_be_canonical(activity):
-            activity.average_heart_rate = float(beats_per_minute)
-            activity.average_heart_rate_source = HeartRateSource.USER_REPORTED
-            activity.heart_rate_quality = HeartRateTemporalQuality.MANUAL
-            activity.heart_rate_reliable = False
+        if (
+            beats_per_minute is not None
+            and hasattr(detail, "average_heart_rate")
+            and (detail.average_heart_rate is None or manual_was_canonical)
+        ):
+            detail.average_heart_rate = float(beats_per_minute)
         elif (
             beats_per_minute is None
-            and activity.average_heart_rate_source is HeartRateSource.USER_REPORTED
+            and hasattr(detail, "average_heart_rate")
+            and manual_was_canonical
         ):
-            activity.average_heart_rate = None
-            activity.average_heart_rate_source = HeartRateSource.UNAVAILABLE
-            activity.heart_rate_quality = HeartRateTemporalQuality.UNKNOWN
-            activity.heart_rate_reliable = False
+            detail.average_heart_rate = None
         await self._session.flush()
         return feedback, activity
 
@@ -329,6 +346,24 @@ class WorkoutFeedbackRepository:
             feedback.discomfort_body_area = None
             feedback.discomfort_severity = None
             feedback.discomfort_description = None
+        self._touch(feedback)
+        await self._session.flush()
+        return feedback
+
+    async def save_mobility(
+        self,
+        *,
+        user_id: uuid.UUID,
+        activity_id: uuid.UUID,
+        mobility_done: bool | None,
+    ) -> ActivityFeedback:
+        """Persist explicit yes/no/unknown mobility semantics."""
+
+        feedback = await self.get_or_create_feedback(
+            user_id=user_id,
+            activity_id=activity_id,
+        )
+        feedback.mobility_done = mobility_done
         self._touch(feedback)
         await self._session.flush()
         return feedback
@@ -387,13 +422,3 @@ class WorkoutFeedbackRepository:
     def _touch(feedback: ActivityFeedback) -> None:
         if feedback.feedback_created_at is None:
             feedback.feedback_created_at = utc_now()
-
-    @staticmethod
-    def _manual_can_be_canonical(activity: Activity) -> bool:
-        if activity.heart_rate_reliable:
-            return False
-        if activity.average_heart_rate_source in {
-            HeartRateSource.DERIVED,
-        }:
-            return False
-        return True

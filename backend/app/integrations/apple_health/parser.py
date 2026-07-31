@@ -19,6 +19,7 @@ from app.integrations.apple_health.models import (
     ParsedAppleHealthExport,
     ParsedHeartRateObservation,
     ParsedWorkout,
+    SwimmingEnvironmentHint,
 )
 
 HEART_RATE_TYPE = "HKQuantityTypeIdentifierHeartRate"
@@ -64,6 +65,7 @@ class _ValidatedArchive:
 class _WorkoutBuilder:
     attributes: dict[str, str]
     statistics: list[dict[str, str]]
+    metadata: dict[str, str]
 
 
 class _SecureXMLReader:
@@ -136,6 +138,7 @@ class AppleHealthParser:
         found = 0
         duplicate_count = 0
         builder: _WorkoutBuilder | None = None
+        workout_depth: int | None = None
 
         try:
             with zipfile.ZipFile(archive_path) as archive:
@@ -158,13 +161,30 @@ class AppleHealthParser:
                             builder = _WorkoutBuilder(
                                 attributes=dict(element.attrib),
                                 statistics=[],
+                                metadata={},
                             )
+                            workout_depth = 0
+                        elif event == "start" and builder is not None:
+                            if workout_depth is None:
+                                raise RuntimeError("workout depth is unavailable")
+                            workout_depth += 1
                         elif (
                             event == "end"
                             and tag == "WorkoutStatistics"
                             and builder is not None
                         ):
                             builder.statistics.append(dict(element.attrib))
+                            element.clear()
+                        elif (
+                            event == "end"
+                            and tag == "MetadataEntry"
+                            and builder is not None
+                            and workout_depth == 1
+                        ):
+                            key = element.attrib.get("key", "").strip()
+                            value = element.attrib.get("value")
+                            if key and value is not None:
+                                builder.metadata[key] = value
                             element.clear()
                         elif event == "end" and tag == "Workout":
                             found += 1
@@ -175,6 +195,7 @@ class AppleHealthParser:
                                 else:
                                     unique[workout.source_record_key] = workout
                             builder = None
+                            workout_depth = None
                             element.clear()
                             if root is not None:
                                 root.clear()
@@ -182,6 +203,10 @@ class AppleHealthParser:
                             element.clear()
                             if root is not None:
                                 root.clear()
+                        if event == "end" and builder is not None and tag != "Workout":
+                            if workout_depth is None or workout_depth < 1:
+                                raise RuntimeError("invalid workout element depth")
+                            workout_depth -= 1
         except AppleHealthParserError:
             raise
         except (ET.ParseError, OSError, RuntimeError, zipfile.BadZipFile) as exc:
@@ -413,6 +438,8 @@ class AppleHealthParser:
                     warnings=warnings,
                 )
         source_name = attributes.get("sourceName")
+        discipline = _discipline(source_type)
+        source_metadata = dict(builder.metadata)
         source_key = _stable_hash(
             source_type,
             started_at.isoformat(),
@@ -423,7 +450,7 @@ class AppleHealthParser:
         return ParsedWorkout(
             source_record_key=source_key,
             source_workout_type=source_type,
-            discipline=_discipline(source_type),
+            discipline=discipline,
             source_name=source_name,
             source_version=attributes.get("sourceVersion"),
             device=attributes.get("device"),
@@ -432,6 +459,16 @@ class AppleHealthParser:
             duration_seconds=duration,
             distance_meters=distance,
             calories_kcal=calories,
+            source_metadata=source_metadata,
+            raw_sub_sport=_raw_sub_sport(source_metadata),
+            swimming_environment=_swimming_environment(
+                discipline,
+                source_metadata,
+            ),
+            pool_length_meters=_pool_length_meters(
+                source_metadata,
+                warnings=warnings,
+            ),
         )
 
     @staticmethod
@@ -586,23 +623,89 @@ def _optional_quantity(
 def _discipline(source_type: str) -> Discipline:
     token = source_type.rsplit("Identifier", 1)[-1].casefold()
     if "running" in token:
-        return Discipline.RUN
+        return Discipline.RUNNING
     if "cycling" in token:
-        return Discipline.RIDE
+        return Discipline.CYCLING
     if "swimming" in token:
-        return Discipline.SWIM
+        return Discipline.SWIMMING
     if "walking" in token or "hiking" in token:
-        return Discipline.WALK_HIKE
+        return Discipline.HIKING
     if any(
         strength in token
         for strength in (
             "strengthtraining",
             "coretraining",
-            "cross",
+            "crosstraining",
         )
     ):
         return Discipline.STRENGTH
     return Discipline.OTHER
+
+
+def _raw_sub_sport(metadata: dict[str, str]) -> str | None:
+    for key in (
+        "HKWorkoutSubActivityType",
+        "HKWorkoutSubType",
+        "SubSport",
+    ):
+        value = metadata.get(key)
+        if value is not None and (normalized := value.strip()):
+            return normalized
+    return None
+
+
+def _swimming_environment(
+    discipline: Discipline,
+    metadata: dict[str, str],
+) -> SwimmingEnvironmentHint | None:
+    if discipline is not Discipline.SWIMMING:
+        return None
+    value = metadata.get("HKSwimmingLocationType")
+    if value is None:
+        return None
+    normalized = "".join(
+        character for character in value.casefold() if character.isalnum()
+    )
+    if normalized in {
+        "1",
+        "pool",
+        "poolswimming",
+        "hkworkoutswimminglocationtypepool",
+    }:
+        return "POOL"
+    if normalized in {
+        "2",
+        "openwater",
+        "openwaterswimming",
+        "hkworkoutswimminglocationtypeopenwater",
+    }:
+        return "OPEN_WATER"
+    return None
+
+
+def _pool_length_meters(
+    metadata: dict[str, str],
+    *,
+    warnings: list[str],
+) -> float | None:
+    raw_value = metadata.get("HKLapLength")
+    if raw_value is None:
+        return None
+    match = re.fullmatch(
+        r"\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*([A-Za-z]+)?\s*",
+        raw_value,
+    )
+    if match is None:
+        if "invalid_pool_length" not in warnings:
+            warnings.append("invalid_pool_length")
+        return None
+    unit = match.group(2) or metadata.get("HKLapLengthUnit")
+    return _optional_quantity(
+        match.group(1),
+        unit,
+        kind="distance",
+        warnings=warnings,
+    )
 
 
 def _stable_hash(*values: str) -> str:
@@ -656,7 +759,6 @@ def _summarize_heart_rate(workout: ParsedWorkout) -> None:
             HeartRateTemporalQuality.SHORT_INTERVAL,
         }
     ]
-    workout.heart_rate_sample_count = len(workout.observations)
     if workout.observations:
         workout.max_heart_rate = max(
             item.beats_per_minute for item in workout.observations
@@ -665,19 +767,3 @@ def _summarize_heart_rate(workout: ParsedWorkout) -> None:
         workout.average_heart_rate = sum(
             item.beats_per_minute for item in precise
         ) / len(precise)
-        workout.heart_rate_reliable = True
-        workout.heart_rate_quality = (
-            HeartRateTemporalQuality.SHORT_INTERVAL
-            if any(
-                item.temporal_quality is HeartRateTemporalQuality.SHORT_INTERVAL
-                for item in precise
-            )
-            else HeartRateTemporalQuality.EXACT_SAMPLE
-        )
-    elif any(
-        item.temporal_quality is HeartRateTemporalQuality.COARSE_INTERVAL
-        for item in workout.observations
-    ):
-        workout.heart_rate_quality = HeartRateTemporalQuality.COARSE_INTERVAL
-    else:
-        workout.heart_rate_quality = HeartRateTemporalQuality.UNKNOWN

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID
 
@@ -22,12 +23,12 @@ from app.bot.notifier import TelegramInitialSyncNotifier
 from app.config import Settings
 from app.db.base import Base
 from app.db.models import (
-    Activity,
     AthleteBaseline,
     BaselinePreference,
     StravaConnection,
     StravaSyncJob,
     User,
+    Workout,
 )
 from app.domain.enums import (
     BaselinePreferenceStatus,
@@ -63,8 +64,13 @@ NOW = datetime(2026, 7, 28, 12, tzinfo=UTC)
 
 
 @pytest.fixture
-async def session_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+async def session_factory(
+    tmp_path: Path,
+) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    # This suite opens a visibility session while a sync transaction is active.
+    # A file-backed database gives those sessions separate SQLite connections,
+    # matching PostgreSQL isolation instead of sharing one in-memory connection.
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'strava.db'}")
 
     @event.listens_for(engine.sync_engine, "connect")
     def enable_foreign_keys(dbapi_connection: object, _: object) -> None:
@@ -279,7 +285,7 @@ async def test_opaque_ticket_oauth_sync_baseline_and_disconnect(
             select(StravaConnection).where(StravaConnection.user_id == user_id)
         )
         imported = await session.scalar(
-            select(Activity).where(Activity.user_id == user_id)
+            select(Workout).where(Workout.athlete_id == user_id)
         )
         baseline = await session.scalar(
             select(AthleteBaseline).where(AthleteBaseline.user_id == user_id)

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from app.domain.enums import Discipline, HeartRateTemporalQuality
+from app.domain.enums import Discipline
 from app.integrations.tcx import (
     TCXParser,
     TCXParserError,
@@ -63,6 +63,9 @@ def test_summary_only_multiple_laps_and_empty_track_are_preserved(
         <MaximumHeartRateBpm><Value>160</Value></MaximumHeartRateBpm>
         <Cadence>36</Cadence>
       </Lap>
+      <Extensions><ActivityExtension>
+        <SubSport>LapSwimming</SubSport>
+      </ActivityExtension></Extensions>
     </Activity>"""
     path = write_tcx(tmp_path / "summary.tcx", document(activity, namespace=""))
 
@@ -70,6 +73,7 @@ def test_summary_only_multiple_laps_and_empty_track_are_preserved(
 
     assert result.discipline is Discipline.SWIM
     assert result.source_sport_type == "20260726Pool swimming"
+    assert result.raw_sub_sport == "LapSwimming"
     assert result.started_at.isoformat() == "2026-07-26T08:00:00+00:00"
     assert result.ended_at is None
     assert result.duration_seconds == 900
@@ -77,13 +81,12 @@ def test_summary_only_multiple_laps_and_empty_track_are_preserved(
     assert result.calories_kcal == 120
     assert result.average_heart_rate == 130
     assert result.max_heart_rate == 160
-    assert result.heart_rate_sample_count == 0
-    assert result.heart_rate_quality is HeartRateTemporalQuality.UNKNOWN
-    assert result.heart_rate_reliable is True
-    assert result.heart_rate_provenance == "PROVIDER_SUMMARY"
+    assert result.heart_rate_records_matched == 0
     assert result.average_cadence == 32
     assert result.cadence_sample_count == 0
+    assert result.max_cadence is None
     assert result.elevation_gain_meters is None
+    assert result.elevation_loss_meters is None
     assert result.route_positions == ()
     assert result.warnings == ()
 
@@ -136,13 +139,12 @@ def test_trackpoints_supply_measured_hr_cadence_route_and_derived_metrics(
     assert result.ended_at.isoformat() == "2026-07-27T06:10:00+00:00"
     assert result.average_heart_rate == 150
     assert result.max_heart_rate == 160
-    assert result.heart_rate_sample_count == 3
-    assert result.heart_rate_quality is HeartRateTemporalQuality.EXACT_SAMPLE
-    assert result.heart_rate_reliable is True
-    assert result.heart_rate_provenance == "MEASURED_SENSOR"
+    assert result.heart_rate_records_matched == 3
     assert result.average_cadence == 85
     assert result.cadence_sample_count == 2
+    assert result.max_cadence == 90
     assert result.elevation_gain_meters == 15
+    assert result.elevation_loss_meters == 5
     assert result.minimum_altitude_meters == 10
     assert result.maximum_altitude_meters == 25
     assert len(result.route_positions) == 2
@@ -157,7 +159,7 @@ def test_trackpoints_supply_measured_hr_cadence_route_and_derived_metrics(
     )
 
 
-def test_trackpoint_hr_without_timestamp_is_measured_but_not_reliable(
+def test_trackpoint_hr_without_timestamp_is_measured(
     tmp_path: Path,
 ) -> None:
     activity = """<Activity Sport="Biking">
@@ -173,9 +175,7 @@ def test_trackpoint_hr_without_timestamp_is_measured_but_not_reliable(
 
     assert result.discipline is Discipline.RIDE
     assert result.average_heart_rate == 155
-    assert result.heart_rate_provenance == "MEASURED_SENSOR"
-    assert result.heart_rate_quality is HeartRateTemporalQuality.UNKNOWN
-    assert result.heart_rate_reliable is False
+    assert result.heart_rate_records_matched == 1
 
 
 @pytest.mark.parametrize(
@@ -228,8 +228,7 @@ def test_missing_optional_metrics_remain_unavailable(tmp_path: Path) -> None:
     assert result.calories_kcal is None
     assert result.average_heart_rate is None
     assert result.max_heart_rate is None
-    assert result.heart_rate_provenance == "UNAVAILABLE"
-    assert result.heart_rate_reliable is False
+    assert result.heart_rate_records_matched == 0
     assert result.average_cadence is None
     assert result.route_positions == ()
 

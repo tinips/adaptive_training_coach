@@ -21,10 +21,9 @@ from sqlalchemy.ext.asyncio import (
 from app.config import Settings
 from app.db.base import Base
 from app.db.models import (
-    Activity,
     AppleHealthImportJob,
     AthleteBaseline,
-    HeartRateObservation,
+    Workout,
 )
 from app.domain.enums import (
     ActivitySource,
@@ -165,7 +164,7 @@ async def test_complete_import_is_atomic_idempotent_and_deletes_upload(
     assert outcome.workouts_found == 1
     assert outcome.activities_imported == 1
     assert outcome.heart_rate_records_matched == 1
-    assert outcome.discipline_counts == {"RUN": 1}
+    assert outcome.discipline_counts == {"RUNNING": 1}
     assert stages == [
         "validating_archive",
         "reading_workouts",
@@ -177,12 +176,9 @@ async def test_complete_import_is_atomic_idempotent_and_deletes_upload(
     assert list(temp_dir.iterdir()) == []
 
     async with factory() as session:
-        activity = await session.scalar(select(Activity))
+        activity = await session.scalar(select(Workout))
         job = await session.scalar(select(AppleHealthImportJob))
         baseline = await session.scalar(select(AthleteBaseline))
-        hr_count = await session.scalar(
-            select(func.count()).select_from(HeartRateObservation)
-        )
         user = await UserRepository(session).get_by_telegram_id(
             identity().telegram_user_id
         )
@@ -193,14 +189,17 @@ async def test_complete_import_is_atomic_idempotent_and_deletes_upload(
 
     assert activity is not None
     assert activity.source is ActivitySource.APPLE_HEALTH
-    assert activity.raw_summary is None
-    assert activity.average_heart_rate == 145
+    assert activity.running_details is not None
+    assert activity.running_details.average_heart_rate == 145
+    assert activity.running_details.max_heart_rate == 145
+    assert len(activity.source_links) == 1
+    assert activity.source_links[0].source_metadata_jsonb is not None
+    assert activity.source_links[0].source_metadata_jsonb["source_name"] == "Watch"
     assert job is not None
     assert job.display_filename == "../../private-export.zip"
     assert job.status is AppleHealthImportStatus.SUCCEEDED
     assert baseline is not None
     assert baseline.source is BaselineSource.APPLE_HEALTH_EXPORT
-    assert hr_count == 1
     assert onboarding.current_step is OnboardingStep.APPLE_HEALTH_IMPORT_COMPLETE
 
     replay_downloaded = False
@@ -247,11 +246,7 @@ async def test_complete_import_is_atomic_idempotent_and_deletes_upload(
     assert repeated.activities_imported == 0
     assert repeated.activities_skipped == 1
     async with factory() as session:
-        assert await session.scalar(select(func.count()).select_from(Activity)) == 1
-        assert (
-            await session.scalar(select(func.count()).select_from(HeartRateObservation))
-            == 1
-        )
+        assert await session.scalar(select(func.count()).select_from(Workout)) == 1
 
 
 @pytest.mark.asyncio
@@ -297,7 +292,7 @@ async def test_invalid_upload_fails_safely_and_cleans_temp_file(
     assert outcome.safe_error_code == "archive_not_zip"
     assert list(temp_dir.iterdir()) == []
     async with factory() as session:
-        assert await session.scalar(select(func.count()).select_from(Activity)) == 0
+        assert await session.scalar(select(func.count()).select_from(Workout)) == 0
         job = await session.scalar(select(AppleHealthImportJob))
         assert job is not None
         assert job.safe_error_code == "archive_not_zip"

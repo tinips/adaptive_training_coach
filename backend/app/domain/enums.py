@@ -95,25 +95,19 @@ class ConnectionStatus(StrEnum):
 
 
 class ActivitySource(StrEnum):
+    MANUAL = "MANUAL"
     STRAVA = "STRAVA"
     APPLE_HEALTH = "APPLE_HEALTH"
     TCX = "TCX"
+    FIT = "FIT"
+    OTHER_IMPORT = "OTHER_IMPORT"
 
 
 class HeartRateTemporalQuality(StrEnum):
     EXACT_SAMPLE = "EXACT_SAMPLE"
     SHORT_INTERVAL = "SHORT_INTERVAL"
     COARSE_INTERVAL = "COARSE_INTERVAL"
-    MANUAL = "MANUAL"
     UNKNOWN = "UNKNOWN"
-
-
-class HeartRateSource(StrEnum):
-    MEASURED_SENSOR = "MEASURED_SENSOR"
-    PROVIDER_SUMMARY = "PROVIDER_SUMMARY"
-    DERIVED = "DERIVED"
-    USER_REPORTED = "USER_REPORTED"
-    UNAVAILABLE = "UNAVAILABLE"
 
 
 class TrainingFileFormat(StrEnum):
@@ -133,6 +127,7 @@ class WorkoutFlowStep(StrEnum):
     HR_ENTRY = "HR_ENTRY"
     HR_CONFIRM = "HR_CONFIRM"
     RPE = "RPE"
+    MOBILITY = "MOBILITY"
     DISCOMFORT = "DISCOMFORT"
     BODY_AREA = "BODY_AREA"
     DESCRIPTION_ENTRY = "DESCRIPTION_ENTRY"
@@ -157,11 +152,61 @@ class AppleHealthImportStatus(StrEnum):
 
 
 class Discipline(StrEnum):
-    RUN = "RUN"
-    RIDE = "RIDE"
-    SWIM = "SWIM"
+    RUNNING = "RUNNING"
+    CYCLING = "CYCLING"
+    HIKING = "HIKING"
+    SWIMMING = "SWIMMING"
     STRENGTH = "STRENGTH"
-    WALK_HIKE = "WALK_HIKE"
+    OTHER = "OTHER"
+
+    # Source-compatible aliases. Only the canonical values above are persisted
+    # or yielded when iterating over the enum.
+    RUN = "RUNNING"
+    RIDE = "CYCLING"
+    WALK_HIKE = "HIKING"
+    SWIM = "SWIMMING"
+
+
+class RunningType(StrEnum):
+    OUTDOOR = "OUTDOOR"
+    TRAIL = "TRAIL"
+    TRACK = "TRACK"
+    TREADMILL = "TREADMILL"
+
+
+class CyclingType(StrEnum):
+    ROAD = "ROAD"
+    MTB = "MTB"
+    GRAVEL = "GRAVEL"
+    STATIONARY = "STATIONARY"
+    OTHER = "OTHER"
+
+
+class HikingType(StrEnum):
+    HIKING = "HIKING"
+    TREKKING = "TREKKING"
+    MOUNTAINEERING = "MOUNTAINEERING"
+    SNOWSHOEING = "SNOWSHOEING"
+    OTHER = "OTHER"
+
+
+class SwimmingEnvironment(StrEnum):
+    POOL = "POOL"
+    OPEN_WATER = "OPEN_WATER"
+
+
+class SwimmingStroke(StrEnum):
+    FREESTYLE = "FREESTYLE"
+    BREASTSTROKE = "BREASTSTROKE"
+    BACKSTROKE = "BACKSTROKE"
+    BUTTERFLY = "BUTTERFLY"
+    MIXED = "MIXED"
+    OTHER = "OTHER"
+
+
+class StrengthType(StrEnum):
+    GYM = "GYM"
+    CALISTHENICS = "CALISTHENICS"
     OTHER = "OTHER"
 
 

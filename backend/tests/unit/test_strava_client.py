@@ -177,6 +177,42 @@ def test_nullable_unknown_activity_is_normalized_without_inventing_values() -> N
     assert normalized.average_watts is None
 
 
+def test_normalization_retains_modeled_provider_values_in_raw_summary() -> None:
+    payload = activity_payload(1001, sport_type="MountainBikeRide")
+    payload.update(
+        {
+            "type": "Ride",
+            "timezone": "(GMT+01:00) Europe/Madrid",
+            "moving_time": 3300,
+            "distance": 21_500.5,
+            "total_elevation_gain": 480.25,
+            "average_heartrate": 148.5,
+            "max_heartrate": 177.0,
+            "average_speed": 6.2,
+            "max_speed": 15.4,
+            "average_cadence": 84.5,
+            "average_watts": 235.0,
+            "trainer": False,
+            "commute": True,
+            "manual": True,
+        }
+    )
+    summary = StravaActivitySummary.model_validate(payload)
+
+    normalized = summary.normalized()
+
+    assert normalized.max_speed == 15.4
+    assert normalized.average_cadence == 84.5
+    assert normalized.raw_summary is not None
+    assert set(normalized.raw_summary) == set(StravaActivitySummary.model_fields)
+    assert normalized.raw_summary["average_watts"] == 235.0
+    assert normalized.raw_summary["trainer"] is False
+    assert normalized.raw_summary["commute"] is True
+    assert normalized.raw_summary["manual"] is True
+    assert normalized.raw_summary["max_speed"] == 15.4
+    assert normalized.raw_summary["average_cadence"] == 84.5
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("status_code", "exception_type"),

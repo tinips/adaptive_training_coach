@@ -359,8 +359,9 @@ Requested on 2026-07-28:
 - [x] Normalize supported units and sports, preserve source types, match heart
   rate by interval/source, and retain explicit temporal-quality/reliability
   flags.
-- [x] Upsert canonical activities and relevant heart-rate observations,
-  deduplicate cumulative exports, and persist only safe job metadata/counters.
+- [x] Upsert canonical activities with average/maximum heart rate, deduplicate
+  cumulative exports, and persist only source-quality provenance and safe job
+  metadata/counters. Individual heart-rate observations are no longer stored.
 - [x] Recalculate and version the deterministic baseline with source
   `APPLE_HEALTH_EXPORT` in the successful persistence transaction.
 - [x] Make Strava disabled by default, hide its bot entry points, and return a
@@ -709,3 +710,276 @@ Validated on 2026-07-29:
   repository or runtime configuration changed.
 - No controllable browser was available, so a browser-form login was not
   performed or claimed.
+
+## Follow-up: discipline-specific workout persistence
+
+Requested on 2026-07-30.
+
+### Objective and implemented outcome
+
+Replace the wide canonical `activities` row with a universal `workouts` identity
+and one one-to-one detail model for each supported discipline, while preserving
+the existing Apple Health, TCX, Strava, baseline, summary, and workout-feedback
+flows. Unknown source activities must remain usable as `OTHER`; no legacy
+metric may disappear silently. This follow-up does not add a planner, redesign
+onboarding, add time-series/lap models, or invent a new manual-workout UI.
+
+The implemented universal row contains only `id`, `athlete_id`, `discipline`,
+timezone-aware `started_at`, positive `duration_seconds`, `source`, optional
+`external_id`, `title`, `notes`, and audit timestamps. Exactly one main detail
+record carries discipline metrics:
+
+- `running_workout_details` for `RUNNING`;
+- `cycling_workout_details` for `CYCLING`;
+- `hiking_workout_details` for `HIKING`;
+- `swimming_workout_details` for `SWIMMING`, with a required
+  `pool_swimming_details` extension for pool swims;
+- `strength_workout_details` for `STRENGTH`;
+- `other_workout_details` for `OTHER`.
+
+### Important design and migration decisions
+
+1. The canonical discipline enum is `RUNNING`, `CYCLING`, `HIKING`,
+   `SWIMMING`, `STRENGTH`, and `OTHER`. Sources are `MANUAL`, `STRAVA`,
+   `APPLE_HEALTH`, `TCX`, `FIT`, and `OTHER_IMPORT`. `FIT` is data-model
+   compatibility only; no FIT parser was added.
+2. Strict Pydantic schemas validate source/external-ID semantics,
+   discipline-detail agreement, timezone-aware starts, positive duration,
+   non-negative optional metrics, pool/open-water consistency, and the exact
+   strength exercise/set JSON shape. Imported strength without structured sets
+   uses an empty list.
+3. A central workout serializer returns generic fields plus one typed detail.
+   A flat internal metric projection lets baseline, import/enrichment, summary,
+   and feedback code consume the new structure without moving
+   discipline-specific branching into Telegram handlers.
+4. Positive distance and moving duration determine canonical running/hiking
+   pace, swimming pace per 100 metres, and cycling speed. A provider conflict
+   does not override the derived value; the provider value and warning remain
+   in source metadata.
+5. Import normalization is conservative. Plain walking, an unknown sport,
+   swimming without defensible pool/open-water evidence, and a pool-labelled
+   swim without a positive pool length become `OTHER`. Raw sport/sub-sport,
+   recognized metrics, unsupported provider metrics, and the fallback reason
+   remain available through source metadata and `OtherWorkoutDetails`.
+6. Repository-level manual creation uses the same validated schema. Manual
+   `OTHER` uses `OtherWorkoutDetails` and has no external ID. No new Telegram
+   manual-entry conversation or public API route was added.
+7. `activity_feedback`, `activity_source_links`, and the existing import-job
+   table names remain for compatibility, but their canonical foreign key is now
+   `workout_id`. Feedback adds nullable `mobility_done`: `true` for explicit
+   Yes, `false` for explicit No, and `NULL` for skipped/not asked/unknown.
+8. The durable feedback sequence is now `RPE` → `MOBILITY` → `DISCOMFORT`.
+   Back from `DISCOMFORT` returns to `MOBILITY`; Back from `MOBILITY` returns to
+   `RPE`. Expected-state callback checks still replay stale callbacks without
+   duplicate mutation.
+9. Migration `0004_discipline_workout_models` maps legacy `RUN`, `RIDE`,
+   `WALK_HIKE`, and explicitly classifiable `SWIM` records to their canonical
+   details. Ambiguous swimming and pool evidence without a pool length become
+   `OTHER`.
+10. The migration preserves IDs, timestamps, owner/source identities, support
+    records, and foreign keys. Every removed legacy value is copied into
+    `activity_source_links.source_metadata_jsonb`; `OTHER` also carries the
+    snapshot in `metrics_jsonb`. A legacy zero-second duration becomes one
+    second while the original zero remains in provenance. Later source
+    reimports retain that immutable envelope under `migration_provenance` while
+    keeping the latest source snapshot at the top level.
+11. Downgrade reconstructs the `0003` row from provenance and refuses before
+    mutation when data is not representable in `0003`, including new source
+    values, mobility feedback, an active `MOBILITY` flow, or missing/ambiguous
+    provenance. Persisted snapshots also guard universal workout, main-detail,
+    pool-detail, and every source-link field, including deletion state.
+
+### Progress
+
+- [x] Inspect the existing models, migrations, parsers, repositories, baseline
+  service, Telegram summaries, feedback flow, and current tests.
+- [x] Add canonical enums, universal workout persistence, discipline detail
+  models, strict boundary schemas, central serialization, and owned manual
+  creation.
+- [x] Update Apple Health, TCX, and existing Strava normalization/import paths,
+  conservative matching/enrichment, baseline projection, summaries, and
+  feedback references.
+- [x] Add nullable mobility feedback and its persisted Telegram step without
+  changing unrelated onboarding.
+- [x] Add the data-preserving `0004` migration and guarded downgrade.
+- [x] Add focused schema, creation, persistence, migration, parser/import,
+  serializer, baseline, bot, and mobility coverage.
+- [x] Update the README and current-product-flow documentation.
+- [x] Record the complete repository quality gates and required Docker/PostgreSQL
+  runtime validation for this follow-up.
+
+### Validation evidence recorded so far
+
+Validated on 2026-07-30:
+
+- `python -m pytest -q tests/unit/test_workout_schemas.py
+  tests/use_cases/test_workout_creation.py
+  tests/integration/test_workout_persistence.py`: 27 passed in 4.10 seconds.
+  Focused Ruff, Ruff-format, mypy, and diff checks for those files also passed.
+- `python -m pytest -q tests/bot tests/use_cases/test_workout_feedback.py`: 64
+  passed in 20.28 seconds. Scoped Ruff, Ruff-format, and mypy checks for the bot
+  and feedback implementation passed.
+- `python -m pytest -q tests/integration/test_persistence_migration.py`: 3 passed
+  in 16.46 seconds. This covers empty upgrade/base downgrade, populated
+  `0002`-to-head, and populated all-discipline `0003`-to-head-to-`0003`
+  preservation.
+- After the final source-provenance guards, the combined migration,
+  workout-persistence, and matching regression set passed: 16 passed in 43.06
+  seconds. It includes reimport preservation of the immutable legacy envelope
+  and downgrade refusal after source-link deletion-state changes.
+- `python -m ruff check
+  alembic/versions/0004_discipline_workout_models.py
+  tests/integration/test_persistence_migration.py`: passed.
+- A disposable SQLite database completed `python -m alembic upgrade head`, and
+  `python -m alembic check` reported `No new upgrade operations detected`.
+- The focused open-water manual creation test initially exposed an async lazy
+  load (`MissingGreenlet`) when serializing an absent pool-detail relationship.
+  Initializing that relationship explicitly to `None` fixed the defect; the
+  27-test focused suite above then passed.
+- Final `python -m pytest -q`: 336 passed in 69.14 seconds.
+- `python -m ruff check .`: passed.
+- `python -m ruff format --check .`: passed after formatting.
+- `python -m mypy app`: passed.
+- `git diff --check`: passed.
+- `docker compose config | Out-Null`: exited zero.
+- Final `docker compose build`: passed with the finalized application and
+  migration source.
+- `docker compose up -d`: exited zero after rerunning the one-shot migration and
+  satisfying the API health dependency.
+- `docker compose ps` showed healthy `db` and `api` services plus running `bot`
+  and `adminer`; the earlier `docker compose ps -a` showed `migrate` exited
+  zero.
+- The live development PostgreSQL database contained zero workouts, so the
+  finalized migration was safely exercised in both directions:
+  `0004_discipline_workout_models` -> `0003_unified_training_import` ->
+  `0004_discipline_workout_models`. Both commands exited zero, counts stayed
+  zero, and `alembic check` reported `No new upgrade operations detected`.
+- Live schema inspection confirmed that `activities` is absent and `workouts`
+  contains exactly the universal columns documented above. All preflight and
+  post-migration row counts remained zero. It also confirmed that the pool
+  detail key references both `workouts.id` and
+  `swimming_workout_details.workout_id`. The populated backfill path is
+  therefore evidenced by the migration integration test, not by this empty
+  development database.
+- The migration, API, and bot services were recreated. Migration exited zero,
+  PostgreSQL and the API reported healthy, the bot remained running, and
+  `GET /ready` returned HTTP 200 with `{"status":"ready"}`. Reviewed service
+  logs contained no migration loop or startup failure.
+- Live Telegram interaction, Strava/provider calls, and live LLM calls were not
+  performed or claimed.
+
+## Follow-up: remove persisted heart-rate observations
+
+Requested on 2026-07-30:
+
+- [x] Inventory model, relationship, repository, migration, documentation, and
+  test references to `heart_rate_observations`.
+- [x] Remove the SQLAlchemy model and the Apple Health observation upsert while
+  retaining direct average/maximum heart rate writes to discipline details.
+- [x] Add `0005_remove_hr_observations`, which drops the table without backfill
+  and recreates only its empty `0004` shape on downgrade.
+- [x] Keep transient Apple matching, matched-record counters, and the
+  independently used heart-rate source/quality precedence enums.
+- [x] Update affected migration, model-metadata, Apple import, README, and
+  current-flow expectations.
+- [x] Run the focused/full test, static-analysis, Alembic, Docker build, schema,
+  API, database, and bot-startup gates.
+
+Design decision: individual Apple Health records remain transient parser input.
+The canonical `average_heart_rate` and `max_heart_rate` values are stored only
+on the workout's matching discipline detail. `ActivitySourceLink` continues to
+hold non-sample source/reliability provenance needed by matching, feedback, and
+baseline precedence. No replacement observation or time-series table is added.
+
+### Validation evidence
+
+Validated on 2026-07-30:
+
+- Focused Apple Health, file-import, repository-metadata, migration, and workout
+  persistence coverage passed: `35 passed in 63.53s`.
+- The complete backend suite passed: `336 passed in 114.31s`.
+- `ruff check .`, `ruff format --check .`, and `mypy app` all passed; mypy
+  checked 99 source files.
+- `docker compose build` completed successfully. Before applying the migration,
+  the live PostgreSQL database was at `0004_discipline_workout_models` and the
+  obsolete table contained zero rows.
+- The migration upgraded PostgreSQL to `0005_remove_hr_observations`;
+  `heart_rate_observations` was absent and the workout count was unchanged.
+  `alembic check` reported no new upgrade operations.
+- A live downgrade to `0004_discipline_workout_models` recreated the empty
+  eleven-column legacy table, and a second upgrade removed it again.
+- The recreated Compose stack reported healthy API and database services,
+  migration exit code 0, `GET /ready` returned `{"status":"ready"}`, and the bot
+  logged a successful application start. Reviewed service logs showed no
+  migration loop or startup failure.
+- Live Telegram interaction, Apple Health/TCX/Strava provider calls, and live
+  LLM calls were not performed or claimed.
+
+## Follow-up: exact-only workout import identity
+
+Requested on 2026-07-30. This follow-up supersedes the earlier cross-source
+matching, metric-precedence, and persisted heart-rate confidence decisions in
+this plan.
+
+### Current decisions
+
+1. An imported workout is an exact duplicate only for the same
+   `athlete_id + source + external_id`.
+2. A stable provider ID is used when available. Otherwise a deterministic
+   `fingerprint:` external ID is generated from normalized source, discipline,
+   UTC start, duration, and distance.
+3. Apple Health, TCX, and Strava records are never merged across sources.
+   Similar timestamps, durations, distances, disciplines, and heart-rate
+   values do not influence identity.
+4. Exact same-source reimports refresh that workout and discipline detail.
+   Another external ID from the same source creates another workout.
+5. Average and maximum heart rate remain direct discipline-detail values.
+   Source links no longer persist heart-rate source, quality, reliability, or
+   sample count, and no confidence/rank/precedence selector remains.
+6. `HeartRateSource` is removed. `HeartRateTemporalQuality` remains only as
+   transient Apple Health parser classification.
+7. `TrainingActivityRepository` remains the public persistence entry point.
+   Provider adapters, contracts, normalization, detail mapping, and source-link
+   persistence are split into focused modules.
+
+### Progress
+
+- [x] Inspect the dirty worktree and inventory matching, confidence,
+  source-link, import, baseline, feedback, serialization, summary, migration,
+  and test dependencies.
+- [x] Remove approximate candidate matching, thresholds, ambiguous outcomes,
+  cross-source merge, quality ranks, heart-rate precedence, and persisted
+  confidence fields.
+- [x] Implement exact provider identity and normalized-value fallback
+  fingerprints for sources without a stable external ID.
+- [x] Split the former oversized activity repository by responsibility while
+  preserving `TrainingActivityRepository`.
+- [x] Add `0006_exact_workout_identity` and reversible migration coverage.
+- [x] Replace matching/confidence tests with exact replay, source isolation,
+  fingerprint, direct heart-rate, baseline, and feedback coverage.
+- [x] Update README and current-product-flow documentation.
+- [x] Record final static-analysis, migration, Docker build, PostgreSQL schema,
+  API readiness, and bot-startup evidence.
+
+### Validation evidence recorded so far
+
+- `pytest -q`: 331 passed in 51.31 seconds, including exact Apple, TCX, Strava,
+  no-provider-ID fingerprint, cross-source separation, direct heart-rate,
+  baseline, feedback, serialization, and migration coverage.
+- `ruff check .`, `ruff format --check .`, `mypy app`, and `git diff --check`
+  passed. Mypy checked 108 source files and Ruff reported 138 formatted files.
+- `docker compose build` completed with the final application and migration
+  source.
+- Before the live migration, PostgreSQL was at
+  `0005_remove_hr_observations` with zero workouts and zero source links.
+- `0006_exact_workout_identity` removed all four source-link heart-rate
+  confidence columns. `alembic check` reported
+  `No new upgrade operations detected`.
+- The live `0006 -> 0005 -> 0006` round trip restored all four legacy columns
+  on downgrade and removed them again on upgrade; workout counts remained
+  zero.
+- `docker compose up -d` recreated the migration, API, and bot services.
+  Migration exited zero, PostgreSQL and the API were healthy, `/ready` returned
+  `{"status":"ready"}`, and the bot logged `Application started`.
+- Live Telegram interaction, Apple Health/TCX/Strava provider calls, and live
+  LLM calls have not been performed or claimed.

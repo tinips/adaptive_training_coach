@@ -3,33 +3,30 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
-from typing import Literal
+from datetime import datetime
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import exists, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.base import utc_now
 from app.db.models import (
-    Activity,
     ActivitySourceLink,
     AppleHealthImportJob,
-    HeartRateObservation,
     OnboardingSession,
+    Workout,
 )
 from app.domain.enums import (
     ActivitySource,
     AppleHealthImportStatus,
-    HeartRateSource,
     OnboardingStep,
     TrainingFileFormat,
     TrainingImportContext,
 )
 from app.integrations.apple_health.models import ParsedWorkout
+from app.repositories.activities import TrainingActivityRepository
 from app.repositories.errors import OwnedRecordNotFoundError
-
-ActivityUpsertOutcome = Literal["inserted", "updated", "unchanged"]
+from app.services.activities.contracts import ActivityUpsertOutcome
 
 
 class AppleHealthRepository:
@@ -171,13 +168,18 @@ class AppleHealthRepository:
         user_id: uuid.UUID,
     ) -> dict[str, int]:
         rows = await self._session.execute(
-            select(Activity.sport, func.count(Activity.id))
-            .where(
-                Activity.user_id == user_id,
-                Activity.source == ActivitySource.APPLE_HEALTH,
-                Activity.deleted_at.is_(None),
+            select(Workout.discipline, func.count(Workout.id.distinct()))
+            .join(
+                ActivitySourceLink,
+                ActivitySourceLink.workout_id == Workout.id,
             )
-            .group_by(Activity.sport)
+            .where(
+                Workout.athlete_id == user_id,
+                ActivitySourceLink.user_id == user_id,
+                ActivitySourceLink.source == ActivitySource.APPLE_HEALTH,
+                ActivitySourceLink.deleted_at.is_(None),
+            )
+            .group_by(Workout.discipline)
         )
         return {discipline.value: count for discipline, count in rows.all()}
 
@@ -188,13 +190,23 @@ class AppleHealthRepository:
     ) -> dict[str, int]:
         """Count every owned canonical activity exactly once."""
 
-        rows = await self._session.execute(
-            select(Activity.sport, func.count(Activity.id))
-            .where(
-                Activity.user_id == user_id,
-                Activity.deleted_at.is_(None),
+        active_source_exists = exists(
+            select(ActivitySourceLink.id).where(
+                ActivitySourceLink.workout_id == Workout.id,
+                ActivitySourceLink.user_id == user_id,
+                ActivitySourceLink.deleted_at.is_(None),
             )
-            .group_by(Activity.sport)
+        )
+        rows = await self._session.execute(
+            select(Workout.discipline, func.count(Workout.id))
+            .where(
+                Workout.athlete_id == user_id,
+                or_(
+                    Workout.source == ActivitySource.MANUAL,
+                    active_source_exists,
+                ),
+            )
+            .group_by(Workout.discipline)
         )
         return {discipline.value: count for discipline, count in rows.all()}
 
@@ -244,25 +256,25 @@ class AppleHealthRepository:
         *,
         user_id: uuid.UUID,
         onboarding_session_id: uuid.UUID | None = None,
-    ) -> Activity | None:
+    ) -> Workout | None:
         """Return the latest canonical activity linked by an owned import job."""
 
         statement = (
-            select(Activity)
+            select(Workout)
             .join(
                 ActivitySourceLink,
-                ActivitySourceLink.activity_id == Activity.id,
+                ActivitySourceLink.workout_id == Workout.id,
             )
             .join(
                 AppleHealthImportJob,
                 AppleHealthImportJob.id == ActivitySourceLink.import_job_id,
             )
             .where(
-                Activity.user_id == user_id,
+                Workout.athlete_id == user_id,
                 ActivitySourceLink.user_id == user_id,
                 AppleHealthImportJob.user_id == user_id,
                 AppleHealthImportJob.status == AppleHealthImportStatus.SUCCEEDED,
-                Activity.deleted_at.is_(None),
+                ActivitySourceLink.deleted_at.is_(None),
             )
         )
         if onboarding_session_id is not None:
@@ -270,7 +282,7 @@ class AppleHealthRepository:
                 AppleHealthImportJob.onboarding_session_id == onboarding_session_id,
             )
         result = await self._session.scalars(
-            statement.order_by(Activity.started_at.desc(), Activity.id).limit(1)
+            statement.order_by(Workout.started_at.desc(), Workout.id).limit(1)
         )
         return result.first()
 
@@ -348,7 +360,7 @@ class AppleHealthRepository:
         job.activities_skipped = activities_skipped
         job.heart_rate_records_matched = heart_rate_records_matched
         job.warning_count = warning_count
-        job.activity_id = activity_id
+        job.workout_id = activity_id
         if file_format is not None:
             job.file_format = file_format
         job.safe_error_code = None
@@ -371,7 +383,7 @@ class AppleHealthRepository:
             activities_skipped=source.workouts_found,
             heart_rate_records_matched=source.heart_rate_records_matched,
             warning_count=source.warning_count,
-            activity_id=source.activity_id,
+            activity_id=source.workout_id,
             file_format=source.file_format,
         )
 
@@ -579,142 +591,13 @@ class AppleHealthRepository:
         *,
         user_id: uuid.UUID,
         workout: ParsedWorkout,
-    ) -> tuple[Activity, ActivityUpsertOutcome]:
-        activity = await self._session.scalar(
-            select(Activity).where(
-                Activity.user_id == user_id,
-                Activity.source == ActivitySource.APPLE_HEALTH,
-                Activity.external_id == workout.source_record_key,
-            )
-        )
-        values: dict[str, object] = {
-            "sport": workout.discipline,
-            "source_sport_type": workout.source_workout_type,
-            "name": _activity_name(workout),
-            "started_at": workout.started_at,
-            "ended_at": workout.ended_at,
-            "timezone": None,
-            "duration_seconds": workout.duration_seconds,
-            "moving_time_seconds": None,
-            "distance_meters": workout.distance_meters,
-            "elevation_gain_meters": None,
-            "calories_kcal": workout.calories_kcal,
-            "average_heart_rate": workout.average_heart_rate,
-            "average_heart_rate_source": (
-                HeartRateSource.MEASURED_SENSOR
-                if workout.average_heart_rate is not None
-                and workout.heart_rate_sample_count > 0
-                else (
-                    HeartRateSource.PROVIDER_SUMMARY
-                    if workout.average_heart_rate is not None
-                    else HeartRateSource.UNAVAILABLE
-                )
-            ),
-            "max_heart_rate": workout.max_heart_rate,
-            "heart_rate_sample_count": workout.heart_rate_sample_count,
-            "heart_rate_quality": workout.heart_rate_quality,
-            "heart_rate_reliable": workout.heart_rate_reliable,
-            "average_speed": None,
-            "average_watts": None,
-            "trainer": False,
-            "commute": False,
-            "manual": False,
-            "raw_summary": None,
-            "deleted_at": None,
-        }
-        if activity is None:
-            activity = Activity(
-                user_id=user_id,
-                source=ActivitySource.APPLE_HEALTH,
-                external_id=workout.source_record_key,
-                **values,
-            )
-            try:
-                async with self._session.begin_nested():
-                    self._session.add(activity)
-                    await self._session.flush()
-            except IntegrityError:
-                activity = await self._session.scalar(
-                    select(Activity).where(
-                        Activity.user_id == user_id,
-                        Activity.source == ActivitySource.APPLE_HEALTH,
-                        Activity.external_id == workout.source_record_key,
-                    )
-                )
-                if activity is None:
-                    raise
-            else:
-                await self._upsert_observations(
-                    user_id=user_id,
-                    activity=activity,
-                    workout=workout,
-                )
-                return activity, "inserted"
-
-        changed = any(
-            not _values_equal(getattr(activity, key), value)
-            for key, value in values.items()
-        )
-        if changed:
-            for key, value in values.items():
-                setattr(activity, key, value)
-        observations_changed = await self._upsert_observations(
+    ) -> tuple[Workout, ActivityUpsertOutcome]:
+        return await TrainingActivityRepository(self._session).import_apple_workout(
             user_id=user_id,
-            activity=activity,
             workout=workout,
+            file_sha256=None,
+            import_job_id=None,
         )
-        await self._session.flush()
-        return activity, "updated" if changed or observations_changed else "unchanged"
-
-    async def _upsert_observations(
-        self,
-        *,
-        user_id: uuid.UUID,
-        activity: Activity,
-        workout: ParsedWorkout,
-    ) -> bool:
-        if not workout.observations:
-            return False
-        keys = [item.source_record_key for item in workout.observations]
-        existing = {
-            item.source_record_key: item
-            for item in (
-                await self._session.scalars(
-                    select(HeartRateObservation).where(
-                        HeartRateObservation.user_id == user_id,
-                        HeartRateObservation.source_record_key.in_(keys),
-                    )
-                )
-            ).all()
-        }
-        changed = False
-        for observation in workout.observations:
-            record = existing.get(observation.source_record_key)
-            values = {
-                "activity_id": activity.id,
-                "source_name": observation.source_name,
-                "started_at": observation.started_at,
-                "ended_at": observation.ended_at,
-                "beats_per_minute": observation.beats_per_minute,
-                "temporal_quality": observation.temporal_quality,
-            }
-            if record is None:
-                self._session.add(
-                    HeartRateObservation(
-                        user_id=user_id,
-                        source_record_key=observation.source_record_key,
-                        **values,
-                    )
-                )
-                changed = True
-            elif any(
-                not _values_equal(getattr(record, key), value)
-                for key, value in values.items()
-            ):
-                for key, value in values.items():
-                    setattr(record, key, value)
-                changed = True
-        return changed
 
 
 class AppleHealthImportConflictError(ValueError):
@@ -723,34 +606,6 @@ class AppleHealthImportConflictError(ValueError):
     def __init__(self, code: str) -> None:
         self.code = code
         super().__init__(code)
-
-
-def _activity_name(workout: ParsedWorkout) -> str:
-    labels = {
-        "RUN": "Apple Health run",
-        "RIDE": "Apple Health ride",
-        "SWIM": "Apple Health swim",
-        "WALK_HIKE": "Apple Health walk or hike",
-        "STRENGTH": "Apple Health strength workout",
-        "OTHER": "Apple Health workout",
-    }
-    return labels[workout.discipline.value]
-
-
-def _values_equal(persisted: object, incoming: object) -> bool:
-    if isinstance(persisted, datetime) and isinstance(incoming, datetime):
-        persisted_utc = (
-            persisted.replace(tzinfo=UTC)
-            if persisted.tzinfo is None
-            else persisted.astimezone(UTC)
-        )
-        incoming_utc = (
-            incoming.replace(tzinfo=UTC)
-            if incoming.tzinfo is None
-            else incoming.astimezone(UTC)
-        )
-        return persisted_utc == incoming_utc
-    return persisted == incoming
 
 
 __all__ = [

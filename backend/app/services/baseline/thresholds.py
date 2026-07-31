@@ -51,17 +51,17 @@ PROVISIONAL_LEVEL_THRESHOLDS: dict[
     Discipline,
     tuple[LevelThreshold, ...],
 ] = {
-    Discipline.RUN: _thresholds(
+    Discipline.RUNNING: _thresholds(
         developing_minutes=90,
         intermediate_minutes=180,
         advanced_minutes=300,
     ),
-    Discipline.RIDE: _thresholds(
+    Discipline.CYCLING: _thresholds(
         developing_minutes=120,
         intermediate_minutes=240,
         advanced_minutes=420,
     ),
-    Discipline.SWIM: _thresholds(
+    Discipline.SWIMMING: _thresholds(
         developing_minutes=60,
         intermediate_minutes=120,
         advanced_minutes=210,
@@ -71,7 +71,7 @@ PROVISIONAL_LEVEL_THRESHOLDS: dict[
         intermediate_minutes=120,
         advanced_minutes=180,
     ),
-    Discipline.WALK_HIKE: _thresholds(
+    Discipline.HIKING: _thresholds(
         developing_minutes=90,
         intermediate_minutes=180,
         advanced_minutes=300,
@@ -85,10 +85,10 @@ PROVISIONAL_LEVEL_THRESHOLDS: dict[
 
 DISTANCE_MEANINGFUL_DISCIPLINES = frozenset(
     {
-        Discipline.RUN,
-        Discipline.RIDE,
-        Discipline.SWIM,
-        Discipline.WALK_HIKE,
+        Discipline.RUNNING,
+        Discipline.CYCLING,
+        Discipline.SWIMMING,
+        Discipline.HIKING,
     }
 )
 

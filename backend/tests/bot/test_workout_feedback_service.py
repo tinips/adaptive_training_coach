@@ -113,7 +113,7 @@ async def test_daily_tcx_import_starts_feedback_for_the_owned_activity() -> None
         file_format=TrainingFileFormat.TCX,
         activity_id=activity_id,
         activities_imported=1,
-        sport="RUN",
+        sport="RUNNING",
         started_at=started_at,
         duration_seconds=3_600,
         distance_meters=10_000,
@@ -157,7 +157,7 @@ async def test_daily_tcx_import_starts_feedback_for_the_owned_activity() -> None
         activity_id=activity_id,
     )
     summary = messages.tcx_workout_result(
-        sport="RUN",
+        sport="RUNNING",
         started_at=started_at,
         duration_seconds=3_600,
         distance_meters=10_000,
@@ -180,7 +180,7 @@ async def test_onboarding_upload_delays_feedback_until_latest_enrichment() -> No
         file_format=TrainingFileFormat.TCX,
         activity_id=activity_id,
         activities_imported=1,
-        sport="RUN",
+        sport="RUNNING",
         started_at=started_at,
         duration_seconds=3_600,
         distance_meters=10_000,
@@ -192,7 +192,7 @@ async def test_onboarding_upload_delays_feedback_until_latest_enrichment() -> No
         file_format=TrainingFileFormat.UNKNOWN,
         activity_id=activity_id,
         activities_imported=1,
-        discipline_counts={"RUN": 1},
+        discipline_counts={"RUNNING": 1},
     )
     latest_activity = SimpleNamespace(id=activity_id)
     training_import = SimpleNamespace(
@@ -394,6 +394,27 @@ async def test_direct_daily_import_failure_returns_valid_home_actions() -> None:
             "wf:v1:rpe:very_hard",
             "select_rpe",
             call(_identity(), "very_hard"),
+            WorkoutFlowStep.MOBILITY,
+            messages.MOBILITY_QUESTION,
+        ),
+        (
+            "wf:v1:mobility:yes",
+            "select_mobility",
+            call(_identity(), True),
+            WorkoutFlowStep.DISCOMFORT,
+            messages.DISCOMFORT_QUESTION,
+        ),
+        (
+            "wf:v1:mobility:no",
+            "select_mobility",
+            call(_identity(), False),
+            WorkoutFlowStep.DISCOMFORT,
+            messages.DISCOMFORT_QUESTION,
+        ),
+        (
+            "wf:v1:mobility:skip",
+            "select_mobility",
+            call(_identity(), None),
             WorkoutFlowStep.DISCOMFORT,
             messages.DISCOMFORT_QUESTION,
         ),
@@ -427,6 +448,26 @@ async def test_direct_daily_import_failure_returns_valid_home_actions() -> None:
             ),
             WorkoutFlowStep.HR_ENTRY,
             messages.HEART_RATE_ENTRY,
+        ),
+        (
+            "wf:v1:back:discomfort",
+            "back",
+            call(
+                _identity(),
+                expected_state=WorkoutFlowStep.DISCOMFORT,
+            ),
+            WorkoutFlowStep.MOBILITY,
+            messages.MOBILITY_QUESTION,
+        ),
+        (
+            "wf:v1:back:mobility",
+            "back",
+            call(
+                _identity(),
+                expected_state=WorkoutFlowStep.MOBILITY,
+            ),
+            WorkoutFlowStep.RPE,
+            messages.RPE_QUESTION,
         ),
     ],
 )

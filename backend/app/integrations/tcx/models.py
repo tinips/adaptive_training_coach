@@ -4,15 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal
 
-from app.domain.enums import Discipline, HeartRateTemporalQuality
-
-type HeartRateProvenance = Literal[
-    "MEASURED_SENSOR",
-    "PROVIDER_SUMMARY",
-    "UNAVAILABLE",
-]
+from app.domain.enums import Discipline
 
 
 @dataclass(slots=True, frozen=True)
@@ -44,18 +37,17 @@ class ParsedTCXActivity:
     maximum_altitude_meters: float | None
     average_heart_rate: float | None
     max_heart_rate: float | None
-    heart_rate_sample_count: int
-    heart_rate_quality: HeartRateTemporalQuality
-    heart_rate_reliable: bool
-    heart_rate_provenance: HeartRateProvenance
+    heart_rate_records_matched: int
     average_cadence: float | None
     cadence_sample_count: int
     route_positions: tuple[ParsedTCXPosition, ...]
     warnings: tuple[str, ...]
+    raw_sub_sport: str | None = None
+    elevation_loss_meters: float | None = None
+    max_cadence: float | None = None
 
 
 __all__ = [
-    "HeartRateProvenance",
     "ParsedTCXActivity",
     "ParsedTCXPosition",
 ]

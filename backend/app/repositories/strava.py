@@ -4,22 +4,22 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
-from datetime import UTC, datetime
-from typing import Literal
+from datetime import datetime
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, exists, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
 from app.db.base import utc_now
 from app.db.models import (
-    Activity,
+    ActivitySourceLink,
     BaselinePreference,
     OAuthState,
     StravaConnection,
     StravaSyncJob,
     StravaWebhookEvent,
+    Workout,
 )
 from app.domain.enums import (
     ActivitySource,
@@ -27,8 +27,6 @@ from app.domain.enums import (
     BaselineSource,
     ConnectionStatus,
     Discipline,
-    HeartRateSource,
-    HeartRateTemporalQuality,
     OAuthProvider,
     SyncStatus,
     SyncType,
@@ -36,9 +34,11 @@ from app.domain.enums import (
     WebhookObjectType,
     WebhookProcessingStatus,
 )
+from app.repositories.activities import TrainingActivityRepository
 from app.repositories.errors import ExternalIdentityConflictError
-
-ActivityUpsertOutcome = Literal["inserted", "updated", "unchanged"]
+from app.schemas.strava import NormalizedStravaActivity
+from app.schemas.workouts import WorkoutMetricsProjection, workout_metrics
+from app.services.activities.contracts import ActivityUpsertOutcome
 
 
 class StravaRepository:
@@ -504,50 +504,22 @@ class StravaRepository:
         external_id: str,
         values: dict[str, object],
     ) -> ActivityUpsertOutcome:
-        """Insert, update, or identify an unchanged owned provider activity."""
+        """Route a Strava record through central workout normalization."""
 
-        normalized_external_id = str(external_id)
-        activity = await self._session.scalar(
-            select(Activity).where(
-                Activity.user_id == user_id,
-                Activity.source == source,
-                Activity.external_id == normalized_external_id,
-            ),
-        )
-        normalized_values = self._normalize_activity_values(values)
-        if activity is not None:
-            return await self._update_activity_if_changed(
-                activity,
-                normalized_values,
-            )
-
-        activity = Activity(
-            user_id=user_id,
+        provider_values = dict(values)
+        provider_values.pop("deleted_at", None)
+        normalized = NormalizedStravaActivity(
             source=source,
-            external_id=normalized_external_id,
-            **normalized_values,
+            external_id=str(external_id),
+            **provider_values,
         )
-        try:
-            async with self._session.begin_nested():
-                self._session.add(activity)
-                await self._session.flush()
-        except IntegrityError as error:
-            owned = await self._session.scalar(
-                select(Activity).where(
-                    Activity.user_id == user_id,
-                    Activity.source == source,
-                    Activity.external_id == normalized_external_id,
-                ),
-            )
-            if owned is None:
-                raise ExternalIdentityConflictError(
-                    "activity provider identity conflicts with another owner",
-                ) from error
-            return await self._update_activity_if_changed(
-                owned,
-                normalized_values,
-            )
-        return "inserted"
+        _workout, outcome = await TrainingActivityRepository(
+            self._session
+        ).import_strava_activity(
+            user_id=user_id,
+            normalized=normalized,
+        )
+        return outcome
 
     async def list_activities(
         self,
@@ -557,23 +529,35 @@ class StravaRepository:
         started_at_or_before: datetime | None = None,
         disciplines: Sequence[Discipline] | None = None,
         include_deleted: bool = False,
-    ) -> tuple[Activity, ...]:
-        statement = select(Activity).where(Activity.user_id == user_id)
+    ) -> tuple[WorkoutMetricsProjection, ...]:
+        active_source_exists = exists(
+            select(ActivitySourceLink.id).where(
+                ActivitySourceLink.workout_id == Workout.id,
+                ActivitySourceLink.user_id == user_id,
+                ActivitySourceLink.deleted_at.is_(None),
+            )
+        )
+        statement = select(Workout).where(Workout.athlete_id == user_id)
         if started_at_or_after is not None:
             statement = statement.where(
-                Activity.started_at >= started_at_or_after,
+                Workout.started_at >= started_at_or_after,
             )
         if started_at_or_before is not None:
             statement = statement.where(
-                Activity.started_at <= started_at_or_before,
+                Workout.started_at <= started_at_or_before,
             )
         if disciplines is not None:
-            statement = statement.where(Activity.sport.in_(disciplines))
+            statement = statement.where(Workout.discipline.in_(disciplines))
         if not include_deleted:
-            statement = statement.where(Activity.deleted_at.is_(None))
-        statement = statement.order_by(Activity.started_at, Activity.id)
+            statement = statement.where(
+                or_(
+                    Workout.source == ActivitySource.MANUAL,
+                    active_source_exists,
+                )
+            )
+        statement = statement.order_by(Workout.started_at, Workout.id)
         result = await self._session.scalars(statement)
-        return tuple(result.all())
+        return tuple(workout_metrics(item) for item in result.unique().all())
 
     async def mark_activity_deleted(
         self,
@@ -583,19 +567,12 @@ class StravaRepository:
         external_id: str | int,
         deleted_at: datetime | None = None,
     ) -> bool:
-        statement = (
-            update(Activity)
-            .where(
-                Activity.user_id == user_id,
-                Activity.source == source,
-                Activity.external_id == str(external_id),
-                Activity.deleted_at.is_(None),
-            )
-            .values(deleted_at=deleted_at or utc_now())
-            .returning(Activity.id)
+        return await TrainingActivityRepository(self._session).mark_source_deleted(
+            user_id=user_id,
+            source=source,
+            external_id=str(external_id),
+            deleted_at=deleted_at or utc_now(),
         )
-        result = await self._session.execute(statement)
-        return result.scalar_one_or_none() is not None
 
     async def create_webhook_event(
         self,
@@ -787,101 +764,3 @@ class StravaRepository:
                 ),
             ),
         )
-
-    async def _update_activity_if_changed(
-        self,
-        activity: Activity,
-        values: dict[str, object],
-    ) -> ActivityUpsertOutcome:
-        changed = any(
-            not self._activity_values_equal(
-                getattr(activity, attribute),
-                value,
-            )
-            for attribute, value in values.items()
-        )
-        if not changed:
-            return "unchanged"
-        for attribute, value in values.items():
-            setattr(activity, attribute, value)
-        await self._session.flush()
-        return "updated"
-
-    @staticmethod
-    def _activity_values_equal(persisted: object, incoming: object) -> bool:
-        """Treat SQLite's timezone-erased UTC timestamp as the same instant."""
-
-        if isinstance(persisted, datetime) and isinstance(incoming, datetime):
-            if persisted.tzinfo is None and incoming.tzinfo is not None:
-                return persisted == incoming.astimezone(UTC).replace(tzinfo=None)
-            if persisted.tzinfo is not None and incoming.tzinfo is None:
-                return persisted.astimezone(UTC).replace(tzinfo=None) == incoming
-        return persisted == incoming
-
-    @staticmethod
-    def _normalize_activity_values(
-        values: dict[str, object],
-    ) -> dict[str, object]:
-        allowed = {
-            "sport",
-            "source_sport_type",
-            "name",
-            "started_at",
-            "timezone",
-            "duration_seconds",
-            "moving_time_seconds",
-            "distance_meters",
-            "elevation_gain_meters",
-            "average_heart_rate",
-            "average_heart_rate_source",
-            "heart_rate_quality",
-            "heart_rate_reliable",
-            "max_heart_rate",
-            "average_speed",
-            "average_watts",
-            "trainer",
-            "commute",
-            "manual",
-            "raw_summary",
-        }
-        unexpected = values.keys() - allowed
-        if unexpected:
-            names = ", ".join(sorted(unexpected))
-            raise ValueError(f"unexpected normalized activity fields: {names}")
-        required = {
-            "sport",
-            "source_sport_type",
-            "name",
-            "started_at",
-            "duration_seconds",
-        }
-        missing = required - values.keys()
-        if missing:
-            names = ", ".join(sorted(missing))
-            raise ValueError(f"missing normalized activity fields: {names}")
-        normalized = dict(values)
-        if normalized.get("average_heart_rate") is not None:
-            normalized.setdefault(
-                "average_heart_rate_source",
-                HeartRateSource.PROVIDER_SUMMARY,
-            )
-            normalized.setdefault(
-                "heart_rate_quality",
-                HeartRateTemporalQuality.UNKNOWN,
-            )
-            normalized.setdefault("heart_rate_reliable", True)
-        else:
-            normalized.setdefault(
-                "average_heart_rate_source",
-                HeartRateSource.UNAVAILABLE,
-            )
-            normalized.setdefault(
-                "heart_rate_quality",
-                HeartRateTemporalQuality.UNKNOWN,
-            )
-            normalized.setdefault("heart_rate_reliable", False)
-        raw_summary = normalized.get("raw_summary")
-        if isinstance(raw_summary, dict):
-            normalized["raw_summary"] = dict(raw_summary)
-        normalized["deleted_at"] = None
-        return normalized

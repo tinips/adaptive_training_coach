@@ -17,13 +17,19 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from app.db.base import Base
-from app.db.models import Activity, ActivityFeedback, BodyArea, User
+from app.db.models import (
+    ActivityFeedback,
+    ActivitySourceLink,
+    BodyArea,
+    RunningWorkoutDetails,
+    User,
+    Workout,
+)
 from app.domain.enums import (
     ActivitySource,
     Discipline,
     DiscomfortSeverity,
-    HeartRateSource,
-    HeartRateTemporalQuality,
+    RunningType,
     UserStatus,
     WorkoutFlowStep,
 )
@@ -79,28 +85,33 @@ async def create_activity(
     user_id: uuid.UUID,
     external_id: str,
     average_heart_rate: float | None = None,
-    heart_rate_source: HeartRateSource = HeartRateSource.UNAVAILABLE,
-    heart_rate_quality: HeartRateTemporalQuality = (HeartRateTemporalQuality.UNKNOWN),
-    heart_rate_reliable: bool = False,
 ) -> uuid.UUID:
     async with factory.begin() as session:
-        activity = Activity(
-            user_id=user_id,
+        workout = Workout(
+            athlete_id=user_id,
             source=ActivitySource.TCX,
             external_id=external_id,
-            sport=Discipline.RUN,
-            source_sport_type="Running",
-            name="Synthetic run",
+            discipline=Discipline.RUNNING,
+            title="Synthetic run",
             started_at=datetime(2026, 7, 28, 6, tzinfo=UTC),
             duration_seconds=3600,
-            average_heart_rate=average_heart_rate,
-            average_heart_rate_source=heart_rate_source,
-            heart_rate_quality=heart_rate_quality,
-            heart_rate_reliable=heart_rate_reliable,
+            running_details=RunningWorkoutDetails(
+                running_type=RunningType.OUTDOOR,
+                moving_duration_seconds=3600,
+                average_heart_rate=average_heart_rate,
+            ),
+            source_links=[
+                ActivitySourceLink(
+                    user_id=user_id,
+                    source=ActivitySource.TCX,
+                    external_id=external_id,
+                    raw_sport="Running",
+                )
+            ],
         )
-        session.add(activity)
+        session.add(workout)
         await session.flush()
-        return activity.id
+        return workout.id
 
 
 @pytest.mark.asyncio
@@ -175,14 +186,11 @@ async def test_manual_hr_requires_confirmation_and_survives_restart(
     assert confirmed.feedback is not None
     assert confirmed.feedback.manual_average_heart_rate == 148
     assert confirmed.average_heart_rate == 148
-    assert confirmed.average_heart_rate_source is HeartRateSource.USER_REPORTED
-    assert confirmed.heart_rate_quality is HeartRateTemporalQuality.MANUAL
-    assert confirmed.heart_rate_reliable is False
     assert replay == confirmed
 
 
 @pytest.mark.asyncio
-async def test_reliable_hr_skips_offer_and_manual_replaces_unreliable_data(
+async def test_existing_hr_skips_manual_offer(
     database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
 ) -> None:
     _, factory = database
@@ -192,19 +200,13 @@ async def test_reliable_hr_skips_offer_and_manual_replaces_unreliable_data(
         user_id=reliable_user_id,
         external_id="reliable-hr",
         average_heart_rate=151,
-        heart_rate_source=HeartRateSource.MEASURED_SENSOR,
-        heart_rate_quality=HeartRateTemporalQuality.EXACT_SAMPLE,
-        heart_rate_reliable=True,
     )
-    provider_identity = identity(5121)
     provider_user_id = await create_user(factory, telegram_id=5121)
     provider_activity_id = await create_activity(
         factory,
         user_id=provider_user_id,
         external_id="provider-hr",
         average_heart_rate=150,
-        heart_rate_source=HeartRateSource.PROVIDER_SUMMARY,
-        heart_rate_reliable=False,
     )
     service = WorkoutFeedbackService(factory)
 
@@ -218,17 +220,8 @@ async def test_reliable_hr_skips_offer_and_manual_replaces_unreliable_data(
         user_id=provider_user_id,
         activity_id=provider_activity_id,
     )
-    assert provider.state is WorkoutFlowStep.HR_OFFER
-    await service.choose_manual_heart_rate(provider_identity, enter=True)
-    await service.submit_manual_heart_rate(provider_identity, 145)
-    confirmed = await service.confirm_manual_heart_rate(provider_identity)
-
-    assert confirmed.feedback is not None
-    assert confirmed.feedback.manual_average_heart_rate == 145
-    assert confirmed.average_heart_rate == 145
-    assert confirmed.average_heart_rate_source is HeartRateSource.USER_REPORTED
-    assert confirmed.heart_rate_quality is HeartRateTemporalQuality.MANUAL
-    assert confirmed.heart_rate_reliable is False
+    assert provider.state is WorkoutFlowStep.RPE
+    assert provider.average_heart_rate == 150
 
 
 @pytest.mark.asyncio
@@ -259,7 +252,6 @@ async def test_manual_hr_change_and_skip_do_not_persist_pending_value(
     assert skipped.feedback is not None
     assert skipped.feedback.manual_average_heart_rate is None
     assert skipped.average_heart_rate is None
-    assert skipped.average_heart_rate_source is HeartRateSource.UNAVAILABLE
 
 
 @pytest.mark.asyncio
@@ -288,9 +280,6 @@ async def test_rpe_mapping_is_deterministic(
         user_id=user_id,
         external_id=f"rpe-{expected_value}",
         average_heart_rate=140,
-        heart_rate_source=HeartRateSource.MEASURED_SENSOR,
-        heart_rate_quality=HeartRateTemporalQuality.EXACT_SAMPLE,
-        heart_rate_reliable=True,
     )
     service = WorkoutFeedbackService(factory)
     await service.start_for_activity(user_id=user_id, activity_id=activity_id)
@@ -298,11 +287,88 @@ async def test_rpe_mapping_is_deterministic(
     selected = await service.select_rpe(athlete, label)
     replay = await service.select_rpe(athlete, label)
 
-    assert selected.state is WorkoutFlowStep.DISCOMFORT
+    assert selected.state is WorkoutFlowStep.MOBILITY
     assert selected.feedback is not None
     assert selected.feedback.reported_rpe == expected_value
     assert selected.feedback.reported_rpe_label == expected_label
     assert replay == selected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("telegram_id", "operation_name", "expected_mobility"),
+    [
+        (5301, "report_mobility", True),
+        (5302, "report_no_mobility", False),
+        (5303, "skip_mobility", None),
+    ],
+)
+async def test_mobility_yes_no_and_skip_preserve_tristate(
+    database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
+    telegram_id: int,
+    operation_name: str,
+    expected_mobility: bool | None,
+) -> None:
+    _, factory = database
+    athlete = identity(telegram_id)
+    user_id = await create_user(factory, telegram_id=telegram_id)
+    activity_id = await create_activity(
+        factory,
+        user_id=user_id,
+        external_id=f"mobility-{telegram_id}",
+        average_heart_rate=140,
+    )
+    service = WorkoutFeedbackService(factory)
+    await service.start_for_activity(user_id=user_id, activity_id=activity_id)
+    rpe = await service.skip_rpe(athlete)
+
+    operation = getattr(service, operation_name)
+    selected = await operation(athlete)
+    replay = await operation(athlete)
+
+    assert rpe.state is WorkoutFlowStep.MOBILITY
+    assert selected.state is WorkoutFlowStep.DISCOMFORT
+    assert selected.feedback is not None
+    assert selected.feedback.mobility_done is expected_mobility
+    assert replay == selected
+
+
+@pytest.mark.asyncio
+async def test_mobility_back_and_stale_back_follow_persisted_state(
+    database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
+) -> None:
+    _, factory = database
+    athlete = identity(5304)
+    user_id = await create_user(factory, telegram_id=5304)
+    activity_id = await create_activity(
+        factory,
+        user_id=user_id,
+        external_id="mobility-back",
+        average_heart_rate=140,
+    )
+    service = WorkoutFeedbackService(factory)
+    await service.start_for_activity(user_id=user_id, activity_id=activity_id)
+    await service.skip_rpe(athlete)
+    await service.report_mobility(athlete)
+
+    backed = await service.back(
+        athlete,
+        expected_state=WorkoutFlowStep.DISCOMFORT,
+    )
+    stale_back = await service.back(
+        athlete,
+        expected_state=WorkoutFlowStep.DISCOMFORT,
+    )
+    rpe = await service.back(
+        athlete,
+        expected_state=WorkoutFlowStep.MOBILITY,
+    )
+
+    assert backed.state is WorkoutFlowStep.MOBILITY
+    assert backed.feedback is not None
+    assert backed.feedback.mobility_done is True
+    assert stale_back == backed
+    assert rpe.state is WorkoutFlowStep.RPE
 
 
 @pytest.mark.asyncio
@@ -317,18 +383,19 @@ async def test_discomfort_no_completes_with_explicit_false(
         user_id=user_id,
         external_id="no-discomfort",
         average_heart_rate=140,
-        heart_rate_source=HeartRateSource.MEASURED_SENSOR,
-        heart_rate_reliable=True,
     )
     service = WorkoutFeedbackService(factory)
     await service.start_for_activity(user_id=user_id, activity_id=activity_id)
     await service.skip_rpe(athlete)
+    mobility = await service.report_no_mobility(athlete)
 
     completed = await service.select_discomfort(athlete, False)
 
+    assert mobility.state is WorkoutFlowStep.DISCOMFORT
     assert completed.state is WorkoutFlowStep.COMPLETE
     assert completed.completed is True
     assert completed.feedback is not None
+    assert completed.feedback.mobility_done is False
     assert completed.feedback.reported_discomfort is False
     assert completed.feedback.discomfort_body_area is None
 
@@ -345,8 +412,6 @@ async def test_optional_discomfort_and_detail_skip_paths_remain_unknown(
         user_id=skip_user_id,
         external_id="skip-discomfort",
         average_heart_rate=140,
-        heart_rate_source=HeartRateSource.MEASURED_SENSOR,
-        heart_rate_reliable=True,
     )
     detail_identity = identity(5132)
     detail_user_id = await create_user(factory, telegram_id=5132)
@@ -355,8 +420,6 @@ async def test_optional_discomfort_and_detail_skip_paths_remain_unknown(
         user_id=detail_user_id,
         external_id="skip-details",
         average_heart_rate=140,
-        heart_rate_source=HeartRateSource.MEASURED_SENSOR,
-        heart_rate_reliable=True,
     )
     service = WorkoutFeedbackService(factory)
 
@@ -365,10 +428,12 @@ async def test_optional_discomfort_and_detail_skip_paths_remain_unknown(
         activity_id=skip_activity_id,
     )
     await service.skip_rpe(skip_identity)
+    await service.skip_mobility(skip_identity)
     skipped = await service.skip_discomfort(skip_identity)
 
     assert skipped.state is WorkoutFlowStep.COMPLETE
     assert skipped.feedback is not None
+    assert skipped.feedback.mobility_done is None
     assert skipped.feedback.reported_discomfort is None
 
     started = await service.start_for_activity(
@@ -377,6 +442,7 @@ async def test_optional_discomfort_and_detail_skip_paths_remain_unknown(
         return_to_onboarding=True,
     )
     await service.skip_rpe(detail_identity)
+    await service.report_mobility(detail_identity)
     await service.report_discomfort(detail_identity)
     severity = await service.skip_body_area(detail_identity)
     completed = await service.skip_severity(detail_identity)
@@ -384,6 +450,7 @@ async def test_optional_discomfort_and_detail_skip_paths_remain_unknown(
     assert started.return_to_onboarding is True
     assert severity.state is WorkoutFlowStep.SEVERITY
     assert completed.feedback is not None
+    assert completed.feedback.mobility_done is True
     assert completed.feedback.reported_discomfort is True
     assert completed.feedback.discomfort_body_area is None
     assert completed.feedback.discomfort_severity is None
@@ -401,12 +468,11 @@ async def test_predefined_discomfort_area_and_severity_are_persisted(
         user_id=user_id,
         external_id="knee-discomfort",
         average_heart_rate=140,
-        heart_rate_source=HeartRateSource.MEASURED_SENSOR,
-        heart_rate_reliable=True,
     )
     service = WorkoutFeedbackService(factory)
     await service.start_for_activity(user_id=user_id, activity_id=activity_id)
     await service.select_rpe(athlete, "Moderate")
+    await service.report_mobility(athlete)
     body_area = await service.select_discomfort(athlete, True)
     severity = await service.select_body_area(athlete, "Knee")
     completed = await service.select_severity(athlete, "Moderate")
@@ -432,12 +498,11 @@ async def test_other_description_is_staged_confirmed_and_resumable(
         user_id=user_id,
         external_id="other-discomfort",
         average_heart_rate=140,
-        heart_rate_source=HeartRateSource.MEASURED_SENSOR,
-        heart_rate_reliable=True,
     )
     service = WorkoutFeedbackService(factory)
     await service.start_for_activity(user_id=user_id, activity_id=activity_id)
     await service.skip_rpe(athlete)
+    await service.report_no_mobility(athlete)
     await service.select_discomfort(athlete, True)
     entry = await service.select_body_area(athlete, BodyArea.OTHER)
     staged = await service.submit_discomfort_description(
@@ -546,7 +611,7 @@ async def test_activity_and_feedback_are_strictly_user_owned(
         feedback_count = await session.scalar(
             select(func.count(ActivityFeedback.id)).where(
                 ActivityFeedback.user_id == owner_id,
-                ActivityFeedback.activity_id == activity_id,
+                ActivityFeedback.workout_id == activity_id,
             )
         )
         other_feedback_count = await session.scalar(

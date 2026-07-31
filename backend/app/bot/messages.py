@@ -178,6 +178,7 @@ HEART_RATE_MISSING = (
 )
 HEART_RATE_ENTRY = "Enter your average heart rate in bpm.\n\nExample: 148"
 RPE_QUESTION = "How did the session feel?"
+MOBILITY_QUESTION = "Did you do any mobility or stretching?"
 DISCOMFORT_QUESTION = "Did you experience pain or unusual discomfort?"
 DISCOMFORT_AREA_QUESTION = "Where did you feel it?"
 DISCOMFORT_DESCRIPTION_REQUEST = (
@@ -449,10 +450,10 @@ def apple_health_import_success(
     """Render honest counters from the persisted import outcome."""
 
     discipline_order = (
-        ("RUN", "Runs"),
-        ("RIDE", "Rides"),
-        ("SWIM", "Swims"),
-        ("WALK_HIKE", "Walks or hikes"),
+        ("RUNNING", "Runs"),
+        ("CYCLING", "Rides"),
+        ("SWIMMING", "Swims"),
+        ("HIKING", "Hikes"),
         ("STRENGTH", "Strength workouts"),
         ("OTHER", "Other workouts"),
     )
@@ -567,10 +568,10 @@ def training_import_complete(
     """Render cumulative onboarding import counts and discipline coverage."""
 
     labels = (
-        ("RUN", "Runs"),
-        ("RIDE", "Rides"),
-        ("SWIM", "Swims"),
-        ("WALK_HIKE", "Walks or hikes"),
+        ("RUNNING", "Runs"),
+        ("CYCLING", "Rides"),
+        ("SWIMMING", "Swims"),
+        ("HIKING", "Hikes"),
         ("STRENGTH", "Strength workouts"),
         ("OTHER", "Other workouts"),
     )

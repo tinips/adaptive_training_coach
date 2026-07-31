@@ -13,9 +13,8 @@ from itertools import pairwise
 from pathlib import Path
 from typing import IO
 
-from app.domain.enums import Discipline, HeartRateTemporalQuality
+from app.domain.enums import Discipline
 from app.integrations.tcx.models import (
-    HeartRateProvenance,
     ParsedTCXActivity,
     ParsedTCXPosition,
 )
@@ -149,6 +148,10 @@ class TCXParser:
         warnings: list[str] = []
         parsed_laps = [self._parse_lap(lap, warnings=warnings) for lap in laps]
         source_sport_type = activity.attrib.get("Sport", "").strip() or "Unknown"
+        raw_sub_sport = _first_descendant_text(
+            activity,
+            names={"SubSport"},
+        )
         discipline = _discipline(source_sport_type)
         activity_id = _direct_text(activity, "Id")
         parsed_activity_id = _parse_timestamp(activity_id)
@@ -178,22 +181,20 @@ class TCXParser:
         (
             average_heart_rate,
             max_heart_rate,
-            heart_rate_sample_count,
-            heart_rate_quality,
-            heart_rate_reliable,
-            heart_rate_provenance,
+            heart_rate_records_matched,
         ) = _heart_rate_summary(
             parsed_laps,
             resolved_durations=resolved_durations,
             warnings=warnings,
         )
-        average_cadence, cadence_sample_count = _cadence_summary(
+        average_cadence, cadence_sample_count, max_cadence = _cadence_summary(
             parsed_laps,
             resolved_durations=resolved_durations,
             warnings=warnings,
         )
         (
             elevation_gain_meters,
+            elevation_loss_meters,
             minimum_altitude_meters,
             maximum_altitude_meters,
         ) = _elevation_summary(parsed_laps)
@@ -224,14 +225,14 @@ class TCXParser:
             maximum_altitude_meters=maximum_altitude_meters,
             average_heart_rate=average_heart_rate,
             max_heart_rate=max_heart_rate,
-            heart_rate_sample_count=heart_rate_sample_count,
-            heart_rate_quality=heart_rate_quality,
-            heart_rate_reliable=heart_rate_reliable,
-            heart_rate_provenance=heart_rate_provenance,
+            heart_rate_records_matched=heart_rate_records_matched,
             average_cadence=average_cadence,
             cadence_sample_count=cadence_sample_count,
             route_positions=route_positions,
             warnings=tuple(warnings),
+            raw_sub_sport=raw_sub_sport,
+            elevation_loss_meters=elevation_loss_meters,
+            max_cadence=max_cadence,
         )
 
     @staticmethod
@@ -434,28 +435,13 @@ def _heart_rate_summary(
     *,
     resolved_durations: Sequence[float | None],
     warnings: list[str],
-) -> tuple[
-    float | None,
-    float | None,
-    int,
-    HeartRateTemporalQuality,
-    bool,
-    HeartRateProvenance,
-]:
+) -> tuple[float | None, float | None, int]:
     samples = [sample for lap in laps for sample in lap.heart_rate_samples]
     if samples:
-        timed = all(sample.timestamp is not None for sample in samples)
         return (
             sum(sample.value for sample in samples) / len(samples),
             max(sample.value for sample in samples),
             len(samples),
-            (
-                HeartRateTemporalQuality.EXACT_SAMPLE
-                if timed
-                else HeartRateTemporalQuality.UNKNOWN
-            ),
-            timed,
-            "MEASURED_SENSOR",
         )
 
     averages = [lap.average_heart_rate_summary for lap in laps]
@@ -471,17 +457,7 @@ def _heart_rate_summary(
         if lap.max_heart_rate_summary is not None
     ]
     maximum = max(maximum_values) if maximum_values else None
-    provenance: HeartRateProvenance = (
-        "PROVIDER_SUMMARY" if average is not None else "UNAVAILABLE"
-    )
-    return (
-        average,
-        maximum,
-        0,
-        HeartRateTemporalQuality.UNKNOWN,
-        average is not None,
-        provenance,
-    )
+    return average, maximum, 0
 
 
 def _cadence_summary(
@@ -489,10 +465,10 @@ def _cadence_summary(
     *,
     resolved_durations: Sequence[float | None],
     warnings: list[str],
-) -> tuple[float | None, int]:
+) -> tuple[float | None, int, float | None]:
     samples = [sample for lap in laps for sample in lap.cadence_samples]
     if samples:
-        return sum(samples) / len(samples), len(samples)
+        return sum(samples) / len(samples), len(samples), max(samples)
     summaries = [lap.cadence_summary for lap in laps]
     return (
         _weighted_complete_average(
@@ -502,16 +478,17 @@ def _cadence_summary(
             warnings=warnings,
         ),
         0,
+        None,
     )
 
 
 def _elevation_summary(
     laps: Sequence[_ParsedLap],
-) -> tuple[float | None, float | None, float | None]:
+) -> tuple[float | None, float | None, float | None, float | None]:
     segments = [segment for lap in laps for segment in lap.altitude_segments]
     samples = [altitude for segment in segments for altitude in segment]
     if not samples:
-        return None, None, None
+        return None, None, None, None
     has_pair = any(len(segment) >= 2 for segment in segments)
     gain = (
         sum(
@@ -522,7 +499,16 @@ def _elevation_summary(
         if has_pair
         else None
     )
-    return gain, min(samples), max(samples)
+    loss = (
+        sum(
+            max(previous - current, 0.0)
+            for segment in segments
+            for previous, current in pairwise(segment)
+        )
+        if has_pair
+        else None
+    )
+    return gain, loss, min(samples), max(samples)
 
 
 def _weighted_complete_average(
@@ -631,13 +617,13 @@ def _parse_timestamp(value: str | None) -> datetime | None:
 def _discipline(source_sport_type: str) -> Discipline:
     normalized = _DATED_SPORT_PREFIX.sub("", source_sport_type).strip().casefold()
     if "running" in normalized:
-        return Discipline.RUN
+        return Discipline.RUNNING
     if "cycling" in normalized or "biking" in normalized:
-        return Discipline.RIDE
+        return Discipline.CYCLING
     if "swimming" in normalized:
-        return Discipline.SWIM
+        return Discipline.SWIMMING
     if "walking" in normalized or "hiking" in normalized:
-        return Discipline.WALK_HIKE
+        return Discipline.HIKING
     if "strength" in normalized:
         return Discipline.STRENGTH
     return Discipline.OTHER

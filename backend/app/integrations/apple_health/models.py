@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Literal
 
 from app.domain.enums import Discipline, HeartRateTemporalQuality
+
+type SwimmingEnvironmentHint = Literal["POOL", "OPEN_WATER"]
 
 
 @dataclass(slots=True, frozen=True)
@@ -38,9 +41,10 @@ class ParsedWorkout:
     observations: list[ParsedHeartRateObservation] = field(default_factory=list)
     average_heart_rate: float | None = None
     max_heart_rate: float | None = None
-    heart_rate_sample_count: int = 0
-    heart_rate_quality: HeartRateTemporalQuality = HeartRateTemporalQuality.UNKNOWN
-    heart_rate_reliable: bool = False
+    source_metadata: dict[str, str] = field(default_factory=dict)
+    raw_sub_sport: str | None = None
+    swimming_environment: SwimmingEnvironmentHint | None = None
+    pool_length_meters: float | None = None
 
 
 @dataclass(slots=True, frozen=True)

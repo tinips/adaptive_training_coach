@@ -17,7 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings
-from app.db.models import Activity, AppleHealthImportJob
+from app.db.models import AppleHealthImportJob, Workout
 from app.domain.enums import (
     AppleHealthImportStatus,
     BaselinePreferenceStatus,
@@ -52,6 +52,7 @@ from app.repositories.strava import StravaRepository
 from app.repositories.users import UserRepository
 from app.schemas.baseline import BaselineCalculation
 from app.schemas.common import TelegramIdentity
+from app.schemas.workouts import workout_metrics
 from app.services.apple_health import TelegramDocumentUpload
 from app.services.baseline import BaselineService
 from app.services.onboarding import OnboardingApplicationError
@@ -96,13 +97,11 @@ class TrainingFileImportOutcome:
     discipline_counts: dict[str, int] | None = None
     safe_error_code: str | None = None
     exact_file_duplicate: bool = False
-    match_kind: str | None = None
     sport: str | None = None
     started_at: datetime | None = None
     duration_seconds: int | None = None
     distance_meters: float | None = None
     average_heart_rate: float | None = None
-    heart_rate_reliable: bool = False
     baseline_limited: bool = False
 
 
@@ -377,7 +376,7 @@ class TrainingFileImportService:
         self,
         *,
         user_id: uuid.UUID,
-    ) -> Activity | None:
+    ) -> Workout | None:
         async with self._session_factory() as session:
             onboarding = await OnboardingRepository(session).get_for_user(
                 user_id=user_id
@@ -527,7 +526,7 @@ class TrainingFileImportService:
             imported = 0
             updated = 0
             unchanged = 0
-            latest: Activity | None = None
+            latest: Workout | None = None
             for workout in workouts:
                 activity, outcome = await activities.import_apple_workout(
                     user_id=user_id,
@@ -599,7 +598,7 @@ class TrainingFileImportService:
             }:
                 await self._restore_onboarding_waiting(session, job)
                 return await self._outcome_in_session(session, job)
-            activity, outcome, match_kind = await TrainingActivityRepository(
+            activity, outcome = await TrainingActivityRepository(
                 session
             ).import_tcx_activity(
                 user_id=user_id,
@@ -621,7 +620,7 @@ class TrainingFileImportService:
                 activities_imported=1 if outcome == "inserted" else 0,
                 activities_updated=1 if outcome == "updated" else 0,
                 activities_skipped=1 if outcome == "unchanged" else 0,
-                heart_rate_records_matched=parsed.heart_rate_sample_count,
+                heart_rate_records_matched=parsed.heart_rate_records_matched,
                 warning_count=len(parsed.warnings),
                 activity_id=activity.id,
                 file_format=TrainingFileFormat.TCX,
@@ -630,7 +629,6 @@ class TrainingFileImportService:
             result = await self._outcome_in_session(session, completed)
             return replace(
                 result,
-                match_kind=match_kind,
                 baseline_limited=(
                     _baseline_is_limited(calculation)
                     if calculation is not None
@@ -821,20 +819,21 @@ class TrainingFileImportService:
         counts = await AppleHealthRepository(session).all_discipline_counts(
             user_id=job.user_id
         )
-        activity: Activity | None = None
-        if job.activity_id is not None:
-            activity = await session.scalar(
-                select(Activity).where(
-                    Activity.user_id == job.user_id,
-                    Activity.id == job.activity_id,
+        workout: Workout | None = None
+        if job.workout_id is not None:
+            workout = await session.scalar(
+                select(Workout).where(
+                    Workout.athlete_id == job.user_id,
+                    Workout.id == job.workout_id,
                 )
             )
+        metrics = workout_metrics(workout) if workout is not None else None
         return TrainingFileImportOutcome(
             status=job.status,
             context=job.context,
             file_format=job.file_format,
             job_id=job.id,
-            activity_id=activity.id if activity is not None else job.activity_id,
+            activity_id=workout.id if workout is not None else job.workout_id,
             workouts_found=job.workouts_found,
             activities_imported=job.activities_imported,
             activities_updated=job.activities_updated,
@@ -844,19 +843,14 @@ class TrainingFileImportService:
             discipline_counts=counts,
             safe_error_code=job.safe_error_code,
             exact_file_duplicate=exact_file_duplicate,
-            sport=activity.sport.value if activity is not None else None,
-            started_at=activity.started_at if activity is not None else None,
+            sport=workout.discipline.value if workout is not None else None,
+            started_at=workout.started_at if workout is not None else None,
             duration_seconds=(
-                activity.duration_seconds if activity is not None else None
+                workout.duration_seconds if workout is not None else None
             ),
-            distance_meters=(
-                activity.distance_meters if activity is not None else None
-            ),
+            distance_meters=(metrics.distance_meters if metrics is not None else None),
             average_heart_rate=(
-                activity.average_heart_rate if activity is not None else None
-            ),
-            heart_rate_reliable=(
-                activity.heart_rate_reliable if activity is not None else False
+                metrics.average_heart_rate if metrics is not None else None
             ),
         )
 

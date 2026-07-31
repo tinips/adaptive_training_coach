@@ -23,18 +23,21 @@ from sqlalchemy.ext.asyncio import (
 from app.config import Settings
 from app.db.base import Base
 from app.db.models import (
-    Activity,
     AppleHealthImportJob,
     AthleteBaseline,
     BaselinePreference,
+    CyclingWorkoutDetails,
     OnboardingSession,
+    RunningWorkoutDetails,
     User,
+    Workout,
 )
 from app.domain.enums import (
     ActivitySource,
     AppleHealthImportStatus,
     BaselinePreferenceStatus,
     BaselineSource,
+    Discipline,
     OnboardingStatus,
     OnboardingStep,
     TrainingFileFormat,
@@ -226,10 +229,11 @@ async def scalar_count(
     model: type[object],
     *,
     user_id: uuid.UUID | None = None,
+    owner_field: str = "user_id",
 ) -> int:
     statement = select(func.count()).select_from(model)
     if user_id is not None:
-        statement = statement.where(model.user_id == user_id)  # type: ignore[attr-defined]
+        statement = statement.where(getattr(model, owner_field) == user_id)
     return int((await session.scalar(statement)) or 0)
 
 
@@ -282,7 +286,7 @@ async def test_onboarding_tcx_waits_until_finish_then_creates_file_baseline(
     assert finished.context is TrainingImportContext.ONBOARDING
     assert finished.file_format is TrainingFileFormat.UNKNOWN
     assert finished.workouts_found == 1
-    assert finished.discipline_counts == {"RUN": 1}
+    assert finished.discipline_counts == {"RUNNING": 1}
     async with factory() as session:
         onboarding = await session.scalar(
             select(OnboardingSession).where(OnboardingSession.user_id == user_id)
@@ -340,9 +344,17 @@ async def test_onboarding_accepts_sequential_tcx_and_exact_duplicate(
     assert duplicate.activities_imported == 0
     assert duplicate.activities_skipped == 1
     assert duplicate.activity_id == first.activity_id
-    assert duplicate.discipline_counts == {"RUN": 2}
+    assert duplicate.discipline_counts == {"RUNNING": 2}
     async with factory() as session:
-        assert await scalar_count(session, Activity, user_id=user_id) == 2
+        assert (
+            await scalar_count(
+                session,
+                Workout,
+                user_id=user_id,
+                owner_field="athlete_id",
+            )
+            == 2
+        )
         assert await scalar_count(session, AppleHealthImportJob, user_id=user_id) == 3
         assert await scalar_count(session, AthleteBaseline, user_id=user_id) == 0
         onboarding = await session.scalar(
@@ -386,24 +398,42 @@ async def test_onboarding_accepts_mixed_apple_zip_and_tcx(
     assert apple_outcome.activities_imported == 1
     assert apple_outcome.heart_rate_records_matched == 1
     async with factory() as session:
-        activities = tuple(
+        workouts = tuple(
             (
                 await session.scalars(
-                    select(Activity).where(Activity.user_id == user_id)
+                    select(Workout).where(Workout.athlete_id == user_id)
                 )
             ).all()
         )
-        assert {activity.source for activity in activities} == {
+        assert {workout.source for workout in workouts} == {
             ActivitySource.TCX,
             ActivitySource.APPLE_HEALTH,
         }
+        assert {workout.discipline for workout in workouts} == {
+            Discipline.RUNNING,
+            Discipline.CYCLING,
+        }
+        assert (
+            sum(
+                isinstance(workout.running_details, RunningWorkoutDetails)
+                for workout in workouts
+            )
+            == 1
+        )
+        assert (
+            sum(
+                isinstance(workout.cycling_details, CyclingWorkoutDetails)
+                for workout in workouts
+            )
+            == 1
+        )
         assert await scalar_count(session, AthleteBaseline, user_id=user_id) == 0
 
     finished = await import_service.finish_onboarding_import(identity=owner)
 
     assert finished.workouts_found == 2
     assert finished.activities_imported == 2
-    assert finished.discipline_counts == {"RIDE": 1, "RUN": 1}
+    assert finished.discipline_counts == {"CYCLING": 1, "RUNNING": 1}
 
 
 @pytest.mark.asyncio
@@ -463,7 +493,15 @@ async def test_unsupported_file_stays_waiting_and_temp_file_is_deleted(
         )
         assert onboarding is not None
         assert onboarding.current_step is OnboardingStep.FILE_IMPORT_WAITING
-        assert await scalar_count(session, Activity, user_id=user_id) == 0
+        assert (
+            await scalar_count(
+                session,
+                Workout,
+                user_id=user_id,
+                owner_field="athlete_id",
+            )
+            == 0
+        )
         assert await scalar_count(session, AthleteBaseline, user_id=user_id) == 0
 
 
@@ -494,7 +532,7 @@ async def test_post_onboarding_tcx_returns_activity_and_recalculates(
     assert outcome.context is TrainingImportContext.DAILY
     assert outcome.file_format is TrainingFileFormat.TCX
     assert outcome.activity_id is not None
-    assert outcome.sport == "RUN"
+    assert outcome.sport == "RUNNING"
     assert outcome.duration_seconds == 2400
     assert outcome.distance_meters == 7200
     assert "recalculating_baseline" in stages
@@ -544,17 +582,21 @@ async def test_post_onboarding_apple_zip_import_recalculates(
     assert outcome.file_format is TrainingFileFormat.APPLE_HEALTH_ZIP
     assert outcome.activities_imported == 1
     assert outcome.activity_id is not None
-    assert outcome.sport == "RIDE"
+    assert outcome.sport == "CYCLING"
     assert outcome.average_heart_rate == 142
     assert "recalculating_baseline" in stages
     async with factory() as session:
-        activity = await session.get(Activity, outcome.activity_id)
+        workout = await session.get(Workout, outcome.activity_id)
         baseline = await session.scalar(
             select(AthleteBaseline).where(AthleteBaseline.user_id == user_id)
         )
-        assert activity is not None
-        assert activity.user_id == user_id
-        assert activity.source is ActivitySource.APPLE_HEALTH
+        assert workout is not None
+        assert workout.athlete_id == user_id
+        assert workout.discipline is Discipline.CYCLING
+        assert workout.source is ActivitySource.APPLE_HEALTH
+        assert isinstance(workout.cycling_details, CyclingWorkoutDetails)
+        assert workout.cycling_details.distance_meters == 25_000
+        assert workout.cycling_details.average_heart_rate == 142
         assert baseline is not None
         assert baseline.source is BaselineSource.FILE_IMPORT
 
@@ -597,24 +639,26 @@ async def test_exact_file_dedup_and_finish_are_isolated_between_users(
     await import_service.finish_onboarding_import(identity=first_owner)
 
     async with factory() as session:
-        activities = tuple((await session.scalars(select(Activity))).all())
-        assert {activity.user_id for activity in activities} == {
+        workouts = tuple((await session.scalars(select(Workout))).all())
+        assert {workout.athlete_id for workout in workouts} == {
             first_user_id,
             second_user_id,
         }
         assert (
             await scalar_count(
                 session,
-                Activity,
+                Workout,
                 user_id=first_user_id,
+                owner_field="athlete_id",
             )
             == 1
         )
         assert (
             await scalar_count(
                 session,
-                Activity,
+                Workout,
                 user_id=second_user_id,
+                owner_field="athlete_id",
             )
             == 1
         )
@@ -747,7 +791,15 @@ async def test_cancelled_job_cannot_persist_activity_after_parsing(
     assert outcome.status is AppleHealthImportStatus.CANCELLED
     assert list((tmp_path / "temporary").iterdir()) == []
     async with factory() as session:
-        assert await scalar_count(session, Activity, user_id=user_id) == 0
+        assert (
+            await scalar_count(
+                session,
+                Workout,
+                user_id=user_id,
+                owner_field="athlete_id",
+            )
+            == 0
+        )
         assert await scalar_count(session, AthleteBaseline, user_id=user_id) == 0
         onboarding = await session.scalar(
             select(OnboardingSession).where(OnboardingSession.user_id == user_id)

@@ -44,19 +44,23 @@ from app.domain.enums import (
     BaselineStatus,
     CoachTone,
     ConnectionStatus,
+    CyclingType,
     DayOfWeek,
     DetailLevel,
     Discipline,
     DiscomfortSeverity,
     GoalPriority,
-    HeartRateSource,
-    HeartRateTemporalQuality,
+    HikingType,
     LevelLabel,
     LLMUsageStatus,
     OAuthProvider,
     OnboardingStatus,
     OnboardingStep,
     PrimarySport,
+    RunningType,
+    StrengthType,
+    SwimmingEnvironment,
+    SwimmingStroke,
     SyncStatus,
     SyncType,
     TrainingFileFormat,
@@ -273,8 +277,8 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         lazy="raise",
         uselist=False,
     )
-    activities: Mapped[list[Activity]] = relationship(
-        back_populates="user",
+    workouts: Mapped[list[Workout]] = relationship(
+        back_populates="athlete",
         cascade="all, delete-orphan",
         passive_deletes=True,
         lazy="raise",
@@ -303,12 +307,6 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         passive_deletes=True,
         lazy="raise",
         uselist=False,
-    )
-    heart_rate_observations: Mapped[list[HeartRateObservation]] = relationship(
-        back_populates="user",
-        cascade="all, delete-orphan",
-        passive_deletes=True,
-        lazy="raise",
     )
     strava_sync_jobs: Mapped[list[StravaSyncJob]] = relationship(
         back_populates="user",
@@ -767,172 +765,553 @@ class StravaConnection(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
 
 
-class Activity(UUIDPrimaryKeyMixin, TimestampMixin, Base):
-    """Normalized provider activity summary used by the baseline engine."""
+class Workout(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Universal workout identity; discipline metrics live in one detail row."""
 
-    __tablename__ = "activities"
+    __tablename__ = "workouts"
     __table_args__ = (
         UniqueConstraint(
-            "user_id",
+            "athlete_id",
             "source",
             "external_id",
-            name="uq_activities_user_source_external_id",
+            name="uq_workouts_athlete_source_external_id",
         ),
-        Index("ix_activities_user_started_at", "user_id", "started_at"),
-        CheckConstraint("duration_seconds >= 0", name="duration_nonnegative"),
-        CheckConstraint(
-            "moving_time_seconds IS NULL OR moving_time_seconds >= 0",
-            name="moving_time_nonnegative",
-        ),
+        Index("ix_workouts_athlete_started_at", "athlete_id", "started_at"),
+        CheckConstraint("duration_seconds > 0", name="duration_positive"),
+    )
+
+    athlete_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    discipline: Mapped[Discipline] = mapped_column(
+        persisted_enum(Discipline, name="workout_discipline", length=16),
+        nullable=False,
+    )
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    duration_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    source: Mapped[ActivitySource] = mapped_column(
+        persisted_enum(ActivitySource, name="workout_source", length=16),
+        nullable=False,
+    )
+    external_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    athlete: Mapped[User] = relationship(back_populates="workouts", lazy="raise")
+    running_details: Mapped[RunningWorkoutDetails | None] = relationship(
+        back_populates="workout",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="selectin",
+        uselist=False,
+    )
+    cycling_details: Mapped[CyclingWorkoutDetails | None] = relationship(
+        back_populates="workout",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="selectin",
+        uselist=False,
+    )
+    hiking_details: Mapped[HikingWorkoutDetails | None] = relationship(
+        back_populates="workout",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="selectin",
+        uselist=False,
+    )
+    swimming_details: Mapped[SwimmingWorkoutDetails | None] = relationship(
+        back_populates="workout",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="selectin",
+        uselist=False,
+    )
+    strength_details: Mapped[StrengthWorkoutDetails | None] = relationship(
+        back_populates="workout",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="selectin",
+        uselist=False,
+    )
+    other_details: Mapped[OtherWorkoutDetails | None] = relationship(
+        back_populates="workout",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="selectin",
+        uselist=False,
+    )
+    source_links: Mapped[list[ActivitySourceLink]] = relationship(
+        back_populates="workout",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="selectin",
+    )
+    feedback: Mapped[ActivityFeedback | None] = relationship(
+        back_populates="workout",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="selectin",
+        uselist=False,
+    )
+    workout_flow_sessions: Mapped[list[WorkoutFlowSession]] = relationship(
+        back_populates="workout",
+        passive_deletes=True,
+        lazy="raise",
+    )
+    import_jobs: Mapped[list[AppleHealthImportJob]] = relationship(
+        back_populates="workout",
+        passive_deletes=True,
+        lazy="raise",
+    )
+
+    @property
+    def user_id(self) -> uuid.UUID:
+        """Compatibility alias for the pre-0004 ownership vocabulary."""
+
+        return self.athlete_id
+
+    @user_id.setter
+    def user_id(self, value: uuid.UUID) -> None:
+        self.athlete_id = value
+
+    @property
+    def sport(self) -> Discipline:
+        """Compatibility alias; persistence uses ``discipline``."""
+
+        return self.discipline
+
+    @sport.setter
+    def sport(self, value: Discipline) -> None:
+        self.discipline = value
+
+    @property
+    def name(self) -> str | None:
+        """Compatibility alias; persistence uses nullable ``title``."""
+
+        return self.title
+
+    @name.setter
+    def name(self, value: str | None) -> None:
+        self.title = value
+
+
+class RunningWorkoutDetails(Base):
+    """Metrics and subtype for a running workout."""
+
+    __tablename__ = "running_workout_details"
+    __table_args__ = (
         CheckConstraint(
             "distance_meters IS NULL OR distance_meters >= 0",
             name="distance_nonnegative",
         ),
         CheckConstraint(
-            "elevation_gain_meters IS NULL OR elevation_gain_meters >= 0",
-            name="elevation_nonnegative",
+            "moving_duration_seconds IS NULL OR moving_duration_seconds >= 0",
+            name="moving_duration_nonnegative",
         ),
         CheckConstraint(
-            "average_cadence IS NULL OR average_cadence >= 0",
+            "average_pace_seconds_per_km IS NULL OR average_pace_seconds_per_km >= 0",
+            name="average_pace_nonnegative",
+        ),
+        CheckConstraint(
+            "elevation_gain_meters IS NULL OR elevation_gain_meters >= 0",
+            name="elevation_gain_nonnegative",
+        ),
+        CheckConstraint(
+            "elevation_loss_meters IS NULL OR elevation_loss_meters >= 0",
+            name="elevation_loss_nonnegative",
+        ),
+        CheckConstraint(
+            "average_heart_rate IS NULL OR average_heart_rate >= 0",
+            name="average_heart_rate_nonnegative",
+        ),
+        CheckConstraint(
+            "max_heart_rate IS NULL OR max_heart_rate >= 0",
+            name="max_heart_rate_nonnegative",
+        ),
+        CheckConstraint(
+            "average_cadence_spm IS NULL OR average_cadence_spm >= 0",
             name="average_cadence_nonnegative",
+        ),
+        CheckConstraint(
+            "max_cadence_spm IS NULL OR max_cadence_spm >= 0",
+            name="max_cadence_nonnegative",
         ),
     )
 
-    user_id: Mapped[uuid.UUID] = mapped_column(
+    workout_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True),
-        ForeignKey("users.id", ondelete="CASCADE"),
+        ForeignKey("workouts.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    running_type: Mapped[RunningType] = mapped_column(
+        persisted_enum(RunningType, name="running_type", length=16),
         nullable=False,
     )
-    source: Mapped[ActivitySource] = mapped_column(
-        persisted_enum(ActivitySource, name="activity_source", length=16),
-        nullable=False,
-    )
-    external_id: Mapped[str] = mapped_column(String(128), nullable=False)
-    sport: Mapped[Discipline] = mapped_column(
-        persisted_enum(Discipline, name="discipline", length=16),
-        nullable=False,
-    )
-    source_sport_type: Mapped[str] = mapped_column(String(128), nullable=False)
-    name: Mapped[str] = mapped_column(String(255), nullable=False)
-    started_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-    )
-    ended_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
-    )
-    timezone: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    duration_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
-    moving_time_seconds: Mapped[int | None] = mapped_column(
+    distance_meters: Mapped[float | None] = mapped_column(Float, nullable=True)
+    moving_duration_seconds: Mapped[int | None] = mapped_column(
         Integer,
         nullable=True,
     )
-    distance_meters: Mapped[float | None] = mapped_column(Float, nullable=True)
+    average_pace_seconds_per_km: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
     elevation_gain_meters: Mapped[float | None] = mapped_column(
         Float,
         nullable=True,
     )
-    calories_kcal: Mapped[float | None] = mapped_column(Float, nullable=True)
-    average_heart_rate: Mapped[float | None] = mapped_column(
+    elevation_loss_meters: Mapped[float | None] = mapped_column(
         Float,
         nullable=True,
     )
-    average_heart_rate_source: Mapped[HeartRateSource] = mapped_column(
-        persisted_enum(
-            HeartRateSource,
-            name="heart_rate_source",
-            length=24,
-        ),
-        default=HeartRateSource.UNAVAILABLE,
-        server_default=HeartRateSource.UNAVAILABLE.value,
-        nullable=False,
-    )
+    average_heart_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
     max_heart_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
-    heart_rate_sample_count: Mapped[int] = mapped_column(
-        Integer,
-        default=0,
-        server_default="0",
-        nullable=False,
+    average_cadence_spm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_cadence_spm: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    workout: Mapped[Workout] = relationship(
+        back_populates="running_details",
+        lazy="raise",
     )
-    heart_rate_quality: Mapped[HeartRateTemporalQuality] = mapped_column(
-        persisted_enum(
-            HeartRateTemporalQuality,
-            name="heart_rate_temporal_quality",
-            length=24,
+
+
+class CyclingWorkoutDetails(Base):
+    """Metrics and subtype for a cycling workout."""
+
+    __tablename__ = "cycling_workout_details"
+    __table_args__ = (
+        CheckConstraint(
+            "distance_meters IS NULL OR distance_meters >= 0",
+            name="distance_nonnegative",
         ),
-        default=HeartRateTemporalQuality.UNKNOWN,
-        server_default=HeartRateTemporalQuality.UNKNOWN.value,
+        CheckConstraint(
+            "moving_duration_seconds IS NULL OR moving_duration_seconds >= 0",
+            name="moving_duration_nonnegative",
+        ),
+        CheckConstraint(
+            "average_speed_kph IS NULL OR average_speed_kph >= 0",
+            name="average_speed_nonnegative",
+        ),
+        CheckConstraint(
+            "max_speed_kph IS NULL OR max_speed_kph >= 0",
+            name="max_speed_nonnegative",
+        ),
+        CheckConstraint(
+            "elevation_gain_meters IS NULL OR elevation_gain_meters >= 0",
+            name="elevation_gain_nonnegative",
+        ),
+        CheckConstraint(
+            "elevation_loss_meters IS NULL OR elevation_loss_meters >= 0",
+            name="elevation_loss_nonnegative",
+        ),
+        CheckConstraint(
+            "average_heart_rate IS NULL OR average_heart_rate >= 0",
+            name="average_heart_rate_nonnegative",
+        ),
+        CheckConstraint(
+            "max_heart_rate IS NULL OR max_heart_rate >= 0",
+            name="max_heart_rate_nonnegative",
+        ),
+        CheckConstraint(
+            "average_cadence_rpm IS NULL OR average_cadence_rpm >= 0",
+            name="average_cadence_nonnegative",
+        ),
+        CheckConstraint(
+            "max_cadence_rpm IS NULL OR max_cadence_rpm >= 0",
+            name="max_cadence_nonnegative",
+        ),
+    )
+
+    workout_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("workouts.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    cycling_type: Mapped[CyclingType] = mapped_column(
+        persisted_enum(CyclingType, name="cycling_type", length=16),
         nullable=False,
     )
-    heart_rate_reliable: Mapped[bool] = mapped_column(
-        Boolean,
-        default=False,
-        server_default=text("false"),
-        nullable=False,
-    )
-    average_cadence: Mapped[float | None] = mapped_column(Float, nullable=True)
-    route_points: Mapped[list[dict[str, object]] | None] = mapped_column(
-        json_document(),
+    distance_meters: Mapped[float | None] = mapped_column(Float, nullable=True)
+    moving_duration_seconds: Mapped[int | None] = mapped_column(
+        Integer,
         nullable=True,
     )
-    average_speed: Mapped[float | None] = mapped_column(Float, nullable=True)
-    average_watts: Mapped[float | None] = mapped_column(Float, nullable=True)
-    trainer: Mapped[bool] = mapped_column(
-        Boolean,
-        default=False,
-        server_default=text("false"),
-        nullable=False,
-    )
-    commute: Mapped[bool] = mapped_column(
-        Boolean,
-        default=False,
-        server_default=text("false"),
-        nullable=False,
-    )
-    manual: Mapped[bool] = mapped_column(
-        Boolean,
-        default=False,
-        server_default=text("false"),
-        nullable=False,
-    )
-    raw_summary: Mapped[dict[str, object] | None] = mapped_column(
-        json_document(),
+    average_speed_kph: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_speed_kph: Mapped[float | None] = mapped_column(Float, nullable=True)
+    elevation_gain_meters: Mapped[float | None] = mapped_column(
+        Float,
         nullable=True,
     )
-    deleted_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
+    elevation_loss_meters: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    average_heart_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_heart_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    average_cadence_rpm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_cadence_rpm: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    workout: Mapped[Workout] = relationship(
+        back_populates="cycling_details",
+        lazy="raise",
+    )
+
+
+class HikingWorkoutDetails(Base):
+    """Metrics and subtype for a hiking workout."""
+
+    __tablename__ = "hiking_workout_details"
+    __table_args__ = (
+        CheckConstraint(
+            "distance_meters IS NULL OR distance_meters >= 0",
+            name="distance_nonnegative",
+        ),
+        CheckConstraint(
+            "moving_duration_seconds IS NULL OR moving_duration_seconds >= 0",
+            name="moving_duration_nonnegative",
+        ),
+        CheckConstraint(
+            "average_pace_seconds_per_km IS NULL OR average_pace_seconds_per_km >= 0",
+            name="average_pace_nonnegative",
+        ),
+        CheckConstraint(
+            "elevation_gain_meters IS NULL OR elevation_gain_meters >= 0",
+            name="elevation_gain_nonnegative",
+        ),
+        CheckConstraint(
+            "elevation_loss_meters IS NULL OR elevation_loss_meters >= 0",
+            name="elevation_loss_nonnegative",
+        ),
+        CheckConstraint(
+            "average_heart_rate IS NULL OR average_heart_rate >= 0",
+            name="average_heart_rate_nonnegative",
+        ),
+        CheckConstraint(
+            "max_heart_rate IS NULL OR max_heart_rate >= 0",
+            name="max_heart_rate_nonnegative",
+        ),
+        CheckConstraint(
+            "pack_weight_kg IS NULL OR pack_weight_kg >= 0",
+            name="pack_weight_nonnegative",
+        ),
+    )
+
+    workout_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("workouts.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    hiking_type: Mapped[HikingType] = mapped_column(
+        persisted_enum(HikingType, name="hiking_type", length=20),
+        nullable=False,
+    )
+    distance_meters: Mapped[float | None] = mapped_column(Float, nullable=True)
+    moving_duration_seconds: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    average_pace_seconds_per_km: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    elevation_gain_meters: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    elevation_loss_meters: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    average_heart_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_heart_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pack_weight_kg: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    workout: Mapped[Workout] = relationship(
+        back_populates="hiking_details",
+        lazy="raise",
+    )
+
+
+class SwimmingWorkoutDetails(Base):
+    """Common metrics for a pool or open-water swim."""
+
+    __tablename__ = "swimming_workout_details"
+    __table_args__ = (
+        CheckConstraint(
+            "distance_meters IS NULL OR distance_meters >= 0",
+            name="distance_nonnegative",
+        ),
+        CheckConstraint(
+            "moving_duration_seconds IS NULL OR moving_duration_seconds >= 0",
+            name="moving_duration_nonnegative",
+        ),
+        CheckConstraint(
+            "average_pace_seconds_per_100m IS NULL "
+            "OR average_pace_seconds_per_100m >= 0",
+            name="average_pace_nonnegative",
+        ),
+        CheckConstraint(
+            "average_heart_rate IS NULL OR average_heart_rate >= 0",
+            name="average_heart_rate_nonnegative",
+        ),
+        CheckConstraint(
+            "max_heart_rate IS NULL OR max_heart_rate >= 0",
+            name="max_heart_rate_nonnegative",
+        ),
+    )
+
+    workout_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("workouts.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    swimming_environment: Mapped[SwimmingEnvironment] = mapped_column(
+        persisted_enum(
+            SwimmingEnvironment,
+            name="swimming_environment",
+            length=16,
+        ),
+        nullable=False,
+    )
+    distance_meters: Mapped[float | None] = mapped_column(Float, nullable=True)
+    moving_duration_seconds: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    average_pace_seconds_per_100m: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    average_heart_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_heart_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    workout: Mapped[Workout] = relationship(
+        back_populates="swimming_details",
+        lazy="raise",
+    )
+    pool_details: Mapped[PoolSwimmingDetails | None] = relationship(
+        back_populates="swimming_details",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="selectin",
+        uselist=False,
+    )
+
+
+class PoolSwimmingDetails(Base):
+    """Additional structure required for a pool swim."""
+
+    __tablename__ = "pool_swimming_details"
+    __table_args__ = (
+        CheckConstraint(
+            "pool_length_meters > 0",
+            name="pool_length_positive",
+        ),
+        CheckConstraint(
+            "total_lengths IS NULL OR total_lengths >= 0",
+            name="total_lengths_nonnegative",
+        ),
+        CheckConstraint(
+            "average_swolf IS NULL OR average_swolf >= 0",
+            name="average_swolf_nonnegative",
+        ),
+        CheckConstraint(
+            "total_strokes IS NULL OR total_strokes >= 0",
+            name="total_strokes_nonnegative",
+        ),
+    )
+
+    workout_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("workouts.id", ondelete="CASCADE"),
+        ForeignKey("swimming_workout_details.workout_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    pool_length_meters: Mapped[float] = mapped_column(Float, nullable=False)
+    total_lengths: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    primary_stroke: Mapped[SwimmingStroke | None] = mapped_column(
+        persisted_enum(SwimmingStroke, name="swimming_stroke", length=16),
+        nullable=True,
+    )
+    average_swolf: Mapped[float | None] = mapped_column(Float, nullable=True)
+    total_strokes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    swimming_details: Mapped[SwimmingWorkoutDetails] = relationship(
+        back_populates="pool_details",
+        lazy="raise",
+    )
+
+
+class StrengthWorkoutDetails(Base):
+    """Validated JSON exercise structure for one strength workout."""
+
+    __tablename__ = "strength_workout_details"
+
+    workout_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("workouts.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    strength_type: Mapped[StrengthType] = mapped_column(
+        persisted_enum(StrengthType, name="strength_type", length=16),
+        nullable=False,
+    )
+    session_focus: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    exercises_jsonb: Mapped[list[dict[str, object]]] = mapped_column(
+        json_document(),
+        default=list,
+        nullable=False,
+    )
+
+    workout: Mapped[Workout] = relationship(
+        back_populates="strength_details",
+        lazy="raise",
+    )
+
+
+class OtherWorkoutDetails(Base):
+    """User-readable fallback retaining raw sport labels and extra metrics."""
+
+    __tablename__ = "other_workout_details"
+    __table_args__ = (
+        CheckConstraint(
+            "distance_meters IS NULL OR distance_meters >= 0",
+            name="distance_nonnegative",
+        ),
+        CheckConstraint(
+            "average_heart_rate IS NULL OR average_heart_rate >= 0",
+            name="average_heart_rate_nonnegative",
+        ),
+        CheckConstraint(
+            "max_heart_rate IS NULL OR max_heart_rate >= 0",
+            name="max_heart_rate_nonnegative",
+        ),
+    )
+
+    workout_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("workouts.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    activity_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    activity_description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_sport: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    raw_sub_sport: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    distance_meters: Mapped[float | None] = mapped_column(Float, nullable=True)
+    average_heart_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_heart_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    metrics_jsonb: Mapped[dict[str, object] | None] = mapped_column(
+        json_document(),
         nullable=True,
     )
 
-    user: Mapped[User] = relationship(back_populates="activities", lazy="raise")
-    heart_rate_observations: Mapped[list[HeartRateObservation]] = relationship(
-        back_populates="activity",
-        cascade="all, delete-orphan",
-        passive_deletes=True,
-        lazy="raise",
-    )
-    source_links: Mapped[list[ActivitySourceLink]] = relationship(
-        back_populates="activity",
-        cascade="all, delete-orphan",
-        passive_deletes=True,
-        lazy="raise",
-    )
-    feedback: Mapped[ActivityFeedback | None] = relationship(
-        back_populates="activity",
-        cascade="all, delete-orphan",
-        passive_deletes=True,
-        lazy="raise",
-        uselist=False,
-    )
-    workout_flow_sessions: Mapped[list[WorkoutFlowSession]] = relationship(
-        back_populates="activity",
-        passive_deletes=True,
-        lazy="raise",
-    )
-    import_jobs: Mapped[list[AppleHealthImportJob]] = relationship(
-        back_populates="activity",
-        passive_deletes=True,
+    workout: Mapped[Workout] = relationship(
+        back_populates="other_details",
         lazy="raise",
     )
 
@@ -971,9 +1350,9 @@ class AppleHealthImportJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ForeignKey("onboarding_sessions.id", ondelete="SET NULL"),
         nullable=True,
     )
-    activity_id: Mapped[uuid.UUID | None] = mapped_column(
+    workout_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True),
-        ForeignKey("activities.id", ondelete="SET NULL"),
+        ForeignKey("workouts.id", ondelete="SET NULL"),
         nullable=True,
     )
     telegram_update_id: Mapped[int | None] = mapped_column(
@@ -1074,7 +1453,7 @@ class AppleHealthImportJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         back_populates="apple_health_import_jobs",
         lazy="raise",
     )
-    activity: Mapped[Activity | None] = relationship(
+    workout: Mapped[Workout | None] = relationship(
         back_populates="import_jobs",
         lazy="raise",
     )
@@ -1084,9 +1463,17 @@ class AppleHealthImportJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         lazy="raise",
     )
 
+    @property
+    def activity_id(self) -> uuid.UUID | None:
+        return self.workout_id
+
+    @activity_id.setter
+    def activity_id(self, value: uuid.UUID | None) -> None:
+        self.workout_id = value
+
 
 class ActivitySourceLink(UUIDPrimaryKeyMixin, TimestampMixin, Base):
-    """One owner-scoped provider key linked to a canonical activity."""
+    """One owner-scoped provider key and its raw workout metadata."""
 
     __tablename__ = "activity_source_links"
     __table_args__ = (
@@ -1097,8 +1484,8 @@ class ActivitySourceLink(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             name="uq_activity_source_links_user_source_external_id",
         ),
         Index(
-            "ix_activity_source_links_activity_id",
-            "activity_id",
+            "ix_activity_source_links_workout_id",
+            "workout_id",
         ),
     )
 
@@ -1107,9 +1494,9 @@ class ActivitySourceLink(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
     )
-    activity_id: Mapped[uuid.UUID] = mapped_column(
+    workout_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True),
-        ForeignKey("activities.id", ondelete="CASCADE"),
+        ForeignKey("workouts.id", ondelete="CASCADE"),
         nullable=False,
     )
     source: Mapped[ActivitySource] = mapped_column(
@@ -1121,6 +1508,16 @@ class ActivitySourceLink(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         nullable=False,
     )
     external_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    raw_sport: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    raw_sub_sport: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    source_metadata_jsonb: Mapped[dict[str, object] | None] = mapped_column(
+        json_document(),
+        nullable=True,
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     file_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     import_job_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True),
@@ -1132,7 +1529,7 @@ class ActivitySourceLink(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         back_populates="activity_source_links",
         lazy="raise",
     )
-    activity: Mapped[Activity] = relationship(
+    workout: Mapped[Workout] = relationship(
         back_populates="source_links",
         lazy="raise",
     )
@@ -1141,16 +1538,24 @@ class ActivitySourceLink(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         lazy="raise",
     )
 
+    @property
+    def activity_id(self) -> uuid.UUID:
+        return self.workout_id
+
+    @activity_id.setter
+    def activity_id(self, value: uuid.UUID) -> None:
+        self.workout_id = value
+
 
 class ActivityFeedback(UUIDPrimaryKeyMixin, TimestampMixin, Base):
-    """Optional, non-diagnostic user feedback for one owned activity."""
+    """Optional, non-diagnostic user feedback for one owned workout."""
 
     __tablename__ = "activity_feedback"
     __table_args__ = (
         UniqueConstraint(
             "user_id",
-            "activity_id",
-            name="uq_activity_feedback_user_activity",
+            "workout_id",
+            name="uq_activity_feedback_user_workout",
         ),
         CheckConstraint(
             "manual_average_heart_rate IS NULL "
@@ -1169,9 +1574,9 @@ class ActivityFeedback(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
     )
-    activity_id: Mapped[uuid.UUID] = mapped_column(
+    workout_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True),
-        ForeignKey("activities.id", ondelete="CASCADE"),
+        ForeignKey("workouts.id", ondelete="CASCADE"),
         nullable=False,
     )
     manual_average_heart_rate: Mapped[int | None] = mapped_column(
@@ -1187,6 +1592,7 @@ class ActivityFeedback(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         Boolean,
         nullable=True,
     )
+    mobility_done: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     discomfort_body_area: Mapped[BodyArea | None] = mapped_column(
         persisted_enum(
             BodyArea,
@@ -1216,10 +1622,18 @@ class ActivityFeedback(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         back_populates="activity_feedback",
         lazy="raise",
     )
-    activity: Mapped[Activity] = relationship(
+    workout: Mapped[Workout] = relationship(
         back_populates="feedback",
         lazy="raise",
     )
+
+    @property
+    def activity_id(self) -> uuid.UUID:
+        return self.workout_id
+
+    @activity_id.setter
+    def activity_id(self, value: uuid.UUID) -> None:
+        self.workout_id = value
 
 
 class WorkoutFlowSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -1244,9 +1658,9 @@ class WorkoutFlowSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
     )
-    activity_id: Mapped[uuid.UUID | None] = mapped_column(
+    workout_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True),
-        ForeignKey("activities.id", ondelete="SET NULL"),
+        ForeignKey("workouts.id", ondelete="SET NULL"),
         nullable=True,
     )
     state: Mapped[WorkoutFlowStep] = mapped_column(
@@ -1282,67 +1696,18 @@ class WorkoutFlowSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         back_populates="workout_flow_session",
         lazy="raise",
     )
-    activity: Mapped[Activity | None] = relationship(
+    workout: Mapped[Workout | None] = relationship(
         back_populates="workout_flow_sessions",
         lazy="raise",
     )
 
+    @property
+    def activity_id(self) -> uuid.UUID | None:
+        return self.workout_id
 
-class HeartRateObservation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
-    """One normalized Apple Health heart-rate observation matched to a workout."""
-
-    __tablename__ = "heart_rate_observations"
-    __table_args__ = (
-        UniqueConstraint(
-            "user_id",
-            "source_record_key",
-            name="uq_heart_rate_observations_user_source_key",
-        ),
-        Index(
-            "ix_heart_rate_observations_activity_started",
-            "activity_id",
-            "started_at",
-        ),
-    )
-
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid(as_uuid=True),
-        ForeignKey("users.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    activity_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid(as_uuid=True),
-        ForeignKey("activities.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    source_record_key: Mapped[str] = mapped_column(String(64), nullable=False)
-    source_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    started_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-    )
-    ended_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-    )
-    beats_per_minute: Mapped[float] = mapped_column(Float, nullable=False)
-    temporal_quality: Mapped[HeartRateTemporalQuality] = mapped_column(
-        persisted_enum(
-            HeartRateTemporalQuality,
-            name="heart_rate_observation_quality",
-            length=24,
-        ),
-        nullable=False,
-    )
-
-    user: Mapped[User] = relationship(
-        back_populates="heart_rate_observations",
-        lazy="raise",
-    )
-    activity: Mapped[Activity] = relationship(
-        back_populates="heart_rate_observations",
-        lazy="raise",
-    )
+    @activity_id.setter
+    def activity_id(self, value: uuid.UUID | None) -> None:
+        self.workout_id = value
 
 
 class StravaSyncJob(UUIDPrimaryKeyMixin, Base):
@@ -1726,6 +2091,13 @@ class LLMUsage(UUIDPrimaryKeyMixin, Base):
     user: Mapped[User] = relationship(back_populates="llm_usage", lazy="raise")
 
 
+# Internal compatibility aliases for the pre-0004 application vocabulary.
+# New persistence code uses the workout names exclusively.
+Activity = Workout
+WorkoutSourceLink = ActivitySourceLink
+WorkoutFeedback = ActivityFeedback
+
+
 __all__ = [
     "Activity",
     "ActivityFeedback",
@@ -1737,6 +2109,7 @@ __all__ = [
     "BaselinePreference",
     "BodyArea",
     "CoachPreference",
+    "CyclingWorkoutDetails",
     "DisciplineBaseline",
     "EquipmentAccess",
     "EquipmentAccessType",
@@ -1744,15 +2117,23 @@ __all__ = [
     "GoalType",
     "HealthConstraint",
     "HealthConstraintType",
-    "HeartRateObservation",
+    "HikingWorkoutDetails",
     "LLMProviderMode",
     "LLMUsage",
     "OAuthState",
     "OnboardingSession",
+    "OtherWorkoutDetails",
+    "PoolSwimmingDetails",
+    "RunningWorkoutDetails",
     "StravaConnection",
     "StravaSyncJob",
     "StravaWebhookEvent",
+    "StrengthWorkoutDetails",
+    "SwimmingWorkoutDetails",
     "TrainingGoal",
     "User",
+    "Workout",
+    "WorkoutFeedback",
     "WorkoutFlowSession",
+    "WorkoutSourceLink",
 ]

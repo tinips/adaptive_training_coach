@@ -748,6 +748,12 @@ class CoachBotApplicationService:
                 if value == "skip"
                 else await service.select_rpe(identity, value)
             )
+        elif action.startswith("mobility:"):
+            value = action.removeprefix("mobility:")
+            mobility_done = {"yes": True, "no": False, "skip": None}.get(value)
+            if value not in {"yes", "no", "skip"}:
+                raise WorkoutFeedbackError("invalid_action")
+            result = await service.select_mobility(identity, mobility_done)
         elif action.startswith("discomfort:"):
             value = action.removeprefix("discomfort:")
             reported = {"yes": True, "no": False, "skip": None}.get(value)
@@ -811,6 +817,9 @@ class CoachBotApplicationService:
         elif result.state is WorkoutFlowStep.RPE:
             text = messages.RPE_QUESTION
             keyboard = keyboards.rpe_keyboard()
+        elif result.state is WorkoutFlowStep.MOBILITY:
+            text = messages.MOBILITY_QUESTION
+            keyboard = keyboards.mobility_keyboard()
         elif result.state is WorkoutFlowStep.DISCOMFORT:
             text = messages.DISCOMFORT_QUESTION
             keyboard = keyboards.discomfort_keyboard()
