@@ -3,8 +3,8 @@
 ## 1. Scope and source of truth
 
 This document describes the product as implemented in the current worktree on
-2026-07-30. The current database migration head is
-`0004_discipline_workout_models`.
+2026-08-01. The current database migration head is
+`0006_exact_workout_identity`.
 
 The source of truth is the application code and automated tests, especially the
 Telegram registration and facade, centralized messages and keyboards,
@@ -38,12 +38,20 @@ Important terminology:
 
 ## 2. System entry points
 
-All commands below are registered. Callback queries, Telegram documents, and
-non-command text are also registered globally.
+The visible entry point for a first-time user is Telegram's native **Start**
+button. Telegram sends `/start` internally when that button is pressed; the
+handler remains registered as a technical fallback, but no rendered product
+message tells the user to type a slash command. Callback queries, Telegram
+documents, and non-command text are also registered globally.
+
+Welcome-flow callbacks request an in-place edit of the current Telegram
+message. A `message is not modified` response is treated as a successful
+idempotent replay. If Telegram rejects editing for another reason, the handler
+sends one new message with the same text and inline keyboard.
 
 | Entry point | Valid user states | Service invoked | Possible outcome | Persisted effect |
 | --- | --- | --- | --- | --- |
-| `/start` | Unknown/new user; active, cancelled, or completed onboarding | `CoachBotApplicationService.start` → `OnboardingService.start` | Create, resume, show cancelled restart, show completed home, or resume active workout feedback | Creates/updates `users`; creates or reads `onboarding_sessions`; active sessions set user status to `ONBOARDING_IN_PROGRESS` |
+| Telegram native **Start** (`/start` internally) | Unknown/new user; active, cancelled, or completed onboarding | `CoachBotApplicationService.start` → `OnboardingService.start` | New user welcome; otherwise resume saved consent/setup/question, show cancelled restart, show completed home, or resume active workout feedback | Creates/updates `users`; creates or reads `onboarding_sessions`; active sessions set user status to `ONBOARDING_IN_PROGRESS` |
 | `/help` | Any Telegram user | Thin handler returns centralized help copy | Help text | None |
 | `/profile` | Any known or unknown user | Account query, then onboarding snapshot if no profile | Normalized profile; incomplete/resume prompt; generic incomplete result | None |
 | `/baseline` | Any known or unknown user | Account query | Latest baseline; manual/calibration pending; not ready | None |
@@ -52,7 +60,7 @@ non-command text are also registered globally.
 | `/cancel` | Active onboarding | Onboarding snapshot; confirmation callback performs cancel | Confirmation; already-cancelled restart menu; completed-profile notice | Confirmation sets `onboarding_sessions.status=CANCELLED`; answers remain until restart |
 | `/delete_me` | Any known user | Account query; confirmed callback invokes account deletion | Confirmation; keep account; delete or safe failure | Confirmed deletion removes the owned account data; external Strava revocation is attempted first |
 | Direct Telegram document | Active onboarding at a supported import state, or completed onboarding/profile lifecycle | `handle_document` → `TrainingFileImportService.process_upload` | Apple Health ZIP or TCX import; unsupported/unsafe/oversized/failure response; duplicate replay | Creates an import job; may create/enrich workouts and discipline details, source links, observations, baselines, and feedback flow |
-| Inline callback actions | State-specific; stale callbacks are rejected or replay the current durable feedback state | Callback router dispatches `ob:v1:*`, `wf:v1:*`, `menu:v1:*`, `st:v1:*`, `acct:v1:*` | Deterministic transition, text interpretation confirmation, menu action, Strava action, or safe expired-action message | Depends on action; every personal-data write is owner-scoped |
+| Inline callback actions | State-specific; stale callbacks are rejected or replay the current durable state | Callback router dispatches `nav:v1:*`, `ob:v1:*`, `wf:v1:*`, `menu:v1:*`, `st:v1:*`, `acct:v1:*` | Welcome/information navigation, deterministic transition, text interpretation confirmation, menu action, Strava action, or safe expired-action message | Depends on action; every personal-data write is owner-scoped |
 | Non-command text | Direct onboarding text step; explicitly armed free-text path; feedback `HR_ENTRY` or `DESCRIPTION_ENTRY` | Onboarding or workout-feedback service | Validated deterministic answer; LLM interpretation; manual HR/description staging; safe validation error | Saves deterministic answer or pending value; LLM output is not staged as an answer until confirmed |
 
 ## 3. Top-level user lifecycle
@@ -60,7 +68,10 @@ non-command text are also registered globally.
 ```mermaid
 flowchart TD
     life_new["New Telegram user<br/>No user or onboarding row"]
-    life_start["Send /start<br/>Create users and onboarding_sessions"]
+    life_start["Telegram native Start<br/>Internal /start handler creates users and onboarding_sessions"]
+    life_welcome["Welcome<br/>Let's go, coach help, privacy & safety"]
+    life_consent["Explicit consent confirmation"]
+    life_intro["Setup introduction<br/>Let's build my profile"]
     life_onboarding["Onboarding in progress<br/>UserStatus ONBOARDING_IN_PROGRESS"]
     life_restart{"Process or user returns?"}
     life_resume["Resume saved current_step<br/>answers remain staged"]
@@ -84,7 +95,7 @@ flowchart TD
     life_view_base["View baseline"]
     life_restart_runtime["Bot process restart"]
 
-    life_new --> life_start --> life_onboarding
+    life_new --> life_start --> life_welcome --> life_consent --> life_intro --> life_onboarding
     life_onboarding --> life_restart
     life_restart -->|Saved active session| life_resume --> life_onboarding
     life_restart -->|Cancel confirmed| life_cancel
@@ -119,7 +130,11 @@ LangGraph/LangChain workflow is invoked only after the user explicitly chooses
 
 ```mermaid
 flowchart TD
-    ob_consent["Consent and safety notice<br/>CONSENT<br/>Buttons: Continue, Cancel"]
+    ob_welcome["Welcome<br/>Let's go, coach help, privacy & safety"]
+    ob_help["How can this coach help me?<br/>Let's go, Back"]
+    ob_privacy["Privacy & safety<br/>Let's go, Back"]
+    ob_consent["Explicit consent<br/>CONSENT<br/>I understand — continue, Back, Cancel"]
+    ob_intro["Setup introduction<br/>Durable pending marker<br/>Let's build my profile, Cancel"]
     ob_sport["What is your primary sport?<br/>PRIMARY_SPORT<br/>Running, Cycling, Triathlon, Swimming, General fitness, Other"]
     ob_goal["What is your main training goal?<br/>GOAL_TYPE<br/>Sport-specific choices plus Other"]
     ob_event["Do you have a specific target event?<br/>EVENT_STATUS<br/>Yes or Not yet"]
@@ -161,7 +176,17 @@ flowchart TD
     ob_back["Back<br/>Previous currently relevant step"]
     ob_cancel["Cancel prompt<br/>Yes cancel or Keep onboarding"]
 
-    ob_consent --> ob_sport --> ob_goal --> ob_event --> ob_has_event
+    ob_welcome -->|Let's go| ob_consent
+    ob_welcome -->|How can this coach help me?| ob_help
+    ob_welcome -->|Privacy & safety| ob_privacy
+    ob_help -->|Back| ob_welcome
+    ob_privacy -->|Back| ob_welcome
+    ob_help -->|Let's go| ob_consent
+    ob_privacy -->|Let's go| ob_consent
+    ob_consent -->|I understand — continue| ob_intro
+    ob_consent -->|Back| ob_welcome
+    ob_intro -->|Let's build my profile| ob_sport
+    ob_sport --> ob_goal --> ob_event --> ob_has_event
     ob_has_event -->|Yes| ob_event_name --> ob_event_date --> ob_priority
     ob_has_event -->|Not yet| ob_priority
     ob_priority --> ob_age --> ob_height --> ob_weight --> ob_days
@@ -197,13 +222,25 @@ flowchart TD
     ob_event -. Back .-> ob_back
     ob_baseline -. Back .-> ob_back
     ob_consent -. Cancel .-> ob_cancel
+    ob_intro -. Cancel .-> ob_cancel
     ob_summary -. Cancel .-> ob_cancel
 ```
+
+Welcome, coach-help, privacy, and consent display navigation do not add a new
+screen framework or database enum. After explicit consent is stored as
+`answers.consent=true`, the service adds the private
+`_setup_introduction_pending` marker while retaining `PRIMARY_SPORT` as the
+next domain step. The marker makes the setup introduction resumable, blocks
+all primary-sport answer paths, and is removed only by **Let's build my
+profile**. Repeated consent confirmation returns the same introduction without
+duplicating data. This required no migration.
 
 ### Onboarding conditional rules
 
 | Condition | Implemented result |
 | --- | --- |
+| Explicit consent is not confirmed | No athlete-profile answer path is available; Back returns to welcome and Cancel stores no consent |
+| `answers.consent=true` and `_setup_introduction_pending=true` | Setup introduction is rendered; primary-sport callbacks and free text are rejected until **Let's build my profile** removes the marker |
 | `EVENT_STATUS = false` | `EVENT_NAME` and `EVENT_DATE` are skipped and stale values are removed |
 | Primary sport is `SWIMMING` or `TRIATHLON` | `POOL_ACCESS` is included |
 | Primary sport is `CYCLING` or `TRIATHLON` | `BIKE_ACCESS` is included |
@@ -221,8 +258,8 @@ file-import flow.
 
 | Current state | User event | Validation | Data persisted | Next state | Back behavior | Failure behavior |
 | --- | --- | --- | --- | --- | --- | --- |
-| `CONSENT` | Continue | Must normalize to accepted `true` | `answers.consent=true` | `PRIMARY_SPORT` | First step has no Back | Invalid/forged value is rejected; Cancel opens confirmation |
-| `PRIMARY_SPORT` | Predefined sport or confirmed Other | Enum; Other uses structured parse | Staged `primary_sport` and optional display description | `GOAL_TYPE` | `CONSENT` | Invalid option or unconfirmed parse does not advance |
+| `CONSENT` | **I understand — continue** | Must normalize to accepted `true` | `answers.consent=true` plus private setup-introduction marker | Setup introduction over the pending `PRIMARY_SPORT` domain step | Welcome | Repeated confirmation is idempotent; invalid/forged value is rejected; Cancel opens confirmation |
+| `PRIMARY_SPORT` | **Let's build my profile**, then predefined sport or confirmed Other | Setup marker must first be removed; sport is an enum and Other uses structured parse | Marker removal, then staged `primary_sport` and optional display description | `GOAL_TYPE` | Setup introduction | Invalid option, pre-introduction callback, or unconfirmed parse does not advance |
 | `GOAL_TYPE` | Sport-specific goal or confirmed Other | Goal must be allowed for confirmed sport | Staged `goal_type` and optional display description | `EVENT_STATUS` | `PRIMARY_SPORT` | Invalid cross-sport goal rejected |
 | `EVENT_STATUS` | Yes or Not yet | Boolean | Staged `event_status`; false clears event name/date | `EVENT_NAME` or `GOAL_PRIORITY` | `GOAL_TYPE` | Invalid callback rejected |
 | `EVENT_NAME` | Text | Required, max 120 | Staged exact text | `EVENT_DATE` | `EVENT_STATUS` | Empty/too-long text rejected |
@@ -680,13 +717,15 @@ provenance/counter metadata; individual observations are not persisted.
 
 | Interrupted point | Persisted state | Behavior after restart | Duplicate-event protection | Temporary-file cleanup |
 | --- | --- | --- | --- | --- |
-| Ordinary onboarding question | `onboarding_sessions.current_step`, `answers`, status | `/start` returns the saved question/summary | Expected-step callback values reject stale onboarding actions | Not applicable |
+| Welcome or unconfirmed consent | Active session at `CONSENT`; no consent answer | Telegram's native Start invokes `/start` internally and resumes consent for the known user; welcome/help/privacy Back navigation does not mutate data | Navigation callbacks are read-only; consent is written only by explicit confirmation | Not applicable |
+| Setup introduction | `PRIMARY_SPORT`, `answers.consent=true`, private setup marker | Internal `/start` renders the setup introduction again | Explicit consent confirmation is idempotent; profile-answer actions are blocked until the marker is removed | Not applicable |
+| Ordinary onboarding question | `onboarding_sessions.current_step`, `answers`, status | Internal `/start` returns the saved question/summary | Expected-step callback values reject stale onboarding actions | Not applicable |
 | Awaiting explicit free text | `pending_free_text_step`; parse-in-flight marker may exist in answers | Resume awaiting text or current parse state; in-flight marker expires after 10 minutes | One active parse run owns its result; stale result is rejected | Not applicable |
-| Interpreted answer awaiting confirmation | `pending_parsed_value` | `/start` renders confirmation again | Confirm/retry/back require pending state | Not applicable |
-| Waiting for import | `FILE_IMPORT_WAITING` | `/start` renders the import request and buttons | Telegram update ID and exact file hash are owner-scoped | No active file expected |
+| Interpreted answer awaiting confirmation | `pending_parsed_value` | Internal `/start` renders confirmation again | Confirm/retry/back require pending state | Not applicable |
+| Waiting for import | `FILE_IMPORT_WAITING` | Internal `/start` renders the import request and buttons | Telegram update ID and exact file hash are owner-scoped | No active file expected |
 | Import processing | Job `RECEIVED/PROCESSING`, onboarding `FILE_IMPORT_PROCESSING`, recorded generated path | Bot startup marks every prior-process active job `FAILED` with `import_interrupted` and restores onboarding to waiting | Update ID prevents replay; terminal job is rechecked under lock before workout writes | Recovery deletes only generated paths in the configured/system temp directory and clears metadata |
 | Profile confirmation | Staged answers remain until one atomic transaction completes | If transaction failed, onboarding remains incomplete; if completed, normalized profile is returned idempotently | Finalize returns existing bundle when onboarding is already completed | Not applicable |
-| Feedback flow | One `workout_flow_sessions` row plus confirmed `activity_feedback` values | `/start` or `/add_workout` renders the saved non-terminal state | Callback actions compare expected rendered state; a repeated callback returns current state without applying twice | Import temp cleanup is independent of feedback |
+| Feedback flow | One `workout_flow_sessions` row plus confirmed `activity_feedback` values | Internal `/start` or the Add workout action renders the saved non-terminal state | Callback actions compare expected rendered state; a repeated callback returns current state without applying twice | Import temp cleanup is independent of feedback |
 | Duplicate Telegram callback | Current durable onboarding or feedback state | Current state remains authoritative | Onboarding uses expected step; feedback uses expected origin state | Not applicable |
 | Duplicate document update | Existing job keyed by owner and Telegram update ID | Prior outcome is returned without claiming a new job | `(user_id, telegram_update_id)` lookup | The replay does not need a new download |
 | Duplicate document bytes with new update | New job plus prior successful job found by owner and SHA-256 | Safe counts/result copied; daily baseline may be recalculated | Owner-scoped successful hash lookup; no duplicate workout | New generated upload is deleted |
@@ -772,7 +811,10 @@ in `finally`; see the inconsistency table.
 
 | Context | User-facing buttons | Callback identifiers |
 | --- | --- | --- |
-| New user consent | Continue; Cancel | `ob:v1:set:CONSENT:CONTINUE`; `ob:v1:cancel` |
+| New-user welcome | Let's go; How can this coach help me?; Privacy & safety | `nav:v1:consent`; `nav:v1:help`; `nav:v1:privacy` |
+| Coach help or privacy/safety | Let's go; Back | `nav:v1:consent`; `nav:v1:welcome` |
+| Explicit consent | I understand — continue; Back; Cancel | `ob:v1:consent`; `nav:v1:welcome`; `ob:v1:cancel` |
+| Setup introduction | Let's build my profile; Cancel | `ob:v1:profile`; `ob:v1:cancel` |
 | Single-choice onboarding | Current predefined labels; optionally Other; Back; Cancel | `ob:v1:set:<STEP>:<VALUE>`; `ob:v1:other:<STEP>`; `ob:v1:back:<STEP>`; `ob:v1:cancel` |
 | Multiselect onboarding | Each option (selected options show a check); optionally Other; Continue; Back; Cancel | `ob:v1:multi:add/remove:<STEP>:<VALUE>`; `ob:v1:continue:<STEP>`; other/back/cancel callbacks |
 | Height/weight | Skip; Back | `ob:v1:skip:<STEP>`; `ob:v1:back:<STEP>` |
@@ -780,8 +822,12 @@ in `finally`; see the inconsistency table.
 | Parsed free text | Correct; Write it again; Back to options | `ob:v1:parsed:confirm`; `ob:v1:parsed:retry`; `ob:v1:parsed:back` |
 | Clarification/fallback/provider error/rate limit | Write it again; Back to options | retry/back callbacks |
 | Cancel confirmation | Yes, cancel; Keep onboarding | `ob:v1:cancel:confirm`; `ob:v1:cancel:keep` |
-| Cancelled user | Restart onboarding | `ob:v1:restart` |
+| Cancelled user | Restart onboarding; Back | `ob:v1:restart`; `nav:v1:welcome` |
 | Incomplete profile from `/profile` or Strava guard | Resume onboarding | `ob:v1:resume` |
+
+The previous `ob:v1:set:CONSENT:CONTINUE` callback is still accepted as a
+technical compatibility fallback and routes through the same idempotent
+consent method. New keyboards emit only `ob:v1:consent`.
 
 ### Exact onboarding option labels
 
@@ -790,7 +836,7 @@ Continue/Back/Cancel controls described above.
 
 | Step | Exact current option labels |
 | --- | --- |
-| `CONSENT` | Continue; Cancel |
+| `CONSENT` | I understand — continue; Back; Cancel |
 | `PRIMARY_SPORT` | Running; Cycling; Triathlon; Swimming; General fitness; Other |
 | `GOAL_TYPE` for Running | 5 km; 10 km; Half marathon; Marathon; Trail; Improve performance; Other |
 | `GOAL_TYPE` for Cycling | Cycling event; Gran fondo; Improve endurance; Improve performance; Other |

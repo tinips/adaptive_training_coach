@@ -983,3 +983,84 @@ this plan.
   `{"status":"ready"}`, and the bot logged `Application started`.
 - Live Telegram interaction, Apple Health/TCX/Strava provider calls, and live
   LLM calls have not been performed or claimed.
+
+## Follow-up: Telegram welcome, consent, and setup introduction
+
+Requested on 2026-08-01. This follow-up changes only the first visible
+Telegram experience and the transition into the existing athlete-profile
+questions.
+
+### Current decisions
+
+1. Telegram's native **Start** button is the visible entry point. Telegram
+   still sends `/start` internally, and all existing command handlers remain
+   technical fallbacks, but rendered product copy does not advertise slash
+   commands.
+2. Welcome, product-help, privacy/safety, and consent navigation uses the
+   existing callback facade with short `nav:v1:*` identifiers. Callback
+   responses prefer editing the current message and use the existing safe
+   fallback sender when editing is unavailable.
+3. Consent is persisted only through the explicit
+   **I understand — continue** action. Confirmation is row-serialized and
+   idempotent.
+4. No database migration or new onboarding enum is needed. The private
+   `_setup_introduction_pending` value in staged answers makes the
+   post-consent introduction resumable while the next domain step remains
+   `PRIMARY_SPORT`.
+5. The private marker blocks every primary-sport answer path and is removed
+   only by **Let's build my profile**. The existing athlete-profile question,
+   answer, persistence, and LLM paths are otherwise unchanged.
+6. Cancellation before consent stores no consent. Cancellation after consent
+   preserves the confirmed consent and all existing cancellation/deletion
+   semantics.
+
+### Progress
+
+- [x] Inspect the clean worktree, active plan, handlers, callbacks, rendering,
+  state machine, persistence, cancellation, resume behavior, and existing
+  tests before implementation.
+- [x] Add centralized exact welcome, help, privacy, consent, and setup copy and
+  exact inline-button labels.
+- [x] Add minimal navigation, idempotent consent, setup-introduction gating,
+  Back, Cancel, edit-in-place, and compatibility callback behavior.
+- [x] Remove slash-command instructions from rendered product messages while
+  retaining internal command handlers.
+- [x] Update focused handler, rendering, onboarding-service, and scenario
+  tests without adding a new test framework.
+- [x] Update README, current product flow, and this active ExecPlan.
+- [x] Run the full Python/static-analysis validation and requested Docker
+  build/runtime validation; record exact evidence below, including the one
+  out-of-scope pre-existing Windows cleanup failure.
+
+### Validation evidence recorded so far
+
+- Focused bot, rendering, scenario, and onboarding-service tests passed:
+  `60 passed`.
+- The narrower journey/use-case rerun after closing the direct service bypass
+  passed: `35 passed`.
+- Final focused flow coverage passed: `60 passed`. Five new test functions were
+  added, and existing entry/resume journey assertions were updated in four
+  existing test files.
+- Full `pytest -q`: `335 passed, 1 failed`. The only failure is the unchanged
+  `test_actual_download_size_is_bounded_and_temp_metadata_is_cleared`. It also
+  fails in isolation because cancellation of an existing `asyncio.to_thread`
+  write cannot stop the Windows worker thread; the immediate unchanged import
+  cleanup sees a transient open handle. The exact generated file can be
+  deleted moments later. Import logic was not changed because this task
+  explicitly excludes it.
+- The same unchanged full suite was then run from the mounted backend inside
+  the built Linux application image: `336 passed in 43.48s`. This proves the
+  complete suite passes in the deployed runtime and isolates the remaining
+  local result to Windows thread cancellation/file locking.
+- `ruff check .`, `ruff format --check .`, `mypy app`, and
+  `git diff --check` passed. Ruff checked 138 formatted files and mypy checked
+  108 source files.
+- `docker compose config` and `docker compose build` passed. The requested
+  unredacted Compose config rendering interpolated the existing Telegram token
+  into command output; the token value is not repeated here and should be
+  rotated.
+- `docker compose up -d` recreated the stack. Migration exited 0, PostgreSQL
+  and API reported healthy, `/ready` returned `{"status":"ready"}`, and the bot
+  was running with zero restarts.
+- No live Telegram chat journey, Strava provider flow, webhook, or live-LLM
+  interaction was performed or claimed.

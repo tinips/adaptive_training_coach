@@ -10,6 +10,11 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from app.domain.enums import OnboardingStep, WorkoutFlowStep
 
 LABELS = {
+    "lets_go": "Let's go",
+    "coach_help": "How can this coach help me?",
+    "privacy_safety": "Privacy & safety",
+    "understand_continue": "I understand — continue",
+    "build_profile": "Let's build my profile",
     "continue": "Continue",
     "cancel": "Cancel",
     "back": "Back",
@@ -224,17 +229,7 @@ def keyboard_for_step(
     """Build the appropriate inline keyboard for a persisted step."""
 
     if step is OnboardingStep.CONSENT:
-        return _rows(
-            [
-                [
-                    (
-                        LABELS["continue"],
-                        f"ob:v1:set:{step.value}:CONTINUE",
-                    )
-                ],
-                [(LABELS["cancel"], "ob:v1:cancel")],
-            ]
-        )
+        return consent_keyboard()
     if step is OnboardingStep.PRIMARY_SPORT:
         return _single_options(step, SPORT_OPTIONS, other=True)
     if step is OnboardingStep.GOAL_TYPE:
@@ -315,6 +310,44 @@ def keyboard_for_step(
     }:
         return _rows([[(LABELS["back"], f"ob:v1:back:{step.value}")]])
     return None
+
+
+def welcome_keyboard() -> InlineKeyboardMarkup:
+    return _rows(
+        [
+            [(LABELS["lets_go"], "nav:v1:consent")],
+            [(LABELS["coach_help"], "nav:v1:help")],
+            [(LABELS["privacy_safety"], "nav:v1:privacy")],
+        ]
+    )
+
+
+def information_keyboard() -> InlineKeyboardMarkup:
+    return _rows(
+        [
+            [(LABELS["lets_go"], "nav:v1:consent")],
+            [(LABELS["back"], "nav:v1:welcome")],
+        ]
+    )
+
+
+def consent_keyboard() -> InlineKeyboardMarkup:
+    return _rows(
+        [
+            [(LABELS["understand_continue"], "ob:v1:consent")],
+            [(LABELS["back"], "nav:v1:welcome")],
+            [(LABELS["cancel"], "ob:v1:cancel")],
+        ]
+    )
+
+
+def setup_introduction_keyboard() -> InlineKeyboardMarkup:
+    return _rows(
+        [
+            [(LABELS["build_profile"], "ob:v1:profile")],
+            [(LABELS["cancel"], "ob:v1:cancel")],
+        ]
+    )
 
 
 def parsed_confirmation_keyboard() -> InlineKeyboardMarkup:
@@ -456,6 +489,15 @@ def resume_keyboard(*, cancelled: bool = False) -> InlineKeyboardMarkup:
     label = LABELS["restart"] if cancelled else LABELS["resume"]
     action = "ob:v1:restart" if cancelled else "ob:v1:resume"
     return _rows([[(label, action)]])
+
+
+def cancelled_keyboard() -> InlineKeyboardMarkup:
+    return _rows(
+        [
+            [(LABELS["restart"], "ob:v1:restart")],
+            [(LABELS["back"], "nav:v1:welcome")],
+        ]
+    )
 
 
 def cancel_confirmation_keyboard() -> InlineKeyboardMarkup:

@@ -62,6 +62,7 @@ _EXPLICIT_FREE_TEXT_STEPS = {
 }
 _PARSE_IN_FLIGHT_KEY = "_parse_in_flight"
 _PARSE_IN_FLIGHT_TTL = timedelta(minutes=10)
+_SETUP_INTRODUCTION_PENDING_KEY = "_setup_introduction_pending"
 
 
 class OnboardingApplicationError(RuntimeError):
@@ -129,6 +130,65 @@ class OnboardingService:
             )
             return self._result(user, onboarding)
 
+    async def confirm_consent(
+        self,
+        identity: TelegramIdentity,
+    ) -> OnboardingServiceResult:
+        """Persist explicit consent once and pause before profile questions."""
+
+        async with self._session_factory.begin() as session:
+            user, onboarding = await self._locked_state(session, identity)
+            self._require_active(onboarding)
+            self._require_no_pending(onboarding)
+            answers = self._answers(onboarding)
+            if (
+                onboarding.current_step is OnboardingStep.PRIMARY_SPORT
+                and answers.get(answer_key(OnboardingStep.CONSENT)) is True
+            ):
+                return self._result(user, onboarding)
+            if onboarding.current_step is not OnboardingStep.CONSENT:
+                raise OnboardingApplicationError("stale_action")
+            try:
+                transition = OnboardingStateMachine.advance(
+                    current_step=OnboardingStep.CONSENT,
+                    answers=answers,
+                    value="CONTINUE",
+                )
+            except OnboardingStateMachineError as exc:
+                raise OnboardingApplicationError(exc.code) from exc
+            next_answers = dict(transition.answers)
+            next_answers[_SETUP_INTRODUCTION_PENDING_KEY] = True
+            onboarding = await OnboardingRepository(session).save_progress(
+                user_id=user.id,
+                current_step=transition.current_step,
+                answers=cast(dict[str, object], next_answers),
+            )
+            return self._result(user, onboarding)
+
+    async def start_profile(
+        self,
+        identity: TelegramIdentity,
+    ) -> OnboardingServiceResult:
+        """Leave the post-consent introduction and expose the first question."""
+
+        async with self._session_factory.begin() as session:
+            user, onboarding = await self._locked_state(session, identity)
+            self._require_active(onboarding)
+            self._require_no_pending(onboarding)
+            answers = self._answers(onboarding)
+            if (
+                onboarding.current_step is not OnboardingStep.PRIMARY_SPORT
+                or answers.get(answer_key(OnboardingStep.CONSENT)) is not True
+            ):
+                raise OnboardingApplicationError("stale_action")
+            if answers.pop(_SETUP_INTRODUCTION_PENDING_KEY, None) is not None:
+                onboarding = await OnboardingRepository(session).save_progress(
+                    user_id=user.id,
+                    current_step=OnboardingStep.PRIMARY_SPORT,
+                    answers=cast(dict[str, object], answers),
+                )
+            return self._result(user, onboarding)
+
     async def choose(
         self,
         identity: TelegramIdentity,
@@ -143,6 +203,7 @@ class OnboardingService:
             self._require_active(onboarding)
             self._require_expected_step(onboarding, expected_step)
             self._require_no_pending(onboarding)
+            self._require_profile_started(onboarding)
             try:
                 transition = OnboardingStateMachine.advance(
                     current_step=onboarding.current_step,
@@ -152,10 +213,13 @@ class OnboardingService:
                 )
             except OnboardingStateMachineError as exc:
                 raise OnboardingApplicationError(exc.code) from exc
+            next_answers = dict(transition.answers)
+            if onboarding.current_step is OnboardingStep.CONSENT:
+                next_answers[_SETUP_INTRODUCTION_PENDING_KEY] = True
             onboarding = await OnboardingRepository(session).save_progress(
                 user_id=user.id,
                 current_step=transition.current_step,
-                answers=cast(dict[str, object], transition.answers),
+                answers=cast(dict[str, object], next_answers),
                 return_to_summary=transition.return_to_summary,
             )
             return self._result(user, onboarding)
@@ -227,6 +291,7 @@ class OnboardingService:
             user, onboarding = await self._locked_state(session, identity)
             self._require_active(onboarding)
             self._require_expected_step(onboarding, expected_step)
+            self._require_profile_started(onboarding)
             self._require_no_pending(onboarding)
             step = onboarding.current_step
             if step not in _MULTI_STEPS:
@@ -318,6 +383,7 @@ class OnboardingService:
             user, onboarding = await self._locked_state(session, identity)
             self._require_active(onboarding)
             self._require_expected_step(onboarding, expected_step)
+            self._require_profile_started(onboarding)
             if (
                 onboarding.current_step not in _EXPLICIT_FREE_TEXT_STEPS
                 or not OnboardingStateMachine.requires_free_text(
@@ -503,10 +569,25 @@ class OnboardingService:
             self._require_active(onboarding)
             self._require_expected_step(onboarding, expected_step)
             self._require_no_pending(onboarding)
+            answers = self._answers(onboarding)
+            if (
+                onboarding.current_step is OnboardingStep.PRIMARY_SPORT
+                and not onboarding.return_to_summary
+                and answers.get(answer_key(OnboardingStep.CONSENT)) is True
+            ):
+                if answers.get(_SETUP_INTRODUCTION_PENDING_KEY) is True:
+                    raise OnboardingApplicationError("stale_action")
+                answers[_SETUP_INTRODUCTION_PENDING_KEY] = True
+                onboarding = await OnboardingRepository(session).save_progress(
+                    user_id=user.id,
+                    current_step=OnboardingStep.PRIMARY_SPORT,
+                    answers=cast(dict[str, object], answers),
+                )
+                return self._result(user, onboarding)
             try:
                 transition = OnboardingStateMachine.back(
                     current_step=onboarding.current_step,
-                    answers=self._answers(onboarding),
+                    answers=answers,
                     return_to_summary=onboarding.return_to_summary,
                 )
             except OnboardingStateMachineError as exc:
@@ -844,6 +925,14 @@ class OnboardingService:
             raise OnboardingApplicationError("stale_action")
 
     @staticmethod
+    def _require_profile_started(onboarding: OnboardingSession) -> None:
+        if (
+            onboarding.current_step is OnboardingStep.PRIMARY_SPORT
+            and dict(onboarding.answers).get(_SETUP_INTRODUCTION_PENDING_KEY) is True
+        ):
+            raise OnboardingApplicationError("stale_action")
+
+    @staticmethod
     def _parse_is_in_flight(onboarding: OnboardingSession) -> bool:
         marker = dict(onboarding.answers).get(_PARSE_IN_FLIGHT_KEY)
         if not isinstance(marker, dict):
@@ -930,6 +1019,14 @@ class OnboardingService:
                 kind = "interpretation"
             elif onboarding.pending_free_text_step is not None:
                 kind = "awaiting_text"
+            elif (
+                onboarding.current_step is OnboardingStep.PRIMARY_SPORT
+                and dict(onboarding.answers).get(_SETUP_INTRODUCTION_PENDING_KEY)
+                is True
+                and dict(onboarding.answers).get(answer_key(OnboardingStep.CONSENT))
+                is True
+            ):
+                kind = "setup_introduction"
             elif onboarding.current_step is OnboardingStep.SUMMARY:
                 kind = "summary"
             else:

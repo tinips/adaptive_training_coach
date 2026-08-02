@@ -12,7 +12,7 @@ from telegram import Update
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
-from app.bot import handlers, messages
+from app.bot import handlers, keyboards, messages
 from app.bot.rendering import TelegramResponse
 from app.schemas.common import TelegramIdentity
 
@@ -50,7 +50,12 @@ def _update(*, callback_data: str | None = None) -> Any:
 @pytest.mark.asyncio
 async def test_start_handler_delegates_identity_to_service() -> None:
     service = SimpleNamespace(
-        start=AsyncMock(return_value=TelegramResponse("delegated")),
+        start=AsyncMock(
+            return_value=TelegramResponse(
+                messages.WELCOME,
+                keyboards.welcome_keyboard(),
+            )
+        ),
     )
     update = _update()
 
@@ -67,8 +72,8 @@ async def test_start_handler_delegates_identity_to_service() -> None:
         language_code="es",
     )
     update.effective_message.reply_text.assert_awaited_once_with(
-        "delegated",
-        reply_markup=None,
+        messages.WELCOME,
+        reply_markup=keyboards.welcome_keyboard(),
     )
 
 
@@ -139,6 +144,30 @@ async def test_callback_replay_does_not_send_duplicate_message() -> None:
 
     update.callback_query.answer.assert_awaited_once()
     update.effective_message.reply_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_callback_edit_failure_falls_back_to_one_new_message() -> None:
+    service = SimpleNamespace(
+        handle_callback=AsyncMock(
+            return_value=TelegramResponse("replacement", edit_existing=True)
+        ),
+    )
+    update = _update(callback_data="nav:v1:privacy")
+    update.callback_query.edit_message_text.side_effect = BadRequest(
+        "Message can't be edited"
+    )
+
+    await handlers.callback_handler(
+        cast(Update, update),
+        cast(ContextTypes.DEFAULT_TYPE, _context(service)),
+    )
+
+    update.callback_query.answer.assert_awaited_once()
+    update.effective_message.reply_text.assert_awaited_once_with(
+        "replacement",
+        reply_markup=None,
+    )
 
 
 @pytest.mark.asyncio

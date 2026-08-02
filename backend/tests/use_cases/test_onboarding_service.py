@@ -117,6 +117,15 @@ def unused_parser() -> CountingParser:
     )
 
 
+async def accept_consent_and_start_profile(
+    service: OnboardingService,
+    athlete: TelegramIdentity,
+) -> None:
+    consent = await service.confirm_consent(athlete)
+    assert consent.kind == "setup_introduction"
+    await service.start_profile(athlete)
+
+
 @pytest.mark.asyncio
 async def test_complete_deterministic_onboarding_and_resume_after_restart(
     onboarding_database: tuple[
@@ -135,7 +144,7 @@ async def test_complete_deterministic_onboarding_and_resume_after_restart(
 
     result = await service.start(athlete)
     assert result.created
-    await service.choose(athlete, "CONTINUE")
+    await accept_consent_and_start_profile(service, athlete)
     await service.choose(athlete, "RUNNING")
     await service.choose(athlete, "TEN_K")
     await service.choose(athlete, "NO")
@@ -263,7 +272,7 @@ async def test_free_text_uses_graph_and_requires_confirmation_before_answer(
     )
     athlete = identity(4002)
     await service.start(athlete)
-    await service.choose(athlete, "CONTINUE")
+    await accept_consent_and_start_profile(service, athlete)
     awaiting = await service.begin_free_text(athlete)
 
     assert awaiting.kind == "awaiting_text"
@@ -319,7 +328,7 @@ async def test_rejected_interpretation_can_retry_without_staging_value(
     )
     athlete = identity(4003)
     await service.start(athlete)
-    await service.choose(athlete, "CONTINUE")
+    await accept_consent_and_start_profile(service, athlete)
     await service.begin_free_text(athlete)
     await service.handle_text(athlete, "un esport diferent")
 
@@ -347,7 +356,7 @@ async def test_low_confidence_does_not_persist_pending_value(
     )
     athlete = identity(4004)
     started = await service.start(athlete)
-    await service.choose(athlete, "CONTINUE")
+    await accept_consent_and_start_profile(service, athlete)
     await service.begin_free_text(athlete)
 
     result = await service.handle_text(
@@ -384,7 +393,7 @@ async def test_live_rolling_hour_limit_prevents_provider_invocation(
     )
     athlete = identity(4005)
     started = await service.start(athlete)
-    await service.choose(athlete, "CONTINUE")
+    await accept_consent_and_start_profile(service, athlete)
     await service.begin_free_text(athlete)
     async with factory.begin() as session:
         await LLMUsageRepository(session).record(
@@ -422,7 +431,7 @@ async def test_live_limit_does_not_count_prior_mock_usage(
     )
     athlete = identity(4010)
     started = await service.start(athlete)
-    await service.choose(athlete, "CONTINUE")
+    await accept_consent_and_start_profile(service, athlete)
     await service.begin_free_text(athlete)
     async with factory.begin() as session:
         await LLMUsageRepository(session).record(
@@ -457,7 +466,7 @@ async def test_pending_parse_is_strictly_user_isolated(
     other = identity(4007)
     owner_result = await service.start(owner)
     other_result = await service.start(other)
-    await service.choose(owner, "CONTINUE")
+    await accept_consent_and_start_profile(service, owner)
     await service.begin_free_text(owner)
     await service.handle_text(owner, "running")
 
@@ -491,7 +500,7 @@ async def test_cancel_and_restart_reset_only_the_owned_session(
     )
     athlete = identity(4008)
     await service.start(athlete)
-    await service.choose(athlete, "CONTINUE")
+    await accept_consent_and_start_profile(service, athlete)
 
     cancelled = await service.cancel(athlete)
     restarted = await service.restart(athlete)
@@ -517,7 +526,7 @@ async def test_concurrent_free_text_parse_is_rejected_until_first_result_is_read
     )
     athlete = identity(4012)
     await service.start(athlete)
-    await service.choose(athlete, "CONTINUE")
+    await accept_consent_and_start_profile(service, athlete)
     await service.begin_free_text(athlete)
 
     first = asyncio.create_task(service.handle_text(athlete, "running"))

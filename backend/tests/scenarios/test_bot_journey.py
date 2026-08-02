@@ -26,9 +26,11 @@ from app.db.models import AthleteBaseline
 from app.domain.enums import (
     BaselineSource,
     ConnectionStatus,
+    OnboardingStep,
     SyncStatus,
     UserStatus,
 )
+from app.repositories.onboarding import OnboardingRepository
 from app.repositories.strava import StravaRepository
 from app.repositories.users import UserRepository
 from app.schemas.common import TelegramIdentity
@@ -140,6 +142,7 @@ async def complete_running_profile(
     await service.start(identity)
     callbacks = [
         "ob:v1:set:CONSENT:CONTINUE",
+        "ob:v1:profile",
         "ob:v1:set:PRIMARY_SPORT:RUNNING",
         "ob:v1:set:GOAL_TYPE:TEN_K",
         "ob:v1:set:EVENT_STATUS:NO",
@@ -215,8 +218,12 @@ async def test_complete_deterministic_bot_journey_persists_profile(
     identity = athlete()
 
     start = await service.start(identity)
-    assert messages.WELCOME_NEW in start.text
-    assert "not medical advice" in start.text
+    assert start.text == messages.WELCOME
+    assert button_labels(start) == [
+        "Let's go",
+        "How can this coach help me?",
+        "Privacy & safety",
+    ]
     await complete_running_profile(service, identity)
     summary = await service.handle_callback(
         identity,
@@ -244,6 +251,7 @@ async def test_explicit_other_renders_confirmation_before_advancing(
     identity = athlete(5102)
     await service.start(identity)
     await service.handle_callback(identity, "ob:v1:set:CONSENT:CONTINUE")
+    await service.handle_callback(identity, "ob:v1:profile")
     request = await service.handle_callback(
         identity,
         "ob:v1:other:PRIMARY_SPORT",
@@ -259,6 +267,139 @@ async def test_explicit_other_renders_confirmation_before_advancing(
         "ob:v1:parsed:confirm",
     )
     assert "main training goal" in confirmed.text
+
+
+@pytest.mark.asyncio
+async def test_welcome_information_privacy_and_explicit_consent_flow(
+    bot_service: tuple[
+        CoachBotApplicationService,
+        AccountQueryService,
+        FakeStravaPort,
+        AsyncEngine,
+    ],
+) -> None:
+    service, queries, _, engine = bot_service
+    identity = athlete(5110)
+
+    welcome = await service.start(identity)
+    help_screen = await service.handle_callback(identity, "nav:v1:help")
+    welcome_again = await service.handle_callback(identity, "nav:v1:welcome")
+    privacy = await service.handle_callback(identity, "nav:v1:privacy")
+    consent = await service.handle_callback(identity, "nav:v1:consent")
+
+    assert welcome.text == messages.WELCOME
+    assert help_screen.text == messages.COACH_HELP
+    assert button_labels(help_screen) == ["Let's go", "Back"]
+    assert welcome_again.text == messages.WELCOME
+    assert privacy.text == messages.PRIVACY_SAFETY
+    assert button_labels(privacy) == ["Let's go", "Back"]
+    assert consent.text == messages.CONSENT
+    assert button_labels(consent) == [
+        "I understand — continue",
+        "Back",
+        "Cancel",
+    ]
+
+    lifecycle = await queries.lifecycle(identity)
+    assert lifecycle is not None
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as session:
+        before = await OnboardingRepository(session).require_for_user(
+            user_id=lifecycle["user_id"]
+        )
+        assert "consent" not in before.answers
+
+    forged_before_consent = await service.handle_callback(
+        identity,
+        "ob:v1:set:PRIMARY_SPORT:RUNNING",
+    )
+    assert forged_before_consent.text == messages.CALLBACK_EXPIRED
+
+    introduction = await service.handle_callback(identity, "ob:v1:consent")
+    repeated = await service.handle_callback(identity, "ob:v1:consent")
+    resumed_introduction = await service.start(identity)
+    assert introduction.text == messages.SETUP_INTRODUCTION
+    assert repeated.text == messages.SETUP_INTRODUCTION
+    assert resumed_introduction.text == messages.SETUP_INTRODUCTION
+    assert button_labels(introduction) == ["Let's build my profile", "Cancel"]
+
+    async with factory() as session:
+        confirmed = await OnboardingRepository(session).require_for_user(
+            user_id=lifecycle["user_id"]
+        )
+        assert confirmed.answers["consent"] is True
+        assert "primary_sport" not in confirmed.answers
+
+    forged_before_profile = await service.handle_callback(
+        identity,
+        "ob:v1:set:PRIMARY_SPORT:RUNNING",
+    )
+    assert forged_before_profile.text == messages.CALLBACK_EXPIRED
+
+    first_question = await service.handle_callback(identity, "ob:v1:profile")
+    resumed_question = await service.start(identity)
+    assert first_question.text == messages.step_prompt(OnboardingStep.PRIMARY_SPORT)
+    assert resumed_question.text == messages.step_prompt(OnboardingStep.PRIMARY_SPORT)
+
+    introduction_from_back = await service.handle_callback(
+        identity,
+        "ob:v1:back:PRIMARY_SPORT",
+    )
+    assert introduction_from_back.text == messages.SETUP_INTRODUCTION
+
+
+@pytest.mark.asyncio
+async def test_cancel_before_and_after_consent_preserves_the_right_data(
+    bot_service: tuple[
+        CoachBotApplicationService,
+        AccountQueryService,
+        FakeStravaPort,
+        AsyncEngine,
+    ],
+) -> None:
+    service, queries, _, engine = bot_service
+    before_identity = athlete(5111)
+    after_identity = athlete(5112)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    await service.start(before_identity)
+    await service.handle_callback(before_identity, "nav:v1:consent")
+    await service.handle_callback(before_identity, "ob:v1:cancel")
+    cancelled_before = await service.handle_callback(
+        before_identity,
+        "ob:v1:cancel:confirm",
+    )
+
+    await service.start(after_identity)
+    await service.handle_callback(after_identity, "ob:v1:consent")
+    await service.handle_callback(after_identity, "ob:v1:cancel")
+    cancelled_after = await service.handle_callback(
+        after_identity,
+        "ob:v1:cancel:confirm",
+    )
+    welcome_after_cancel = await service.handle_callback(
+        after_identity,
+        "nav:v1:welcome",
+    )
+
+    before_lifecycle = await queries.lifecycle(before_identity)
+    after_lifecycle = await queries.lifecycle(after_identity)
+    assert before_lifecycle is not None
+    assert after_lifecycle is not None
+    async with factory() as session:
+        before = await OnboardingRepository(session).require_for_user(
+            user_id=before_lifecycle["user_id"]
+        )
+        after = await OnboardingRepository(session).require_for_user(
+            user_id=after_lifecycle["user_id"]
+        )
+        assert "consent" not in before.answers
+        assert after.answers["consent"] is True
+
+    assert cancelled_before.text == messages.CANCELLED
+    assert cancelled_after.text == messages.CANCELLED
+    assert welcome_after_cancel.text == messages.WELCOME
+    assert button_labels(cancelled_after) == ["Restart onboarding", "Back"]
 
 
 @pytest.mark.asyncio

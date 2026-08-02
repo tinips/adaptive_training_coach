@@ -18,6 +18,11 @@ emergencies, and does not diagnose fitness or health conditions.
 
 - Multi-user Telegram onboarding with persisted progress after every confirmed
   step.
+- Telegram's native **Start** button opens a three-action welcome screen with
+  product-help and privacy/safety navigation before the explicit consent
+  boundary.
+- Explicit consent opens a durable setup introduction; the existing first
+  athlete-profile question appears only after **Let's build my profile**.
 - Button-first deterministic choices, conditional step skipping, safe back/edit
   behavior, cancellation, and account-deletion confirmation.
 - Structured free-text interpretation through one compiled LangGraph workflow
@@ -37,8 +42,10 @@ emergencies, and does not diagnose fitness or health conditions.
   synchronization, disconnect, rate-limit handling, and webhook ingestion.
 - Deterministic discipline baselines with visible confidence and data freshness.
 - FastAPI liveness, readiness, OAuth, callback, and webhook routes.
-- Telegram `/start`, `/help`, `/profile`, `/baseline`, `/add_workout`,
-  `/strava`, `/cancel`, and `/delete_me` commands.
+- Button-first visible Telegram navigation. Internal `/start`, `/help`,
+  `/profile`, `/baseline`, `/add_workout`, `/strava`, `/cancel`, and
+  `/delete_me` handlers remain as technical fallbacks, but rendered product
+  messages do not instruct users to type them.
 - Async SQLAlchemy persistence, PostgreSQL, Alembic, Docker Compose, tests, Ruff,
   and mypy.
 
@@ -802,19 +809,20 @@ docker compose logs migrate
 
 Then perform the live chat test:
 
-1. Send `/start`, complete onboarding to the baseline-source question, and
-   choose **Import training history**.
+1. Press Telegram's native **Start** button, choose **Let's go**, explicitly
+   confirm consent, select **Let's build my profile**, complete onboarding to
+   the baseline-source question, and choose **Import training history**.
 2. Send one TCX as a Telegram **Document**, verify the sport, date, duration,
    distance, and average-HR summary, then send a second file to verify
    sequential import.
 3. Select **Finish import**, confirm that the discipline summary appears, and
    complete the existing onboarding summary.
-4. Send `/add_workout`, upload a single new TCX, and verify that reliable HR
+4. Select **Add workout**, upload a single new TCX, and verify that reliable HR
    skips manual entry while missing HR offers the confirmed 30–250 bpm path.
 5. Exercise one RPE choice, one mobility choice, and one discomfort choice,
-   then use `/baseline` to confirm that a new deterministic baseline is
+   then use **View baseline** to confirm that a new deterministic baseline is
    available.
-6. With the profile complete and no `/add_workout` prompt active, send another
+6. With the profile complete and no **Add workout** prompt active, send another
    supported document directly and confirm content-based dispatch.
 7. Optionally upload an Apple Health export ZIP to verify historical backfill;
    use only a file whose privacy implications you have reviewed.
@@ -826,26 +834,30 @@ the document.
 
 ## Product journey
 
-1. Send `/start`.
-2. Accept the safety and privacy notice.
-3. Complete button-first onboarding.
-4. For an `Other`/`Write answer` path, review the structured interpretation and
+1. Press Telegram's native **Start** button to open the welcome screen.
+2. Choose **Let's go**, **How can this coach help me?**, or
+   **Privacy & safety**; all visible navigation uses inline buttons.
+3. Explicitly choose **I understand — continue** on the consent screen.
+4. Read the setup introduction and choose **Let's build my profile** to open
+   the existing primary-sport question.
+5. Complete button-first onboarding.
+6. For an `Other`/`Write answer` path, review the structured interpretation and
    choose `Correct` before it is staged.
-5. Choose training-history import, manual entry, decide later, or Strava when
+7. Choose training-history import, manual entry, decide later, or Strava when
    `STRAVA_ENABLED=true`.
-6. For file import, upload Apple Health ZIP and/or sequential TCX documents,
+8. For file import, upload Apple Health ZIP and/or sequential TCX documents,
    review each result, then select **Finish import**.
-7. Review the imported discipline summary and confirm the full profile.
-8. After onboarding, use `/add_workout`, **Add workout**, or direct supported
+9. Review the imported discipline summary and confirm the full profile.
+10. After onboarding, use **Add workout** or direct supported
    document delivery to update workout history.
-9. For a daily TCX, complete or skip the persisted HR, RPE, mobility, and
+11. For a daily TCX, complete or skip the persisted HR, RPE, mobility, and
    discomfort questions.
-10. If using Strava, open the opaque one-time connection link and authenticate
+12. If using Strava, open the opaque one-time connection link and authenticate
    directly on Strava. Never send Strava credentials in Telegram.
-11. After the callback, use **Open Telegram** on the success page. The bot sends
+13. After the callback, use **Open Telegram** on the success page. The bot sends
    the correct Telegram user an English confirmation after the initial import
    completes.
-12. Return to Telegram to view sync state, the imported-data summary, and
+14. Return to Telegram to view sync state, the imported-data summary, and
    discipline confidence.
 
 Progress is stored after each confirmed step and survives process restarts.

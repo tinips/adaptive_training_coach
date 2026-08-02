@@ -51,6 +51,49 @@ def test_training_day_keyboard_marks_current_selections() -> None:
     assert "ob:v1:multi:add:TRAINING_DAYS:TUESDAY" in callbacks
 
 
+def test_welcome_consent_and_setup_keyboards_match_visible_contract() -> None:
+    assert _button_pairs(keyboards.welcome_keyboard()) == [
+        ("Let's go", "nav:v1:consent"),
+        ("How can this coach help me?", "nav:v1:help"),
+        ("Privacy & safety", "nav:v1:privacy"),
+    ]
+    assert _button_pairs(keyboards.information_keyboard()) == [
+        ("Let's go", "nav:v1:consent"),
+        ("Back", "nav:v1:welcome"),
+    ]
+    assert _button_pairs(keyboards.consent_keyboard()) == [
+        ("I understand — continue", "ob:v1:consent"),
+        ("Back", "nav:v1:welcome"),
+        ("Cancel", "ob:v1:cancel"),
+    ]
+    assert _button_pairs(keyboards.setup_introduction_keyboard()) == [
+        ("Let's build my profile", "ob:v1:profile"),
+        ("Cancel", "ob:v1:cancel"),
+    ]
+
+
+def test_user_facing_message_constants_do_not_advertise_slash_commands() -> None:
+    command_tokens = {
+        "/start",
+        "/help",
+        "/profile",
+        "/baseline",
+        "/add_workout",
+        "/strava",
+        "/cancel",
+        "/delete_me",
+    }
+    rendered_constants = [
+        value
+        for name, value in vars(messages).items()
+        if name.isupper() and isinstance(value, str)
+    ]
+
+    assert all(
+        token not in text for text in rendered_constants for token in command_tokens
+    )
+
+
 def test_every_callback_value_fits_telegram_limit() -> None:
     samples = [
         keyboards.keyboard_for_step(step, {})
@@ -66,6 +109,11 @@ def test_every_callback_value_fits_telegram_limit() -> None:
     samples.extend(
         [
             keyboards.parsed_confirmation_keyboard(),
+            keyboards.welcome_keyboard(),
+            keyboards.information_keyboard(),
+            keyboards.consent_keyboard(),
+            keyboards.setup_introduction_keyboard(),
+            keyboards.cancelled_keyboard(),
             keyboards.summary_keyboard(),
             keyboards.resume_keyboard(),
             keyboards.cancel_confirmation_keyboard(),

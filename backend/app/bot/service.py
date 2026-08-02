@@ -384,6 +384,24 @@ class CoachBotApplicationService:
         identity: TelegramIdentity,
         callback_data: str,
     ) -> TelegramResponse:
+        if callback_data.startswith("nav:v1:"):
+            return await self._navigation(
+                identity,
+                callback_data.removeprefix("nav:v1:"),
+            )
+        if callback_data in {
+            "ob:v1:consent",
+            "ob:v1:set:CONSENT:CONTINUE",
+        }:
+            return await self._render_onboarding(
+                identity,
+                await self._onboarding.confirm_consent(identity),
+            )
+        if callback_data == "ob:v1:profile":
+            return await self._render_onboarding(
+                identity,
+                await self._onboarding.start_profile(identity),
+            )
         if callback_data == "ob:v1:import:finish":
             if self._apple_health is None:
                 raise OnboardingApplicationError("training_file_import_disabled")
@@ -557,6 +575,36 @@ class CoachBotApplicationService:
                 identity,
                 callback_data.removeprefix("menu:v1:"),
             )
+        raise OnboardingApplicationError("invalid_action")
+
+    async def _navigation(
+        self,
+        identity: TelegramIdentity,
+        screen: str,
+    ) -> TelegramResponse:
+        snapshot = await self._onboarding.snapshot(identity)
+        if screen == "welcome":
+            return self._welcome_response()
+        if screen == "help":
+            return TelegramResponse(
+                messages.COACH_HELP,
+                keyboards.information_keyboard(),
+            )
+        if screen == "privacy":
+            return TelegramResponse(
+                messages.PRIVACY_SAFETY,
+                keyboards.information_keyboard(),
+            )
+        if screen == "consent":
+            if (
+                snapshot.kind == "step"
+                and snapshot.current_step is OnboardingStep.CONSENT
+            ):
+                return TelegramResponse(
+                    messages.CONSENT,
+                    keyboards.consent_keyboard(),
+                )
+            return await self._render_onboarding(identity, snapshot)
         raise OnboardingApplicationError("invalid_action")
 
     async def _confirmed_delete(
@@ -889,7 +937,14 @@ class CoachBotApplicationService:
         identity: TelegramIdentity,
         result: OnboardingServiceResult,
     ) -> TelegramResponse:
-        prefix = f"{messages.WELCOME_NEW}\n\n" if result.created else ""
+        if result.created:
+            return self._welcome_response()
+        prefix = ""
+        if result.kind == "setup_introduction":
+            return TelegramResponse(
+                messages.SETUP_INTRODUCTION,
+                keyboards.setup_introduction_keyboard(),
+            )
         if result.kind == "step":
             if (
                 result.current_step is OnboardingStep.FILE_IMPORT_COMPLETE
@@ -998,7 +1053,7 @@ class CoachBotApplicationService:
         if result.kind == "cancelled":
             return TelegramResponse(
                 messages.CANCELLED,
-                keyboards.resume_keyboard(cancelled=True),
+                keyboards.cancelled_keyboard(),
             )
         if result.kind == "completed":
             return await self._home_response(
@@ -1007,6 +1062,13 @@ class CoachBotApplicationService:
                 prefix=messages.ONBOARDING_COMPLETE,
             )
         return TelegramResponse(messages.GENERIC_ERROR)
+
+    @staticmethod
+    def _welcome_response() -> TelegramResponse:
+        return TelegramResponse(
+            messages.WELCOME,
+            keyboards.welcome_keyboard(),
+        )
 
     async def _home_response(
         self,

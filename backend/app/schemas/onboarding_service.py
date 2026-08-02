@@ -23,6 +23,7 @@ OnboardingResultKind = Literal[
     "fallback",
     "provider_error",
     "rate_limited",
+    "setup_introduction",
     "cancelled",
     "completed",
 ]

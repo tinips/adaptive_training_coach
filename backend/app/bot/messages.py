@@ -14,12 +14,61 @@ GENERIC_ERROR = (
 )
 NOT_FOUND = "I could not find that saved item for your account."
 CALLBACK_EXPIRED = (
-    "That button is no longer valid. Use /start to return to your current step."
+    "That button is no longer valid. Use the visible buttons to continue from "
+    "your current screen."
 )
-WELCOME_NEW = (
-    "Welcome to Adaptive Endurance Coach. I will help you create an athlete "
-    "profile and establish a data-based baseline. This version does not generate "
-    "training plans."
+WELCOME = (
+    "Welcome to Adaptive Endurance Coach 👋\n\n"
+    "I\u2019m glad you\u2019re here.\n\n"
+    "Every meaningful goal starts with understanding where you are today.\n\n"
+    "I\u2019m here to help you train with more clarity, make better decisions and "
+    "build "
+    "a realistic path towards your fitness goals — one session at a time.\n\n"
+    "We\u2019ll begin by learning about you, your experience, your availability and "
+    "your recent training. From there, we\u2019ll establish your current fitness "
+    "baseline and "
+    "build the foundation for everything that comes next.\n\n"
+    "Let\u2019s get started."
+)
+WELCOME_NEW = WELCOME
+COACH_HELP = (
+    "How can Adaptive Endurance Coach help me?\n\n"
+    "The coach starts by understanding you as an athlete — not just your latest "
+    "workout.\n\n"
+    "It considers:\n\n"
+    "• Your fitness and race goals\n"
+    "• Your experience in each sport\n"
+    "• Your weekly availability\n"
+    "• Your training environment and equipment\n"
+    "• Your injury history and physical limitations\n"
+    "• Your recent training data\n"
+    "• How your sessions feel, not only the numbers\n\n"
+    "Using this information, the coach builds your athlete profile and establishes "
+    "your current fitness baseline.\n\n"
+    "Your baseline is a structured picture of where you are today. It includes your "
+    "recent training volume, consistency, experience, current capabilities and any "
+    "limitations that should influence your training.\n\n"
+    "You can strengthen this baseline by:\n\n"
+    "• Connecting Strava\n"
+    "• Importing Apple Health data\n"
+    "• Uploading TCX workout files\n"
+    "• Recording workouts manually\n"
+    "• Adding effort, fatigue and discomfort feedback\n\n"
+    "This foundation will help the coach understand your progress and support better "
+    "training decisions.\n\n"
+    "The current version focuses on building your profile, importing your training "
+    "history and establishing a reliable baseline. Adaptive planning, calendars and "
+    "progress dashboards will be introduced in future versions."
+)
+PRIVACY_SAFETY = (
+    "Privacy & safety\n\n"
+    "Adaptive Endurance Coach is a training support tool. It does not provide "
+    "medical advice and must not be used for emergencies.\n\n"
+    "You choose what information to provide. This may include injury history or "
+    "other health-related training limitations.\n\n"
+    "Training-data connections and imports, including Strava, are optional.\n\n"
+    "You can cancel the setup at any time, update your information later or request "
+    "deletion of your stored data."
 )
 WELCOME_BACK = "Welcome back. I found your saved progress."
 ONBOARDING_COMPLETE = (
@@ -45,7 +94,10 @@ CANCEL_CONFIRM = (
     "Cancel the current onboarding? Your staged answers will remain unavailable "
     "until you restart onboarding."
 )
-CANCELLED = "Onboarding was cancelled. Use /start whenever you want to restart."
+CANCELLED = (
+    "Onboarding was cancelled. Your saved information has not been deleted. "
+    "Use the buttons below when you are ready."
+)
 DELETE_CONFIRM = (
     "Delete your account and personal application data? This cannot be undone. "
     "Your Strava authorization will be revoked when possible."
@@ -60,14 +112,8 @@ DELETE_FAILED = (
 )
 ACCOUNT_KEPT = "Your account was not deleted."
 HELP = (
-    "Commands:\n"
-    "/start — start or resume\n"
-    "/profile — view your athlete profile\n"
-    "/baseline — view your current data baseline\n"
-    "/add_workout — import a workout or training history\n"
-    "/strava — view or manage Strava\n"
-    "/cancel — cancel active onboarding\n"
-    "/delete_me — request account deletion\n\n"
+    "Adaptive Endurance Coach uses visible buttons to guide setup, show your saved "
+    "profile and baseline, import workouts and manage optional Strava access.\n\n"
     "This product is not medical advice and must not be used for emergencies. "
     "No training plan is generated in this version."
 )
@@ -88,8 +134,8 @@ BASELINE_CALIBRATION_PENDING = (
     "No baseline values have been fabricated."
 )
 BASELINE_SELECTION_UNAVAILABLE = (
-    "That baseline option is no longer available from this screen. Use /start to "
-    "open your current account menu."
+    "That baseline option is no longer available from this screen. Return to your "
+    "current account menu to continue."
 )
 STRAVA_CONNECT_EXPLANATION = (
     "Connecting Strava is optional. Never enter your Strava username or password "
@@ -104,14 +150,14 @@ STRAVA_CONNECTION_UNHEALTHY = (
     "or disconnect to revoke access and erase the local tokens."
 )
 STRAVA_SYNC_STARTED = (
-    "Strava synchronization started. Use /strava to check its current status."
+    "Strava synchronization started. Use the sync-status button to check progress."
 )
 STRAVA_SYNC_COMPLETE = (
     "Strava synchronization completed and your baseline was recalculated."
 )
 STRAVA_INITIAL_IMPORT_COMPLETE = (
     "Strava is connected and your initial activity import is complete. "
-    "Use /baseline to review your data baseline."
+    "Use the baseline button to review your data baseline."
 )
 STRAVA_SYNC_PARTIAL = (
     "Strava synchronization stopped before every activity page was processed. "
@@ -225,14 +271,27 @@ HEIGHT_REQUEST = "Enter your height in centimetres (120-230), or choose Skip."
 WEIGHT_REQUEST = "Enter your weight in kilograms (35-250), or choose Skip."
 
 CONSENT = (
-    "Before we begin:\n\n"
-    "• This product is not medical advice and must not be used for emergencies.\n"
-    "• Injury or health-limitation information you choose to provide is stored.\n"
-    "• Strava data is optional.\n"
-    "• This version establishes a profile and baseline; it does not generate a "
-    "training plan.\n"
-    "• You can cancel onboarding or delete your data.\n\n"
-    "Continue only if you understand and accept this."
+    "Before we begin\n\n"
+    "To personalise your athlete profile, the coach will store the information you "
+    "provide during setup. This may include training history, injuries or physical "
+    "limitations.\n\n"
+    "Please confirm that:\n\n"
+    "• You understand that this is not medical advice.\n"
+    "• You agree to the storage of the information you choose to provide.\n"
+    "• You understand that connected services and training-data imports are "
+    "optional.\n"
+    "• You can cancel onboarding or request deletion of your stored data.\n\n"
+    "Do you want to continue?"
+)
+SETUP_INTRODUCTION = (
+    "You\u2019re in — I\u2019m glad you\u2019ve decided to take the first step.\n\n"
+    "Every athlete starts from a different place. Before I can help you move towards "
+    "your goal, I need to understand where you are today, what you are training for "
+    "and what your real training context looks like.\n\n"
+    "We\u2019ll build your athlete profile together, one step at a time.\n\n"
+    "It should only take a few minutes, and you\u2019ll be able to update your answers "
+    "later.\n\n"
+    "Ready to build your athlete profile?"
 )
 
 STEP_PROMPTS: dict[OnboardingStep, str] = {
@@ -401,10 +460,10 @@ VALIDATION_ERRORS: dict[str, str] = {
     "no_valid_imported_activities": FILE_IMPORT_NO_ACTIVITIES,
     "workout_feedback_disabled": "Workout feedback is currently unavailable.",
     "workout_flow_not_active": (
-        "There is no active workout flow. Use /add_workout to begin."
+        "There is no active workout flow. Use the Add workout button to begin."
     ),
     "workout_flow_not_found": (
-        "There is no active workout flow. Use /add_workout to begin."
+        "There is no active workout flow. Use the Add workout button to begin."
     ),
     "workout_flow_already_active": (
         "Finish or cancel the current workout questions before adding another."
