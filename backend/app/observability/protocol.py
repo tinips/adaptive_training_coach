@@ -9,9 +9,13 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.domain.enums import OnboardingStep
-from app.schemas.onboarding import OnboardingTextOutcome
 
 ProviderMode = Literal["mock", "live"]
+AIWorkflowOutcome = Literal[
+    "confirmation_required",
+    "fallback_required",
+    "provider_error",
+]
 
 
 class AIWorkflowRunMetadata(BaseModel):
@@ -37,7 +41,7 @@ class AIWorkflowRunResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     metadata: AIWorkflowRunMetadata
-    outcome: OnboardingTextOutcome
+    outcome: AIWorkflowOutcome
     completed_at: datetime
     latency_ms: int = Field(ge=0)
     prompt_tokens: int | None = Field(default=None, ge=0)

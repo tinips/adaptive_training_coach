@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     llm_model: str = "deepseek-v4-flash"
     llm_min_confidence: float = Field(default=0.75, ge=0, le=1)
     llm_other_requests_per_hour: int = Field(default=10, ge=1, le=100)
-    ai_workflow_name: str = "onboarding_text_parser"
+    ai_workflow_name: str = "onboarding_goal_extractor"
 
     strava_enabled: bool = False
     strava_client_id: str | None = None

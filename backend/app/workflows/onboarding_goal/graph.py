@@ -1,4 +1,4 @@
-"""Construction and observed invocation of the stateless LangGraph topology."""
+"""Construction and invocation of the focused stateless goal graph."""
 
 from __future__ import annotations
 
@@ -15,9 +15,9 @@ from langgraph.graph.state import CompiledStateGraph
 
 from app.config import Settings
 from app.domain.enums import OnboardingStep
-from app.integrations.llm.factory import create_onboarding_text_model
+from app.integrations.llm.factory import create_goal_extraction_model
 from app.integrations.llm.mock import FakeLLMScenario
-from app.integrations.llm.models import StructuredOnboardingModel
+from app.integrations.llm.models import GoalExtractionOutput, StructuredOnboardingModel
 from app.observability.callbacks import build_langchain_run_config
 from app.observability.noop import NoOpAIWorkflowObserver
 from app.observability.protocol import (
@@ -26,83 +26,43 @@ from app.observability.protocol import (
     AIWorkflowRunMetadata,
     AIWorkflowRunResult,
 )
-from app.schemas.onboarding import (
-    OnboardingTextWorkflowResult,
-)
-from app.workflows.onboarding_text.nodes import (
-    clarification_required,
-    confirmation_required,
-    fallback_required,
-    make_parse_with_model_node,
-    make_route_result_node,
-    provider_error,
-    validate_structured_output,
-)
-from app.workflows.onboarding_text.routing import select_outcome
-from app.workflows.onboarding_text.state import OnboardingTextGraphState
+from app.schemas.onboarding_goal import GoalExtractionWorkflowResult
+from app.workflows.onboarding_goal.nodes import make_extract_goal_node
+from app.workflows.onboarding_goal.state import GoalExtractionGraphState
 
-CompiledOnboardingTextGraph = CompiledStateGraph[
-    OnboardingTextGraphState,
+CompiledGoalExtractionGraph = CompiledStateGraph[
+    GoalExtractionGraphState,
     None,
-    OnboardingTextGraphState,
-    OnboardingTextGraphState,
+    GoalExtractionGraphState,
+    GoalExtractionGraphState,
 ]
 
 
-def build_onboarding_text_graph(
+def build_goal_extraction_graph(
     *,
     model: StructuredOnboardingModel,
-    min_confidence: float,
-) -> CompiledOnboardingTextGraph:
-    """Compile the one provider-independent topology without a checkpointer."""
+) -> CompiledGoalExtractionGraph:
+    """Compile one extraction node without a LangGraph checkpointer."""
 
     builder: StateGraph[
-        OnboardingTextGraphState,
+        GoalExtractionGraphState,
         None,
-        OnboardingTextGraphState,
-        OnboardingTextGraphState,
-    ] = StateGraph(OnboardingTextGraphState)
-    builder.add_node("parse_with_model", make_parse_with_model_node(model))
-    builder.add_node("validate_structured_output", validate_structured_output)
-    builder.add_node(
-        "route_result",
-        make_route_result_node(min_confidence=min_confidence),
-    )
-    builder.add_node("confirmation_required", confirmation_required)
-    builder.add_node("clarification_required", clarification_required)
-    builder.add_node("fallback_required", fallback_required)
-    builder.add_node("provider_error", provider_error)
-
-    builder.add_edge(START, "parse_with_model")
-    builder.add_edge("parse_with_model", "validate_structured_output")
-    builder.add_edge("validate_structured_output", "route_result")
-    builder.add_conditional_edges(
-        "route_result",
-        select_outcome,
-        {
-            "confirmation_required": "confirmation_required",
-            "clarification_required": "clarification_required",
-            "fallback_required": "fallback_required",
-            "provider_error": "provider_error",
-        },
-    )
-    for terminal in (
-        "confirmation_required",
-        "clarification_required",
-        "fallback_required",
-        "provider_error",
-    ):
-        builder.add_edge(terminal, END)
-    return builder.compile(name="onboarding_text")
+        GoalExtractionGraphState,
+        GoalExtractionGraphState,
+    ] = StateGraph(GoalExtractionGraphState)
+    builder.add_node("extract_goal", make_extract_goal_node(model))
+    builder.add_edge(START, "extract_goal")
+    builder.add_edge("extract_goal", END)
+    return builder.compile(name="onboarding_goal_extraction")
 
 
-class LangGraphOnboardingTextParser:
-    """Application adapter around one already-compiled graph."""
+class LangGraphGoalExtractor:
+    """Application adapter around the already-compiled goal graph."""
 
     def __init__(
         self,
         *,
-        graph: CompiledOnboardingTextGraph,
+        graph: CompiledGoalExtractionGraph,
         model: StructuredOnboardingModel,
         workflow_name: str,
         observer: AIWorkflowObserver | None = None,
@@ -117,37 +77,31 @@ class LangGraphOnboardingTextParser:
         self._timeout_seconds = timeout_seconds
 
     @property
-    def graph(self) -> CompiledOnboardingTextGraph:
-        """Expose the compiled instance for dependency injection and tests."""
-
+    def graph(self) -> CompiledGoalExtractionGraph:
         return self._graph
 
-    async def parse(
+    async def extract(
         self,
         *,
         user_id: UUID,
-        step: OnboardingStep,
         user_text: str,
-        confirmed_context: dict[str, object],
-    ) -> OnboardingTextWorkflowResult:
-        """Invoke one stateless graph run and emit only safe observations."""
-
+        existing_draft: GoalExtractionOutput | None,
+    ) -> GoalExtractionWorkflowResult:
         started_at = datetime.now(UTC)
         started_clock = monotonic()
         metadata = AIWorkflowRunMetadata(
             workflow_name=self._workflow_name,
             run_id=uuid4(),
-            onboarding_step=step,
+            onboarding_step=OnboardingStep.GOAL_INTAKE,
             provider_mode=self._model.provider_mode,
             model_name=self._model.model_name,
             started_at=started_at,
         )
         await self._observe_started(metadata)
-        initial_state: OnboardingTextGraphState = {
+        initial_state: GoalExtractionGraphState = {
             "user_id": user_id,
-            "onboarding_step": step,
             "user_text": user_text,
-            "confirmed_context": dict(confirmed_context),
+            "existing_draft": existing_draft,
         }
         try:
             raw_state = await asyncio.wait_for(
@@ -160,18 +114,21 @@ class LangGraphOnboardingTextParser:
                 ),
                 timeout=self._timeout_seconds,
             )
-            state = cast(OnboardingTextGraphState, raw_state)
-            result = _workflow_result_from_state(state)
+            state = cast(GoalExtractionGraphState, raw_state)
+            result = GoalExtractionWorkflowResult(
+                outcome=state.get("outcome", "fallback_required"),
+                goal_draft=state.get("goal_draft"),
+                error_code=state.get("error_code"),
+                prompt_tokens=state.get("prompt_tokens"),
+                completion_tokens=state.get("completion_tokens"),
+            )
         except TimeoutError:
-            result = OnboardingTextWorkflowResult(
+            result = GoalExtractionWorkflowResult(
                 outcome="provider_error",
                 error_code="workflow_timeout",
             )
         except Exception:
-            # The graph normally maps provider errors itself. This final guard
-            # protects callers from orchestration/runtime failures without
-            # exposing exception details.
-            result = OnboardingTextWorkflowResult(
+            result = GoalExtractionWorkflowResult(
                 outcome="provider_error",
                 error_code="workflow_failure",
             )
@@ -191,7 +148,11 @@ class LangGraphOnboardingTextParser:
             await self._observe_completed(
                 AIWorkflowRunResult(
                     metadata=metadata,
-                    outcome=result.outcome,
+                    outcome=(
+                        "confirmation_required"
+                        if result.outcome == "extracted"
+                        else result.outcome
+                    ),
                     completed_at=completed_at,
                     latency_ms=latency_ms,
                     prompt_tokens=result.prompt_tokens,
@@ -220,39 +181,23 @@ class LangGraphOnboardingTextParser:
             return
 
 
-def create_onboarding_text_parser(
+def create_goal_extractor(
     settings: Settings,
     *,
     observer: AIWorkflowObserver | None = None,
     callbacks: Sequence[BaseCallbackHandler] = (),
     fake_scenario: FakeLLMScenario = FakeLLMScenario.AUTO,
-) -> LangGraphOnboardingTextParser:
-    """Construct the model once and compile its stateless graph once."""
+) -> LangGraphGoalExtractor:
+    """Create the existing model adapter and compile the focused graph once."""
 
-    model = create_onboarding_text_model(
+    model = create_goal_extraction_model(
         settings,
         fake_scenario=fake_scenario,
     )
-    graph = build_onboarding_text_graph(
-        model=model,
-        min_confidence=settings.llm_min_confidence,
-    )
-    return LangGraphOnboardingTextParser(
-        graph=graph,
+    return LangGraphGoalExtractor(
+        graph=build_goal_extraction_graph(model=model),
         model=model,
         workflow_name=settings.ai_workflow_name,
         observer=observer,
         callbacks=callbacks,
-    )
-
-
-def _workflow_result_from_state(
-    state: OnboardingTextGraphState,
-) -> OnboardingTextWorkflowResult:
-    return OnboardingTextWorkflowResult(
-        outcome=state.get("outcome", "fallback_required"),
-        parse_result=state.get("parse_result"),
-        error_code=state.get("error_code"),
-        prompt_tokens=state.get("prompt_tokens"),
-        completion_tokens=state.get("completion_tokens"),
     )

@@ -62,8 +62,19 @@ def test_initial_migration_upgrade_and_downgrade(
             row[1]
             for row in connection.execute("PRAGMA table_info('activity_source_links')")
         }
+        training_goal_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info('training_goals')")
+        }
+        onboarding_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info('onboarding_sessions')")
+        }
+        feedback_flow_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info('workout_flow_sessions')")
+        }
 
-    assert revision == ("0006_exact_workout_identity",)
+    assert revision == ("0008_remove_legacy_onboarding",)
     assert len(tables - {"alembic_version"}) == 28
     assert {
         "activity_feedback",
@@ -86,12 +97,27 @@ def test_initial_migration_upgrade_and_downgrade(
     assert "WHERE status IN" in active_apple_index[0]
     assert import_hash_index is not None
     assert "temporary_path" in import_job_columns
+    assert {"context", "onboarding_session_id"}.isdisjoint(import_job_columns)
+    assert {
+        "pending_free_text_step",
+        "pending_parsed_value",
+        "return_to_summary",
+        "completed_at",
+    }.isdisjoint(onboarding_columns)
+    assert "return_to_onboarding" not in feedback_flow_columns
     assert {
         "heart_rate_source",
         "heart_rate_quality",
         "heart_rate_reliable",
         "heart_rate_sample_count",
     }.isdisjoint(source_link_columns)
+    assert {
+        "main_goal",
+        "target_outcome",
+        "secondary_priority",
+        "original_description",
+        "status",
+    }.issubset(training_goal_columns)
 
     command.downgrade(configuration, "0004_discipline_workout_models")
     with sqlite3.connect(database_path) as connection:
@@ -144,7 +170,7 @@ def test_initial_migration_upgrade_and_downgrade(
                 "SELECT name FROM sqlite_master WHERE type = 'table'",
             )
         }
-    assert reupgraded_revision == ("0006_exact_workout_identity",)
+    assert reupgraded_revision == ("0008_remove_legacy_onboarding",)
     assert "heart_rate_observations" not in reupgraded_tables
 
     command.downgrade(configuration, "base")
@@ -156,6 +182,122 @@ def test_initial_migration_upgrade_and_downgrade(
             )
         }
     assert remaining == {"alembic_version"}
+    get_settings.cache_clear()
+
+
+def test_legacy_sessions_normalize_to_retained_checkpoints(
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    database_path = tmp_path / "legacy-session-normalization.db"
+    database_url = f"sqlite+aiosqlite:///{database_path.as_posix()}"
+    monkeypatch.setenv("DATABASE_URL", database_url)  # type: ignore[attr-defined]
+    monkeypatch.setenv("TELEGRAM_BOT_USERNAME", "")  # type: ignore[attr-defined]
+    get_settings.cache_clear()
+    configuration = Config(str(BACKEND_ROOT / "alembic.ini"))
+    command.upgrade(configuration, "0007_conversational_goal")
+
+    user_ids = [f"{index:032x}" for index in range(1, 6)]
+    session_ids = [f"{index:032x}" for index in range(101, 106)]
+    now = "2026-08-03 08:00:00+00:00"
+    draft = {
+        "main_goal": "Complete a marathon",
+        "event_date": None,
+        "target_outcome": "Finish safely",
+        "secondary_priority": None,
+        "missing_fields": [],
+        "ambiguous_fields": [],
+        "message_status": "COMPLETE",
+    }
+    staged_answers = {
+        "consent": True,
+        "raw_goal_text": "I want to complete a marathon safely.",
+        "goal_messages": ["I want to complete a marathon safely."],
+        "goal_draft": draft,
+    }
+    rows = [
+        ("ACTIVE", "AGE", {}),
+        (
+            "ACTIVE",
+            "PRIMARY_SPORT",
+            {"consent": True, "_setup_introduction_pending": True},
+        ),
+        ("ACTIVE", "GOAL_TYPE", staged_answers),
+        ("COMPLETED", "SUMMARY", {"consent": True, **staged_answers}),
+        ("CANCELLED", "GOAL_PRIORITY", staged_answers),
+    ]
+    with sqlite3.connect(database_path) as connection:
+        for index, (status, step, answers) in enumerate(rows):
+            connection.execute(
+                "INSERT INTO users "
+                "(telegram_user_id, language_code, status, id, created_at, updated_at) "
+                "VALUES (?, 'en', 'ONBOARDING_IN_PROGRESS', ?, ?, ?)",
+                (8000 + index, user_ids[index], now, now),
+            )
+            connection.execute(
+                "INSERT INTO onboarding_sessions "
+                "(user_id, status, current_step, answers, return_to_summary, "
+                "id, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, 0, ?, ?, ?)",
+                (
+                    user_ids[index],
+                    status,
+                    step,
+                    json.dumps(answers),
+                    session_ids[index],
+                    now,
+                    now,
+                ),
+            )
+        connection.execute(
+            "INSERT INTO training_goals "
+            "(user_id, goal_type, goal_priority, main_goal, target_outcome, "
+            "original_description, id, created_at, updated_at) "
+            "VALUES (?, 'MARATHON', 'FINISH_SAFELY', 'Complete a marathon', "
+            "'Finish safely', 'I want to complete a marathon safely.', ?, ?, ?)",
+            (user_ids[3], f"{201:032x}", now, now),
+        )
+        connection.execute(
+            "INSERT INTO llm_usage "
+            "(user_id, onboarding_step, provider_mode, status, created_at, id) "
+            "VALUES (?, 'GOAL_TYPE', 'mock', 'SUCCEEDED', ?, ?)",
+            (user_ids[2], now, f"{301:032x}"),
+        )
+        connection.commit()
+
+    command.upgrade(configuration, "head")
+
+    with sqlite3.connect(database_path) as connection:
+        normalized = connection.execute(
+            "SELECT status, current_step, answers FROM onboarding_sessions "
+            "ORDER BY user_id"
+        ).fetchall()
+        llm_step = connection.execute(
+            "SELECT onboarding_step FROM llm_usage"
+        ).fetchone()
+        canonical = connection.execute(
+            "SELECT main_goal, target_outcome, original_description "
+            "FROM training_goals WHERE user_id = ?",
+            (user_ids[3],),
+        ).fetchone()
+
+    decoded = [
+        (status, step, json.loads(answers)) for status, step, answers in normalized
+    ]
+    assert decoded[0] == ("ACTIVE", "CONSENT", {})
+    assert decoded[1] == ("ACTIVE", "SETUP_INTRODUCTION", {"consent": True})
+    assert decoded[2][0:2] == ("ACTIVE", "GOAL_INTAKE")
+    assert decoded[2][2]["raw_goal_text"] == staged_answers["raw_goal_text"]
+    assert decoded[2][2]["_goal_intake_phase"] == "CONFIRMING"
+    assert decoded[3][0:2] == ("ACTIVE", "GOAL_CONFIRMED")
+    assert "goal_draft" not in decoded[3][2]
+    assert decoded[4][0:2] == ("CANCELLED", "GOAL_INTAKE")
+    assert llm_step == ("GOAL_INTAKE",)
+    assert canonical == (
+        "Complete a marathon",
+        "Finish safely",
+        "I want to complete a marathon safely.",
+    )
     get_settings.cache_clear()
 
 
@@ -271,24 +413,19 @@ def test_unified_import_migration_preserves_and_backfills_0002_data(
             "SELECT COUNT(*) FROM running_workout_details",
         ).fetchone()
         import_job = connection.execute(
-            "SELECT file_format, context, onboarding_session_id, temporary_path "
+            "SELECT file_format, temporary_path "
             "FROM apple_health_import_jobs WHERE id = ?",
             (import_job_id,),
         ).fetchone()
 
-    assert revision == ("0006_exact_workout_identity",)
+    assert revision == ("0008_remove_legacy_onboarding",)
     assert apple_sources == [
         (exact_apple_id, "APPLE_HEALTH", "apple-exact"),
         (summary_apple_id, "APPLE_HEALTH", "apple-summary"),
     ]
     assert source_link == (activity_id, "STRAVA", "strava-42")
     assert running_details == (3,)
-    assert import_job == (
-        "APPLE_HEALTH_ZIP",
-        "ONBOARDING",
-        onboarding_id,
-        None,
-    )
+    assert import_job == ("APPLE_HEALTH_ZIP", None)
     get_settings.cache_clear()
 
 
@@ -684,7 +821,7 @@ def test_discipline_workout_migration_preserves_populated_0003_data(
             "PRAGMA foreign_key_check",
         ).fetchall()
 
-    assert revision_at_head == ("0006_exact_workout_identity",)
+    assert revision_at_head == ("0008_remove_legacy_onboarding",)
     assert "heart_rate_observations" not in head_tables
     assert len(workout_rows) == len(activities)
     assert {row[0] for row in workout_rows} == {row["id"] for row in activities}

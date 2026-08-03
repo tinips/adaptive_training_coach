@@ -17,15 +17,13 @@ from app.domain.enums import (
     OnboardingStep,
     SyncStatus,
     TrainingFileFormat,
-    TrainingImportContext,
     UserStatus,
     WorkoutFlowStep,
 )
 from app.schemas.common import TelegramIdentity
-from app.schemas.onboarding import SummaryEditSection
 from app.schemas.onboarding_service import OnboardingServiceResult
+from app.schemas.training_import import TelegramDocumentUpload
 from app.services.accounts import AccountQueryService, AccountService
-from app.services.apple_health import TelegramDocumentUpload
 from app.services.onboarding import OnboardingApplicationError, OnboardingService
 from app.services.profiles import (
     BaselineSelectionUnavailableError,
@@ -84,22 +82,6 @@ class TrainingImportBotPort(Protocol):
 
     async def cancel_active(self, *, user_id: UUID) -> None: ...
 
-    async def finish_onboarding_import(
-        self,
-        *,
-        identity: TelegramIdentity,
-    ) -> TrainingFileImportOutcome: ...
-
-    async def latest_onboarding_activity(
-        self,
-        *,
-        user_id: UUID,
-    ) -> ActivityIdentity | None: ...
-
-
-class ActivityIdentity(Protocol):
-    id: UUID
-
 
 class CoachBotApplicationService:
     """Render application use cases without putting business logic in handlers."""
@@ -133,17 +115,6 @@ class CoachBotApplicationService:
 
     async def start(self, identity: TelegramIdentity) -> TelegramResponse:
         result = await self._onboarding.start(identity)
-        if (
-            result.kind == "completed"
-            and self._workout_feedback_enabled
-            and self._workout_feedback is not None
-        ):
-            feedback = await self._workout_feedback.snapshot(identity)
-            if feedback is not None and feedback.state not in {
-                WorkoutFlowStep.COMPLETE,
-                WorkoutFlowStep.CANCELLED,
-            }:
-                return await self._render_workout_feedback(identity, feedback)
         return await self._render_onboarding(identity, result)
 
     async def handle_text(
@@ -218,11 +189,6 @@ class CoachBotApplicationService:
                         else "training_file_import_failed"
                     )
                 )
-                if outcome.context is TrainingImportContext.ONBOARDING:
-                    return TelegramResponse(
-                        error_text,
-                        keyboards.training_file_import_keyboard(),
-                    )
                 if (
                     feedback is not None
                     and feedback.state is WorkoutFlowStep.WAITING_FOR_FILE
@@ -246,14 +212,7 @@ class CoachBotApplicationService:
         try:
             response = await self._route_callback(identity, callback_data)
         except OnboardingApplicationError as exc:
-            response = TelegramResponse(
-                messages.validation_error(exc.code),
-                (
-                    keyboards.training_file_import_keyboard()
-                    if exc.code == "no_valid_imported_activities"
-                    else None
-                ),
-            )
+            response = TelegramResponse(messages.validation_error(exc.code))
         except WorkoutFeedbackError as exc:
             response = TelegramResponse(messages.validation_error(exc.code))
         except IncompleteProfileError:
@@ -363,8 +322,6 @@ class CoachBotApplicationService:
                 messages.CANCELLED,
                 keyboards.resume_keyboard(cancelled=True),
             )
-        if snapshot.kind == "completed":
-            return TelegramResponse(messages.PROFILE_ALREADY_COMPLETE)
         return TelegramResponse(
             messages.CANCEL_CONFIRM,
             keyboards.cancel_confirmation_keyboard(),
@@ -389,10 +346,7 @@ class CoachBotApplicationService:
                 identity,
                 callback_data.removeprefix("nav:v1:"),
             )
-        if callback_data in {
-            "ob:v1:consent",
-            "ob:v1:set:CONSENT:CONTINUE",
-        }:
+        if callback_data == "ob:v1:consent":
             return await self._render_onboarding(
                 identity,
                 await self._onboarding.confirm_consent(identity),
@@ -402,120 +356,33 @@ class CoachBotApplicationService:
                 identity,
                 await self._onboarding.start_profile(identity),
             )
-        if callback_data == "ob:v1:import:finish":
-            if self._apple_health is None:
-                raise OnboardingApplicationError("training_file_import_disabled")
-            outcome = await self._apple_health.finish_onboarding_import(
-                identity=identity
+        if callback_data == "ob:v1:goal:confirm":
+            return await self._render_onboarding(
+                identity,
+                await self._onboarding.confirm_goal(identity),
             )
-            return TelegramResponse(
-                messages.training_import_complete(
-                    activities_imported=outcome.activities_imported,
-                    activities_updated=outcome.activities_updated,
-                    activities_skipped=outcome.activities_skipped,
-                    discipline_counts=outcome.discipline_counts or {},
-                    baseline_limited=outcome.baseline_limited,
+        if callback_data == "ob:v1:goal:add":
+            return await self._render_onboarding(
+                identity,
+                await self._onboarding.add_to_goal(identity),
+            )
+        if callback_data == "ob:v1:goal:restart":
+            return await self._render_onboarding(
+                identity,
+                await self._onboarding.restart_goal(identity),
+            )
+        if callback_data.startswith("ob:v1:goal:choice:"):
+            return await self._render_onboarding(
+                identity,
+                await self._onboarding.choose_goal_clarification(
+                    identity,
+                    callback_data.removeprefix("ob:v1:goal:choice:"),
                 ),
-                keyboards.training_file_complete_keyboard(
-                    can_enrich_latest=outcome.activity_id is not None,
-                ),
             )
-        if callback_data == "ob:v1:import:enrich_latest":
-            if self._apple_health is None or self._workout_feedback is None:
-                raise OnboardingApplicationError("workout_feedback_disabled")
-            snapshot = await self._onboarding.snapshot(identity)
-            activity = await self._apple_health.latest_onboarding_activity(
-                user_id=snapshot.user_id
-            )
-            if activity is None:
-                raise OnboardingApplicationError("no_valid_imported_activities")
-            feedback = await self._workout_feedback.start_for_activity(
-                user_id=snapshot.user_id,
-                activity_id=activity.id,
-                return_to_onboarding=True,
-            )
-            return await self._render_workout_feedback(identity, feedback)
         if callback_data.startswith("wf:v1:"):
             return await self._workout_feedback_callback(
                 identity,
                 callback_data.removeprefix("wf:v1:"),
-            )
-        if callback_data.startswith("ob:v1:apple:"):
-            action = callback_data.removeprefix("ob:v1:apple:")
-            if action in {"cancel", "choose_other", "back"}:
-                snapshot = await self._onboarding.snapshot(identity)
-                if self._apple_health is not None:
-                    await self._apple_health.cancel_active(user_id=snapshot.user_id)
-            return await self._render_onboarding(
-                identity,
-                await self._onboarding.apple_action(identity, action),
-            )
-        if callback_data.startswith("ob:v1:set:"):
-            payload = callback_data.removeprefix("ob:v1:set:")
-            step_value, value = self._split_callback(payload, parts=2)
-            step = self._onboarding_step(step_value)
-            return await self._render_onboarding(
-                identity,
-                await self._onboarding.choose(
-                    identity,
-                    value,
-                    expected_step=step,
-                ),
-            )
-        if callback_data.startswith("ob:v1:multi:"):
-            payload = callback_data.removeprefix("ob:v1:multi:")
-            action, step_value, value = self._split_callback(payload, parts=3)
-            if action not in {"add", "remove"}:
-                raise OnboardingApplicationError("invalid_action")
-            step = self._onboarding_step(step_value)
-            return await self._render_onboarding(
-                identity,
-                await self._onboarding.set_multiselect(
-                    identity,
-                    value,
-                    selected=action == "add",
-                    expected_step=step,
-                ),
-            )
-        if callback_data.startswith("ob:v1:continue:"):
-            step = self._onboarding_step(callback_data.removeprefix("ob:v1:continue:"))
-            return await self._render_onboarding(
-                identity,
-                await self._onboarding.continue_multiselect(
-                    identity,
-                    expected_step=step,
-                ),
-            )
-        if callback_data.startswith("ob:v1:skip:"):
-            step = self._onboarding_step(callback_data.removeprefix("ob:v1:skip:"))
-            return await self._render_onboarding(
-                identity, await self._onboarding.skip(identity, expected_step=step)
-            )
-        if callback_data.startswith("ob:v1:back:"):
-            step = self._onboarding_step(callback_data.removeprefix("ob:v1:back:"))
-            return await self._render_onboarding(
-                identity, await self._onboarding.back(identity, expected_step=step)
-            )
-        if callback_data.startswith("ob:v1:other:"):
-            step = self._onboarding_step(callback_data.removeprefix("ob:v1:other:"))
-            return await self._render_onboarding(
-                identity,
-                await self._onboarding.begin_free_text(
-                    identity,
-                    expected_step=step,
-                ),
-            )
-        if callback_data == "ob:v1:parsed:confirm":
-            return await self._render_onboarding(
-                identity, await self._onboarding.confirm_parsed(identity)
-            )
-        if callback_data == "ob:v1:parsed:retry":
-            return await self._render_onboarding(
-                identity, await self._onboarding.retry_parsed(identity)
-            )
-        if callback_data == "ob:v1:parsed:back":
-            return await self._render_onboarding(
-                identity, await self._onboarding.back_to_options(identity)
             )
         if callback_data == "ob:v1:resume":
             return await self._render_onboarding(
@@ -538,17 +405,6 @@ class CoachBotApplicationService:
             return await self._render_onboarding(
                 identity, await self._onboarding.snapshot(identity)
             )
-        if callback_data.startswith("ob:v1:edit:"):
-            section = self._edit_section(callback_data.removeprefix("ob:v1:edit:"))
-            return await self._render_onboarding(
-                identity, await self._onboarding.begin_summary_edit(identity, section)
-            )
-        if callback_data == "ob:v1:summary:confirm":
-            snapshot = await self._onboarding.snapshot(identity)
-            await self._profiles.finalize(user_id=snapshot.user_id)
-            completed = await self._onboarding.snapshot(identity)
-            return await self._render_onboarding(identity, completed)
-
         if callback_data == "acct:v1:delete:keep":
             return TelegramResponse(messages.ACCOUNT_KEPT)
         if callback_data == "acct:v1:delete:confirm":
@@ -705,13 +561,11 @@ class CoachBotApplicationService:
         identity: TelegramIdentity,
         outcome: TrainingFileImportOutcome,
     ) -> TelegramResponse:
-        onboarding = outcome.context is TrainingImportContext.ONBOARDING
         if outcome.file_format is TrainingFileFormat.APPLE_HEALTH_ZIP:
             text = messages.apple_health_file_result(
                 activities_imported=outcome.activities_imported,
                 activities_updated=outcome.activities_updated,
                 activities_skipped=outcome.activities_skipped,
-                onboarding=onboarding,
                 baseline_limited=outcome.baseline_limited,
             )
         else:
@@ -721,13 +575,7 @@ class CoachBotApplicationService:
                 duration_seconds=outcome.duration_seconds or 0,
                 distance_meters=outcome.distance_meters,
                 average_heart_rate=outcome.average_heart_rate,
-                onboarding=onboarding,
                 baseline_limited=outcome.baseline_limited,
-            )
-        if onboarding:
-            return TelegramResponse(
-                text,
-                keyboards.training_file_import_keyboard(),
             )
         if (
             outcome.file_format is TrainingFileFormat.TCX
@@ -899,13 +747,6 @@ class CoachBotApplicationService:
             WorkoutFlowStep.COMPLETE,
             WorkoutFlowStep.CANCELLED,
         }:
-            if result.return_to_onboarding:
-                return TelegramResponse(
-                    text,
-                    keyboards.training_file_complete_keyboard(
-                        can_enrich_latest=False,
-                    ),
-                )
             return await self._home_with_prefix(identity, text)
         return TelegramResponse(text, keyboard)
 
@@ -939,129 +780,72 @@ class CoachBotApplicationService:
     ) -> TelegramResponse:
         if result.created:
             return self._welcome_response()
-        prefix = ""
         if result.kind == "setup_introduction":
             return TelegramResponse(
                 messages.SETUP_INTRODUCTION,
                 keyboards.setup_introduction_keyboard(),
             )
+        if result.kind == "goal_intake":
+            return TelegramResponse(
+                messages.GOAL_INTAKE,
+                keyboards.goal_input_keyboard(),
+            )
+        if result.kind == "goal_addition":
+            return TelegramResponse(
+                messages.GOAL_ADDITION,
+                keyboards.goal_input_keyboard(),
+            )
+        if result.kind == "goal_off_topic":
+            return TelegramResponse(
+                messages.GOAL_OFF_TOPIC,
+                keyboards.goal_input_keyboard(),
+            )
+        if result.kind == "goal_confirmation":
+            return TelegramResponse(
+                messages.goal_confirmation(result.answers),
+                keyboards.goal_confirmation_keyboard(),
+            )
+        if result.kind == "goal_clarification":
+            field = result.answers.get("_goal_clarification_field")
+            keyboard = keyboards.goal_input_keyboard()
+            if field == "main_goal":
+                keyboard = keyboards.goal_main_clarification_keyboard()
+            elif field == "event_date":
+                keyboard = keyboards.goal_date_clarification_keyboard()
+            return TelegramResponse(
+                messages.goal_clarification(result.answers),
+                keyboard,
+            )
         if result.kind == "step":
-            if (
-                result.current_step is OnboardingStep.FILE_IMPORT_COMPLETE
-                and self._apple_health is not None
-            ):
-                outcome = await self._apple_health.finish_onboarding_import(
-                    identity=identity
-                )
-                return TelegramResponse(
-                    messages.training_import_complete(
-                        activities_imported=outcome.activities_imported,
-                        activities_updated=outcome.activities_updated,
-                        activities_skipped=outcome.activities_skipped,
-                        discipline_counts=outcome.discipline_counts or {},
-                        baseline_limited=outcome.baseline_limited,
-                    ),
-                    keyboards.training_file_complete_keyboard(
-                        can_enrich_latest=outcome.activity_id is not None,
-                    ),
-                )
-            if result.current_step is OnboardingStep.APPLE_HEALTH_IMPORT_COMPLETE:
-                legacy_outcome = (
-                    await self._apple_health.latest_outcome(user_id=result.user_id)
-                    if self._apple_health is not None
-                    else None
-                )
-                if legacy_outcome is not None:
-                    return TelegramResponse(
-                        messages.apple_health_import_success(
-                            workouts_found=legacy_outcome.workouts_found,
-                            activities_imported=legacy_outcome.activities_imported,
-                            activities_updated=legacy_outcome.activities_updated,
-                            activities_skipped=legacy_outcome.activities_skipped,
-                            heart_rate_records_matched=(
-                                legacy_outcome.heart_rate_records_matched
-                            ),
-                            warning_count=legacy_outcome.warning_count,
-                            discipline_counts=(legacy_outcome.discipline_counts or {}),
-                        ),
-                        keyboards.keyboard_for_step(
-                            result.current_step,
-                            result.answers,
-                            strava_enabled=self._strava_enabled,
-                            apple_health_enabled=self._apple_health_enabled,
-                            tcx_enabled=self._tcx_enabled,
-                        ),
-                    )
-            text = messages.step_prompt(result.current_step)
-            if result.current_step in {
-                OnboardingStep.TRAINING_DAYS,
-                OnboardingStep.EQUIPMENT,
-                OnboardingStep.POOL_ACCESS,
-                OnboardingStep.BIKE_ACCESS,
-                OnboardingStep.HEALTH_AREAS,
-            }:
-                text = f"{text}\n\n{messages.selected_values(self._selection(result))}"
             return TelegramResponse(
-                prefix + text,
-                keyboards.keyboard_for_step(
-                    result.current_step,
-                    result.answers,
-                    strava_enabled=self._strava_enabled,
-                    apple_health_enabled=self._apple_health_enabled,
-                    tcx_enabled=self._tcx_enabled,
-                ),
+                messages.CONSENT,
+                keyboards.consent_keyboard(),
             )
-        if result.kind == "summary":
+        if result.kind == "goal_confirmed":
             return TelegramResponse(
-                prefix + messages.onboarding_summary(result.answers),
-                keyboards.summary_keyboard(),
-            )
-        if result.kind == "awaiting_text":
-            text = (
-                messages.HEALTH_FREE_TEXT_NOTICE
-                if result.current_step is OnboardingStep.HEALTH_DESCRIPTION
-                else messages.FREE_TEXT_REQUEST
-            )
-            return TelegramResponse(prefix + text)
-        if result.kind == "interpretation" and result.parse_result is not None:
-            return TelegramResponse(
-                messages.interpreted_answer(
-                    result.parse_result.display_value or messages.PARSE_DISPLAY_MISSING
-                ),
-                keyboards.parsed_confirmation_keyboard(),
-            )
-        if result.kind == "clarification":
-            return TelegramResponse(
-                messages.clarification(result.clarification_question),
-                keyboards.free_text_recovery_keyboard(),
+                messages.GOAL_SAVED,
+                keyboards.goal_saved_keyboard(),
             )
         if result.kind == "fallback":
             return TelegramResponse(
                 messages.PARSE_FALLBACK,
-                keyboards.free_text_recovery_keyboard(),
+                keyboards.goal_input_keyboard(),
             )
         if result.kind == "provider_error":
             return TelegramResponse(
                 messages.PARSE_PROVIDER_ERROR,
-                keyboards.free_text_recovery_keyboard(),
+                keyboards.goal_input_keyboard(),
             )
         if result.kind == "rate_limited":
             return TelegramResponse(
                 messages.PARSE_RATE_LIMITED,
-                keyboards.free_text_recovery_keyboard(),
+                keyboards.goal_input_keyboard(),
             )
         if result.kind == "cancelled":
             return TelegramResponse(
                 messages.CANCELLED,
                 keyboards.cancelled_keyboard(),
             )
-        if result.kind == "completed":
-            return await self._home_response(
-                identity,
-                result.user_status,
-                prefix=messages.ONBOARDING_COMPLETE,
-            )
-        return TelegramResponse(messages.GENERIC_ERROR)
 
     @staticmethod
     def _welcome_response() -> TelegramResponse:
@@ -1102,45 +886,6 @@ class CoachBotApplicationService:
                 strava_enabled=self._strava_enabled,
             ),
         )
-
-    @staticmethod
-    def _selection(result: OnboardingServiceResult) -> list[str]:
-        key = result.current_step.value.lower()
-        value = result.answers.get(
-            f"_selection_{key}",
-            result.answers.get(key),
-        )
-        if isinstance(value, list):
-            return [str(item) for item in value]
-        if isinstance(value, dict):
-            if value.get("type") in {"IRREGULAR", "NO_REGULAR_ACCESS"}:
-                return [str(value["type"])]
-            days = value.get("days")
-            if isinstance(days, list):
-                return [str(item) for item in days]
-        return []
-
-    @staticmethod
-    def _edit_section(value: str) -> SummaryEditSection:
-        mapping: dict[str, SummaryEditSection] = {
-            "goal": "goal",
-            "availability": "availability",
-            "equipment": "equipment",
-            "limitations": "limitations",
-            "coach": "coach_style",
-            "baseline": "baseline",
-        }
-        try:
-            return mapping[value]
-        except KeyError as exc:
-            raise OnboardingApplicationError("invalid_action") from exc
-
-    @staticmethod
-    def _onboarding_step(value: str) -> OnboardingStep:
-        try:
-            return OnboardingStep(value)
-        except ValueError as exc:
-            raise OnboardingApplicationError("invalid_action") from exc
 
     @staticmethod
     def _workout_flow_step(value: str) -> WorkoutFlowStep:

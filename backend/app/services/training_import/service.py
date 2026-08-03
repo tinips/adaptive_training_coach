@@ -24,10 +24,7 @@ from app.domain.enums import (
     BaselineSource,
     BaselineStatus,
     LevelLabel,
-    OnboardingStatus,
-    OnboardingStep,
     TrainingFileFormat,
-    TrainingImportContext,
     UserStatus,
 )
 from app.integrations.apple_health import (
@@ -46,14 +43,13 @@ from app.repositories.apple_health import (
     AppleHealthRepository,
 )
 from app.repositories.baselines import BaselineRepository
-from app.repositories.onboarding import OnboardingRepository
 from app.repositories.profiles import ProfileRepository
 from app.repositories.strava import StravaRepository
 from app.repositories.users import UserRepository
 from app.schemas.baseline import BaselineCalculation
 from app.schemas.common import TelegramIdentity
+from app.schemas.training_import import TelegramDocumentUpload
 from app.schemas.workouts import workout_metrics
-from app.services.apple_health import TelegramDocumentUpload
 from app.services.baseline import BaselineService
 from app.services.onboarding import OnboardingApplicationError
 
@@ -69,13 +65,6 @@ _COMPLETED_PROFILE_STATES = {
     UserStatus.BASELINE_READY,
     UserStatus.BASELINE_FAILED,
 }
-_ONBOARDING_IMPORT_STEPS = {
-    OnboardingStep.FILE_IMPORT_WAITING,
-    OnboardingStep.FILE_IMPORT_PROCESSING,
-    # Accept an interrupted pre-unification Apple flow without losing data.
-    OnboardingStep.APPLE_HEALTH_WAITING_FOR_FILE,
-    OnboardingStep.APPLE_HEALTH_PROCESSING,
-}
 _ZIP_MAGIC = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
 
 
@@ -84,7 +73,6 @@ class TrainingFileImportOutcome:
     """Safe persisted import result used by Telegram rendering and resume."""
 
     status: AppleHealthImportStatus
-    context: TrainingImportContext
     file_format: TrainingFileFormat
     job_id: uuid.UUID | None = None
     activity_id: uuid.UUID | None = None
@@ -219,10 +207,7 @@ class TrainingFileImportService:
                     duplicate=duplicate,
                 )
                 baseline_limited = False
-                if (
-                    copied.status is AppleHealthImportStatus.SUCCEEDED
-                    and copied.context is TrainingImportContext.DAILY
-                ):
+                if copied.status is AppleHealthImportStatus.SUCCEEDED:
                     calculation = await self._recalculate_daily(user_id=user_id)
                     baseline_limited = _baseline_is_limited(calculation)
                 result = await self._outcome(
@@ -276,91 +261,6 @@ class TrainingFileImportService:
                         job_id=job.id,
                     )
 
-    async def finish_onboarding_import(
-        self,
-        *,
-        identity: TelegramIdentity,
-    ) -> TrainingFileImportOutcome:
-        """Finish a non-empty multi-file session and append its baseline once."""
-
-        async with self._session_factory.begin() as session:
-            user = await UserRepository(session).get_by_telegram_id(
-                identity.telegram_user_id
-            )
-            if user is None:
-                raise OnboardingApplicationError("user_not_found")
-            onboarding = await OnboardingRepository(session).lock_for_user(
-                user_id=user.id
-            )
-            if (
-                onboarding.status is not OnboardingStatus.ACTIVE
-                or onboarding.current_step
-                not in {
-                    OnboardingStep.FILE_IMPORT_WAITING,
-                    OnboardingStep.FILE_IMPORT_COMPLETE,
-                }
-            ):
-                raise OnboardingApplicationError("stale_action")
-            repository = AppleHealthRepository(session)
-            active = await repository.get_active_job(user_id=user.id)
-            if active is not None:
-                raise OnboardingApplicationError("import_already_active")
-            totals = await repository.onboarding_totals(
-                user_id=user.id,
-                onboarding_session_id=onboarding.id,
-            )
-            if totals["workouts_found"] < 1:
-                raise OnboardingApplicationError("no_valid_imported_activities")
-            calculation: BaselineCalculation | None = None
-            if onboarding.current_step is OnboardingStep.FILE_IMPORT_WAITING:
-                calculation = await BaselineService(
-                    activities=StravaRepository(session),
-                    baselines=BaselineRepository(session),
-                    analysis_days=self._settings.strava_initial_sync_days,
-                    clock=self._clock,
-                ).recalculate(
-                    user_id=user.id,
-                    source=BaselineSource.FILE_IMPORT,
-                )
-                answers = dict(onboarding.answers)
-                answers[OnboardingStep.BASELINE_SOURCE.value.lower()] = (
-                    BaselineSource.FILE_IMPORT.value
-                )
-                onboarding.answers = answers
-                onboarding.current_step = OnboardingStep.FILE_IMPORT_COMPLETE
-                await session.flush()
-            if calculation is None:
-                latest_baseline = await BaselineRepository(session).get_latest(
-                    user_id=user.id
-                )
-                baseline_limited = (
-                    latest_baseline is None
-                    or latest_baseline.status is not BaselineStatus.READY
-                    or any(
-                        discipline.level_label is LevelLabel.UNKNOWN
-                        for discipline in latest_baseline.discipline_baselines
-                    )
-                )
-            else:
-                baseline_limited = _baseline_is_limited(calculation)
-            counts = await repository.all_discipline_counts(user_id=user.id)
-            latest = await repository.latest_imported_activity(
-                user_id=user.id,
-                onboarding_session_id=onboarding.id,
-            )
-            return TrainingFileImportOutcome(
-                status=AppleHealthImportStatus.SUCCEEDED,
-                context=TrainingImportContext.ONBOARDING,
-                file_format=TrainingFileFormat.UNKNOWN,
-                activity_id=latest.id if latest is not None else None,
-                workouts_found=totals["workouts_found"],
-                activities_imported=totals["activities_imported"],
-                activities_updated=totals["activities_updated"],
-                activities_skipped=totals["activities_skipped"],
-                discipline_counts=counts,
-                baseline_limited=baseline_limited,
-            )
-
     async def latest_outcome(
         self,
         *,
@@ -372,40 +272,12 @@ class TrainingFileImportService:
                 return None
             return await self._outcome_in_session(session, job)
 
-    async def latest_onboarding_activity(
-        self,
-        *,
-        user_id: uuid.UUID,
-    ) -> Workout | None:
-        async with self._session_factory() as session:
-            onboarding = await OnboardingRepository(session).get_for_user(
-                user_id=user_id
-            )
-            if onboarding is None:
-                return None
-            return await AppleHealthRepository(session).latest_imported_activity(
-                user_id=user_id,
-                onboarding_session_id=onboarding.id,
-            )
-
     async def cancel_active(self, *, user_id: uuid.UUID) -> None:
         async with self._session_factory.begin() as session:
-            cancelled = await AppleHealthRepository(session).cancel_active(
-                user_id=user_id
-            )
-            if cancelled:
-                onboarding = await OnboardingRepository(session).lock_for_user(
-                    user_id=user_id
-                )
-                if (
-                    onboarding.status is OnboardingStatus.ACTIVE
-                    and onboarding.current_step is OnboardingStep.FILE_IMPORT_PROCESSING
-                ):
-                    onboarding.current_step = OnboardingStep.FILE_IMPORT_WAITING
-                    await session.flush()
+            await AppleHealthRepository(session).cancel_active(user_id=user_id)
 
     async def recover_stale_work(self) -> int:
-        """Fail all prior-process active jobs and restore onboarding to waiting."""
+        """Fail all active jobs left behind by a prior process."""
 
         async with self._session_factory.begin() as session:
             count, recorded_paths = await AppleHealthRepository(
@@ -433,9 +305,8 @@ class TrainingFileImportService:
             )
             if user is None:
                 raise OnboardingApplicationError("user_not_found")
-            onboarding = await OnboardingRepository(session).lock_for_user(
-                user_id=user.id
-            )
+            if user.status not in _COMPLETED_PROFILE_STATES:
+                raise OnboardingApplicationError("training_file_not_expected")
             repository = AppleHealthRepository(session)
             if document.update_id is not None:
                 replay = await repository.get_job_by_update(
@@ -445,42 +316,14 @@ class TrainingFileImportService:
                 if replay is not None:
                     return replay, user.id, False
 
-            onboarding_session_id: uuid.UUID | None = None
-            if (
-                onboarding.status is OnboardingStatus.ACTIVE
-                and onboarding.current_step in _ONBOARDING_IMPORT_STEPS
-            ):
-                context = TrainingImportContext.ONBOARDING
-                onboarding_session_id = onboarding.id
-            elif (
-                onboarding.status is OnboardingStatus.COMPLETED
-                and user.status in _COMPLETED_PROFILE_STATES
-            ):
-                context = TrainingImportContext.DAILY
-            else:
-                raise OnboardingApplicationError("training_file_not_expected")
-
             job, created = await repository.create_received_job(
                 user_id=user.id,
-                onboarding_session_id=onboarding_session_id,
                 telegram_update_id=document.update_id,
                 telegram_file_id=document.file_id,
                 telegram_file_unique_id=document.file_unique_id,
                 display_filename=document.display_filename,
                 file_format=TrainingFileFormat.UNKNOWN,
-                context=context,
             )
-            if (
-                created
-                and context is TrainingImportContext.ONBOARDING
-                and job.status
-                in {
-                    AppleHealthImportStatus.RECEIVED,
-                    AppleHealthImportStatus.PROCESSING,
-                }
-            ):
-                onboarding.current_step = OnboardingStep.FILE_IMPORT_PROCESSING
-                await session.flush()
             return job, user.id, created
 
     async def _process_apple(
@@ -520,7 +363,6 @@ class TrainingFileImportService:
                 AppleHealthImportStatus.RECEIVED,
                 AppleHealthImportStatus.PROCESSING,
             }:
-                await self._restore_onboarding_waiting(session, job)
                 return await self._outcome_in_session(session, job)
             activities = TrainingActivityRepository(session)
             imported = 0
@@ -542,13 +384,11 @@ class TrainingFileImportService:
                     updated += 1
                 else:
                     unchanged += 1
-            calculation: BaselineCalculation | None = None
-            if job.context is TrainingImportContext.DAILY:
-                await progress("recalculating_baseline")
-                calculation = await self._recalculate_in_session(
-                    session,
-                    user_id=user_id,
-                )
+            await progress("recalculating_baseline")
+            calculation = await self._recalculate_in_session(
+                session,
+                user_id=user_id,
+            )
             completed = await jobs.mark_succeeded(
                 user_id=user_id,
                 job_id=job.id,
@@ -561,15 +401,10 @@ class TrainingFileImportService:
                 activity_id=latest.id if len(workouts) == 1 and latest else None,
                 file_format=TrainingFileFormat.APPLE_HEALTH_ZIP,
             )
-            await self._restore_onboarding_waiting(session, completed)
             result = await self._outcome_in_session(session, completed)
             return replace(
                 result,
-                baseline_limited=(
-                    _baseline_is_limited(calculation)
-                    if calculation is not None
-                    else False
-                ),
+                baseline_limited=_baseline_is_limited(calculation),
             )
 
     async def _process_tcx(
@@ -596,7 +431,6 @@ class TrainingFileImportService:
                 AppleHealthImportStatus.RECEIVED,
                 AppleHealthImportStatus.PROCESSING,
             }:
-                await self._restore_onboarding_waiting(session, job)
                 return await self._outcome_in_session(session, job)
             activity, outcome = await TrainingActivityRepository(
                 session
@@ -606,13 +440,11 @@ class TrainingFileImportService:
                 file_sha256=file_sha256,
                 import_job_id=job.id,
             )
-            calculation: BaselineCalculation | None = None
-            if job.context is TrainingImportContext.DAILY:
-                await progress("recalculating_baseline")
-                calculation = await self._recalculate_in_session(
-                    session,
-                    user_id=user_id,
-                )
+            await progress("recalculating_baseline")
+            calculation = await self._recalculate_in_session(
+                session,
+                user_id=user_id,
+            )
             completed = await jobs.mark_succeeded(
                 user_id=user_id,
                 job_id=job.id,
@@ -625,15 +457,10 @@ class TrainingFileImportService:
                 activity_id=activity.id,
                 file_format=TrainingFileFormat.TCX,
             )
-            await self._restore_onboarding_waiting(session, completed)
             result = await self._outcome_in_session(session, completed)
             return replace(
                 result,
-                baseline_limited=(
-                    _baseline_is_limited(calculation)
-                    if calculation is not None
-                    else False
-                ),
+                baseline_limited=_baseline_is_limited(calculation),
             )
 
     async def _mark_processing(
@@ -680,7 +507,6 @@ class TrainingFileImportService:
                 job_id=job_id,
                 source=duplicate,
             )
-            await self._restore_onboarding_waiting(session, copied)
             return copied
 
     async def _fail(
@@ -697,29 +523,7 @@ class TrainingFileImportService:
                 job_id=job_id,
                 safe_error_code=code,
             )
-            await self._restore_onboarding_waiting(session, job)
             return await self._outcome_in_session(session, job)
-
-    async def _restore_onboarding_waiting(
-        self,
-        session: AsyncSession,
-        job: AppleHealthImportJob,
-    ) -> None:
-        if (
-            job.context is not TrainingImportContext.ONBOARDING
-            or job.onboarding_session_id is None
-        ):
-            return
-        onboarding = await OnboardingRepository(session).lock_for_user(
-            user_id=job.user_id
-        )
-        if (
-            onboarding.status is OnboardingStatus.ACTIVE
-            and onboarding.id == job.onboarding_session_id
-            and onboarding.current_step is OnboardingStep.FILE_IMPORT_PROCESSING
-        ):
-            onboarding.current_step = OnboardingStep.FILE_IMPORT_WAITING
-            await session.flush()
 
     async def _recalculate_daily(
         self,
@@ -830,7 +634,6 @@ class TrainingFileImportService:
         metrics = workout_metrics(workout) if workout is not None else None
         return TrainingFileImportOutcome(
             status=job.status,
-            context=job.context,
             file_format=job.file_format,
             job_id=job.id,
             activity_id=workout.id if workout is not None else job.workout_id,

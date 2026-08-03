@@ -114,7 +114,6 @@ class WorkoutFeedbackRepository:
         flow.state = WorkoutFlowStep.WAITING_FOR_FILE
         flow.pending_manual_average_heart_rate = None
         flow.pending_discomfort_description = None
-        flow.return_to_onboarding = False
         flow.completed_at = None
         await self._session.flush()
         return flow
@@ -125,7 +124,6 @@ class WorkoutFeedbackRepository:
         user_id: uuid.UUID,
         activity_id: uuid.UUID,
         initial_state: WorkoutFlowStep,
-        return_to_onboarding: bool,
     ) -> WorkoutFlowSession:
         await self.require_activity(
             user_id=user_id,
@@ -137,7 +135,6 @@ class WorkoutFeedbackRepository:
         flow.state = initial_state
         flow.pending_manual_average_heart_rate = None
         flow.pending_discomfort_description = None
-        flow.return_to_onboarding = return_to_onboarding
         flow.completed_at = None
         await self._session.flush()
         return flow

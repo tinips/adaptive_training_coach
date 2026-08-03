@@ -88,7 +88,6 @@ class WorkoutFeedbackResult(BaseModel):
     user_id: uuid.UUID
     activity_id: uuid.UUID | None
     state: WorkoutFlowStep
-    return_to_onboarding: bool
     pending_manual_average_heart_rate: int | None = Field(
         default=None,
         ge=30,
@@ -135,7 +134,6 @@ class WorkoutFeedbackService:
         *,
         user_id: uuid.UUID,
         activity_id: uuid.UUID,
-        return_to_onboarding: bool = False,
     ) -> WorkoutFeedbackResult:
         """Attach an owned activity and begin only the questions it needs."""
 
@@ -176,7 +174,6 @@ class WorkoutFeedbackService:
                 user_id=user_id,
                 activity_id=activity_id,
                 initial_state=initial_state,
-                return_to_onboarding=return_to_onboarding,
             )
             return await self._result(repository, flow)
 
@@ -725,7 +722,6 @@ class WorkoutFeedbackService:
             user_id=flow.user_id,
             activity_id=flow.activity_id,
             state=flow.state,
-            return_to_onboarding=flow.return_to_onboarding,
             pending_manual_average_heart_rate=(flow.pending_manual_average_heart_rate),
             pending_discomfort_description=flow.pending_discomfort_description,
             feedback=self._feedback_data(feedback),

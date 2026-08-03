@@ -15,7 +15,7 @@ from app.bot import messages
 from app.bot.rendering import TelegramResponse
 from app.bot.service_protocol import CoachBotService
 from app.schemas.common import TelegramIdentity
-from app.services.apple_health import TelegramDocumentUpload
+from app.schemas.training_import import TelegramDocumentUpload
 
 logger = logging.getLogger(__name__)
 BOT_SERVICE_KEY = "coach_bot_service"

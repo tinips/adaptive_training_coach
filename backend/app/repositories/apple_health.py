@@ -13,15 +13,12 @@ from app.db.base import utc_now
 from app.db.models import (
     ActivitySourceLink,
     AppleHealthImportJob,
-    OnboardingSession,
     Workout,
 )
 from app.domain.enums import (
     ActivitySource,
     AppleHealthImportStatus,
-    OnboardingStep,
     TrainingFileFormat,
-    TrainingImportContext,
 )
 from app.integrations.apple_health.models import ParsedWorkout
 from app.repositories.activities import TrainingActivityRepository
@@ -39,13 +36,11 @@ class AppleHealthRepository:
         self,
         *,
         user_id: uuid.UUID,
-        onboarding_session_id: uuid.UUID | None = None,
         telegram_update_id: int | None,
         telegram_file_id: str,
         telegram_file_unique_id: str,
         display_filename: str,
         file_format: TrainingFileFormat = TrainingFileFormat.APPLE_HEALTH_ZIP,
-        context: TrainingImportContext = TrainingImportContext.ONBOARDING,
     ) -> tuple[AppleHealthImportJob, bool]:
         if telegram_update_id is not None:
             existing = await self._session.scalar(
@@ -63,13 +58,11 @@ class AppleHealthRepository:
             raise AppleHealthImportConflictError("import_already_active")
         job = AppleHealthImportJob(
             user_id=user_id,
-            onboarding_session_id=onboarding_session_id,
             telegram_update_id=telegram_update_id,
             telegram_file_id=telegram_file_id,
             telegram_file_unique_id=telegram_file_unique_id,
             display_filename=display_filename[:255],
             file_format=file_format,
-            context=context,
         )
         try:
             async with self._session.begin_nested():
@@ -210,52 +203,10 @@ class AppleHealthRepository:
         )
         return {discipline.value: count for discipline, count in rows.all()}
 
-    async def onboarding_totals(
-        self,
-        *,
-        user_id: uuid.UUID,
-        onboarding_session_id: uuid.UUID,
-    ) -> dict[str, int]:
-        """Aggregate successful files in one owned onboarding import session."""
-
-        row = (
-            await self._session.execute(
-                select(
-                    func.count(AppleHealthImportJob.id),
-                    func.coalesce(func.sum(AppleHealthImportJob.workouts_found), 0),
-                    func.coalesce(
-                        func.sum(AppleHealthImportJob.activities_imported),
-                        0,
-                    ),
-                    func.coalesce(
-                        func.sum(AppleHealthImportJob.activities_updated),
-                        0,
-                    ),
-                    func.coalesce(
-                        func.sum(AppleHealthImportJob.activities_skipped),
-                        0,
-                    ),
-                ).where(
-                    AppleHealthImportJob.user_id == user_id,
-                    AppleHealthImportJob.onboarding_session_id == onboarding_session_id,
-                    AppleHealthImportJob.context == TrainingImportContext.ONBOARDING,
-                    AppleHealthImportJob.status == AppleHealthImportStatus.SUCCEEDED,
-                )
-            )
-        ).one()
-        return {
-            "successful_files": int(row[0]),
-            "workouts_found": int(row[1]),
-            "activities_imported": int(row[2]),
-            "activities_updated": int(row[3]),
-            "activities_skipped": int(row[4]),
-        }
-
     async def latest_imported_activity(
         self,
         *,
         user_id: uuid.UUID,
-        onboarding_session_id: uuid.UUID | None = None,
     ) -> Workout | None:
         """Return the latest canonical activity linked by an owned import job."""
 
@@ -277,10 +228,6 @@ class AppleHealthRepository:
                 ActivitySourceLink.deleted_at.is_(None),
             )
         )
-        if onboarding_session_id is not None:
-            statement = statement.where(
-                AppleHealthImportJob.onboarding_session_id == onboarding_session_id,
-            )
         result = await self._session.scalars(
             statement.order_by(Workout.started_at.desc(), Workout.id).limit(1)
         )
@@ -475,7 +422,7 @@ class AppleHealthRepository:
         *,
         stale_before: datetime | None,
     ) -> int:
-        """Fail expired processing leases and restore their onboarding state."""
+        """Fail expired processing leases."""
 
         jobs = await self._recoverable_jobs(stale_before=stale_before)
         await self._fail_recovered_jobs(jobs)
@@ -563,27 +510,6 @@ class AppleHealthRepository:
             job.status = AppleHealthImportStatus.FAILED
             job.completed_at = utc_now()
             job.safe_error_code = "import_interrupted"
-            if job.onboarding_session_id is not None:
-                await self._session.execute(
-                    update(OnboardingSession)
-                    .where(
-                        OnboardingSession.id == job.onboarding_session_id,
-                        OnboardingSession.user_id == job.user_id,
-                        OnboardingSession.current_step
-                        == OnboardingStep.FILE_IMPORT_PROCESSING,
-                    )
-                    .values(current_step=OnboardingStep.FILE_IMPORT_WAITING)
-                )
-                await self._session.execute(
-                    update(OnboardingSession)
-                    .where(
-                        OnboardingSession.id == job.onboarding_session_id,
-                        OnboardingSession.user_id == job.user_id,
-                        OnboardingSession.current_step
-                        == OnboardingStep.APPLE_HEALTH_PROCESSING,
-                    )
-                    .values(current_step=OnboardingStep.APPLE_HEALTH_IMPORT_FAILED)
-                )
         await self._session.flush()
 
     async def upsert_workout(

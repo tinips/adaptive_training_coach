@@ -7,7 +7,7 @@ from datetime import date, datetime
 from html import escape
 from typing import Any
 
-from app.domain.enums import OnboardingStep, SyncStatus
+from app.domain.enums import SyncStatus
 
 GENERIC_ERROR = (
     "Something went wrong. Your saved progress is safe. Please try again in a moment."
@@ -71,10 +71,6 @@ PRIVACY_SAFETY = (
     "deletion of your stored data."
 )
 WELCOME_BACK = "Welcome back. I found your saved progress."
-ONBOARDING_COMPLETE = (
-    "Your profile is saved. You can now establish or inspect your athletic baseline."
-)
-PROFILE_ALREADY_COMPLETE = "Your athlete profile is already complete."
 PARSE_RATE_LIMITED = (
     "You have reached the hourly free-text interpretation limit. You can still use "
     "all predefined buttons, or try free text again later."
@@ -87,9 +83,6 @@ PARSE_FALLBACK = (
     "I could not safely structure that answer. No value was saved. Please write it "
     "again more specifically or return to the predefined options."
 )
-PARSE_RETRY = "Write your answer again. I will ask you to confirm before saving it."
-PARSE_BACK = "No interpreted value was saved. Choose one of the predefined options."
-PARSE_DISPLAY_MISSING = "Structured answer"
 CANCEL_CONFIRM = (
     "Cancel the current onboarding? Your staged answers will remain unavailable "
     "until you restart onboarding."
@@ -207,17 +200,6 @@ ADD_WORKOUT_REQUEST = (
     "TCX is recommended for a single new workout.\n"
     "Apple Health ZIP can update or enrich your history."
 )
-FILE_IMPORT_REQUEST = (
-    "Send an Apple Health export ZIP or one or more TCX workout files.\n\n"
-    "Apple Health ZIP is recommended for importing previous history.\n"
-    "TCX is useful for individual workouts.\n\n"
-    "You can upload multiple files and finish when you are done."
-)
-FILE_IMPORT_NO_ACTIVITIES = (
-    "No valid activities have been imported in this session yet, so the "
-    "baseline is still incomplete. Upload a supported file, choose another "
-    "method, decide later, or go back."
-)
 HEART_RATE_MISSING = (
     "Heart-rate data was not available.\n\n"
     "Would you like to enter your average heart rate manually?"
@@ -236,16 +218,6 @@ WORKOUT_FEEDBACK_COMPLETE = "Workout details saved."
 WORKOUT_FEEDBACK_CANCELLED = (
     "Workout questions cancelled. The imported activity remains saved."
 )
-WORKOUT_IMPORT_CANCELLED = "Workout import cancelled."
-RESTART_OFFER = "Your previous onboarding was cancelled. Restart from the beginning?"
-FREE_TEXT_REQUEST = (
-    "Write your answer in any language. I will interpret it and ask you to confirm "
-    "before anything is saved."
-)
-HEALTH_FREE_TEXT_NOTICE = (
-    "Describe only the training limitation you want the coach to consider. Do not "
-    "include a diagnosis. I will ask you to confirm the interpretation."
-)
 
 
 def strava_sync_outcome(status: SyncStatus) -> str:
@@ -260,15 +232,6 @@ def strava_sync_outcome(status: SyncStatus) -> str:
         SyncStatus.FAILED: STRAVA_SYNC_FAILED,
     }[status]
 
-
-EVENT_NAME_REQUEST = (
-    "Write the event name exactly as you want it displayed. It will be stored as "
-    "entered."
-)
-EVENT_DATE_REQUEST = "Enter the event date as DD/MM/YYYY or YYYY-MM-DD."
-AGE_REQUEST = "Enter your age as a whole number from 16 to 100."
-HEIGHT_REQUEST = "Enter your height in centimetres (120-230), or choose Skip."
-WEIGHT_REQUEST = "Enter your weight in kilograms (35-250), or choose Skip."
 
 CONSENT = (
     "Before we begin\n\n"
@@ -293,103 +256,88 @@ SETUP_INTRODUCTION = (
     "later.\n\n"
     "Ready to build your athlete profile?"
 )
+GOAL_INTAKE = (
+    "Let\u2019s start with your goal.\n\n"
+    "What are you training for, and what would success look like to you?\n\n"
+    "Tell me in your own words. You can include a race or challenge, when you "
+    "want to do it, the result you are aiming for, and anything important you "
+    "want to preserve while training.\n\n"
+    "For example:\n"
+    "\u201cI want to complete my first Ironman 70.3 next July, finish safely and "
+    "maintain muscle.\u201d"
+)
+GOAL_ADDITION = "Tell me what you would like to add or change."
+GOAL_SAVED = (
+    "Your goal has been saved.\n\n"
+    "This is the first part of your athlete profile. We\u2019ll continue building "
+    "the rest of your profile step by step."
+)
+GOAL_OFF_TOPIC = (
+    "We can come back to equipment later. Right now, I\u2019m building your athlete "
+    "profile.\n\n"
+    "What are you currently training for, and what would success look like to you?"
+)
 
-STEP_PROMPTS: dict[OnboardingStep, str] = {
-    OnboardingStep.CONSENT: CONSENT,
-    OnboardingStep.PRIMARY_SPORT: "What is your primary sport?",
-    OnboardingStep.GOAL_TYPE: "What is your main training goal?",
-    OnboardingStep.EVENT_STATUS: "Do you have a specific target event?",
-    OnboardingStep.EVENT_NAME: EVENT_NAME_REQUEST,
-    OnboardingStep.EVENT_DATE: EVENT_DATE_REQUEST,
-    OnboardingStep.GOAL_PRIORITY: "What matters most for this goal?",
-    OnboardingStep.AGE: AGE_REQUEST,
-    OnboardingStep.HEIGHT: HEIGHT_REQUEST,
-    OnboardingStep.WEIGHT: WEIGHT_REQUEST,
-    OnboardingStep.TRAINING_DAYS: (
-        "Select every day you can usually train, then choose Continue."
-    ),
-    OnboardingStep.WEEKDAY_DURATION: (
-        "How much time can you usually train on a weekday?"
-    ),
-    OnboardingStep.WEEKEND_DURATION: (
-        "How much time can you usually train on a weekend day?"
-    ),
-    OnboardingStep.EQUIPMENT: (
-        "Select all equipment you can use, then choose Continue."
-    ),
-    OnboardingStep.POOL_ACCESS: (
-        "Select your regular pool-access days, or choose an irregular/no-access option."
-    ),
-    OnboardingStep.BIKE_ACCESS: (
-        "Select your regular bike-access days, or choose an irregular/no-access option."
-    ),
-    OnboardingStep.HEALTH_AREAS: (
-        "Select any areas that currently or historically limit training. Choose None "
-        "if there are no constraints, then choose Continue."
-    ),
-    OnboardingStep.HEALTH_TIMING: "When does this limitation apply?",
-    OnboardingStep.HEALTH_DESCRIPTION: (
-        "You may add a short limitation description, or skip it."
-    ),
-    OnboardingStep.COACH_TONE: "Which coaching tone do you prefer?",
-    OnboardingStep.COACH_DETAIL: "How much explanation do you prefer?",
-    OnboardingStep.BASELINE_SOURCE: (
-        "How would you like to establish your initial training baseline?"
-    ),
-    OnboardingStep.FILE_IMPORT_WAITING: FILE_IMPORT_REQUEST,
-    OnboardingStep.FILE_IMPORT_PROCESSING: (
-        "Your training file is being processed. Your saved progress is safe."
-    ),
-    OnboardingStep.FILE_IMPORT_COMPLETE: (
-        "Your training-history import is ready to finish."
-    ),
-    OnboardingStep.APPLE_HEALTH_PRIVACY_NOTICE: (
-        "Apple Health exports can contain sensitive health information.\n\n"
-        "This import reads only workout, heart-rate, distance, energy, and "
-        "source data required for training analysis.\n\n"
-        "Clinical records and unrelated health categories are ignored. The "
-        "uploaded file is deleted after processing."
-    ),
-    OnboardingStep.APPLE_HEALTH_WAITING_FOR_FILE: (
-        "Export your data from the Apple Health app and send the ZIP file here "
-        "as a Telegram document.\n\n"
-        "On iPhone:\n"
-        "Health → profile picture → Export All Health Data"
-    ),
-    OnboardingStep.APPLE_HEALTH_PROCESSING: (
-        "Your Apple Health export is being processed. You can return later; "
-        "your progress is saved."
-    ),
-    OnboardingStep.APPLE_HEALTH_IMPORT_COMPLETE: (
-        "Your Apple Health import is complete."
-    ),
-    OnboardingStep.APPLE_HEALTH_IMPORT_FAILED: (
-        "The Apple Health export could not be imported safely. Your uploaded "
-        "file was deleted. You can retry with a new export or choose another "
-        "baseline method."
-    ),
-    OnboardingStep.SUMMARY: "Review your profile before confirming it.",
-}
+
+def goal_clarification(answers: Mapping[str, Any]) -> str:
+    field = answers.get("_goal_clarification_field")
+    hint = answers.get("_goal_clarification_hint")
+    if field == "main_goal":
+        if hint == "race":
+            return "Which race or challenge are you preparing for?"
+        if hint == "distance":
+            return "What distance would you most like to reach?"
+        if hint == "pace":
+            return "Which distance or pace would you most like to improve?"
+        if hint == "other":
+            return "Tell me what you would most like to achieve with your training."
+        return (
+            "I\u2019d like to make that goal a little more specific so I can "
+            "understand "
+            "what you are working towards.\n\n"
+            "What would you most like to achieve with running?"
+        )
+    if field == "target_outcome":
+        return (
+            "What would success look like for this goal?\n\n"
+            "For example, completing it safely, finishing without stopping, or "
+            "reaching a specific time or pace."
+        )
+    if field == "event_date":
+        if hint == "exact_date":
+            return "What is the race or target date?"
+        return "Do you already have a race or target date?"
+    return "Could you make your goal a little more specific?"
+
+
+def goal_confirmation(answers: Mapping[str, Any]) -> str:
+    raw_draft = answers.get("goal_draft")
+    draft = raw_draft if isinstance(raw_draft, Mapping) else {}
+    main_goal = escape(str(draft.get("main_goal") or "Not specified"))
+    target_outcome = escape(str(draft.get("target_outcome") or "Not specified"))
+    secondary = escape(str(draft.get("secondary_priority") or "Not specified"))
+    raw_date = draft.get("event_date")
+    event_date = "Not set"
+    if isinstance(raw_date, str):
+        try:
+            event_date = date.fromisoformat(raw_date).strftime("%B %d, %Y")
+        except ValueError:
+            event_date = "Not set"
+    return (
+        "Here\u2019s what I understood:\n\n"
+        f"Main goal\n{main_goal}\n\n"
+        f"Event date\n{event_date}\n\n"
+        f"Target outcome\n{target_outcome}\n\n"
+        f"Secondary priority\n{secondary}\n\n"
+        "Is there anything else you want me to know about this goal?"
+    )
+
 
 VALIDATION_ERRORS: dict[str, str] = {
-    "invalid_age": "Enter a whole-number age from 16 to 100.",
-    "invalid_height": "Enter a height from 120 to 230 centimetres, or choose Skip.",
-    "invalid_weight": "Enter a weight from 35 to 250 kilograms, or choose Skip.",
-    "invalid_date": "Use DD/MM/YYYY or YYYY-MM-DD.",
-    "invalid_date_format": "Use DD/MM/YYYY or YYYY-MM-DD.",
-    "past_date": "The target event date must be in the future.",
-    "event_date_in_past": "The target event date must be in the future.",
-    "selection_required": "Select at least one option before continuing.",
-    "invalid_option": "Choose one of the available options.",
-    "invalid_number": "Enter a valid number.",
-    "number_out_of_range": "That number is outside the allowed range.",
-    "integer_required": "Enter a whole number.",
-    "number_required": "This number is required.",
     "invalid_action": CALLBACK_EXPIRED,
     "stale_action": CALLBACK_EXPIRED,
     "onboarding_not_active": CALLBACK_EXPIRED,
     "restart_not_allowed": CALLBACK_EXPIRED,
-    "parsed_value_missing": CALLBACK_EXPIRED,
     "parse_in_progress": (
         "I am still interpreting your previous answer. Please wait for that result."
     ),
@@ -397,15 +345,10 @@ VALIDATION_ERRORS: dict[str, str] = {
         "Some required answers are missing. Your progress is safe; resume onboarding "
         "to complete them."
     ),
-    "apple_health_file_not_expected": (
-        "Choose Import Apple Health data and review the privacy notice before "
-        "sending a ZIP file."
-    ),
     "apple_health_import_disabled": ("Apple Health import is currently unavailable."),
     "import_already_active": ("An Apple Health import is already in progress."),
     "training_file_not_expected": (
-        "Choose Import training history during onboarding, or Add workout from "
-        "your account menu, before sending this file."
+        "Use Add workout from your account menu before sending a training file."
     ),
     "training_file_import_disabled": "Training-file import is currently unavailable.",
     "unsupported_training_file": (
@@ -457,7 +400,6 @@ VALIDATION_ERRORS: dict[str, str] = {
     "tcx_multiple_activities_not_supported": (
         "Send one workout activity per TCX file."
     ),
-    "no_valid_imported_activities": FILE_IMPORT_NO_ACTIVITIES,
     "workout_feedback_disabled": "Workout feedback is currently unavailable.",
     "workout_flow_not_active": (
         "There is no active workout flow. Use the Add workout button to begin."
@@ -496,54 +438,14 @@ TRAINING_FILE_PROGRESS = {
 APPLE_HEALTH_PROGRESS = TRAINING_FILE_PROGRESS
 
 
-def apple_health_import_success(
-    *,
-    workouts_found: int,
-    activities_imported: int,
-    activities_updated: int,
-    activities_skipped: int,
-    heart_rate_records_matched: int,
-    warning_count: int,
-    discipline_counts: Mapping[str, int],
-) -> str:
-    """Render honest counters from the persisted import outcome."""
-
-    discipline_order = (
-        ("RUNNING", "Runs"),
-        ("CYCLING", "Rides"),
-        ("SWIMMING", "Swims"),
-        ("HIKING", "Hikes"),
-        ("STRENGTH", "Strength workouts"),
-        ("OTHER", "Other workouts"),
-    )
-    lines = [
-        "Apple Health import complete.",
-        "",
-        f"Workouts found: {workouts_found}",
-        f"Activities imported: {activities_imported}",
-        f"Activities updated: {activities_updated}",
-        f"Activities skipped: {activities_skipped}",
-        f"Heart-rate records matched: {heart_rate_records_matched}",
-        f"Warnings: {warning_count}",
-        "",
-        "Saved activities by discipline:",
-    ]
-    lines.extend(
-        f"{label}: {discipline_counts.get(value, 0)}"
-        for value, label in discipline_order
-    )
-    return "\n".join(lines)
-
-
 def apple_health_file_result(
     *,
     activities_imported: int,
     activities_updated: int,
     activities_skipped: int,
-    onboarding: bool = True,
     baseline_limited: bool = False,
 ) -> str:
-    """Render one bulk-file outcome for onboarding or a daily backfill."""
+    """Render one bulk-file outcome for an existing athlete."""
 
     lines = [
         "Apple Health history imported",
@@ -552,14 +454,9 @@ def apple_health_file_result(
         f"Activities updated: {activities_updated}",
         f"Activities skipped: {activities_skipped}",
         "",
-        (
-            "You can upload TCX files or finish the import."
-            if onboarding
-            else "Your history was updated and your deterministic baseline "
-            "was recalculated."
-        ),
+        "Your history was updated and your deterministic baseline was recalculated.",
     ]
-    if not onboarding and baseline_limited:
+    if baseline_limited:
         lines.extend(
             [
                 "",
@@ -577,14 +474,11 @@ def tcx_workout_result(
     duration_seconds: int,
     distance_meters: float | None,
     average_heart_rate: float | None,
-    onboarding: bool,
     baseline_limited: bool = False,
 ) -> str:
     """Render one canonical TCX workout without inventing missing metrics."""
 
-    if onboarding:
-        suffix = "You can upload another file or finish the import."
-    elif baseline_limited:
+    if baseline_limited:
         suffix = (
             "The workout is saved and your baseline was recalculated. "
             "The baseline is partial; disciplines without enough data "
@@ -616,49 +510,6 @@ def tcx_workout_result(
     )
 
 
-def training_import_complete(
-    *,
-    activities_imported: int,
-    activities_updated: int,
-    activities_skipped: int,
-    discipline_counts: Mapping[str, int],
-    baseline_limited: bool = False,
-) -> str:
-    """Render cumulative onboarding import counts and discipline coverage."""
-
-    labels = (
-        ("RUNNING", "Runs"),
-        ("CYCLING", "Rides"),
-        ("SWIMMING", "Swims"),
-        ("HIKING", "Hikes"),
-        ("STRENGTH", "Strength workouts"),
-        ("OTHER", "Other workouts"),
-    )
-    lines = [
-        "Training history imported",
-        "",
-        f"Activities imported: {activities_imported}",
-        f"Activities updated: {activities_updated}",
-        f"Activities skipped: {activities_skipped}",
-        "",
-        "Imported disciplines:",
-    ]
-    lines.extend(
-        f"{label}: {discipline_counts.get(value, 0)}" for value, label in labels
-    )
-    lines.extend(
-        [
-            "",
-            "Your deterministic baseline was recalculated from the available data.",
-        ]
-    )
-    if baseline_limited:
-        lines.append(
-            "The baseline is partial; disciplines without enough data remain UNKNOWN."
-        )
-    return "\n".join(lines)
-
-
 def manual_heart_rate_confirmation(bpm: int) -> str:
     return f"Average heart rate: {bpm} bpm"
 
@@ -667,84 +518,10 @@ def discomfort_description_confirmation(description: str) -> str:
     return f"Discomfort description:\n\n{escape(description)}"
 
 
-def step_prompt(step: OnboardingStep) -> str:
-    """Return the centralized question for an onboarding step."""
-
-    return STEP_PROMPTS[step]
-
-
 def validation_error(code: str) -> str:
     """Map a safe application error code to English copy."""
 
     return VALIDATION_ERRORS.get(code, GENERIC_ERROR)
-
-
-def interpreted_answer(display_value: str) -> str:
-    """Render the mandatory pre-confirmation interpretation."""
-
-    return f"I interpreted your answer as:\n\n{escape(display_value)}"
-
-
-def clarification(question: str | None) -> str:
-    """Render one English clarification without storing a parsed value."""
-
-    if question:
-        return escape(question)
-    return "Please give one more specific detail so I can interpret your answer safely."
-
-
-def selected_values(values: Sequence[str]) -> str:
-    """Render selected multi-choice values beneath a prompt."""
-
-    if not values:
-        return "Selected: none"
-    return "Selected: " + ", ".join(_display(value) for value in values)
-
-
-def onboarding_summary(answers: Mapping[str, Any]) -> str:
-    """Render staged answers for final confirmation."""
-
-    event = "No target event"
-    if answers.get("event_status") is True:
-        event_name = answers.get("event_name") or "Unnamed event"
-        event_date = answers.get("event_date") or "date not provided"
-        event = f"{event_name} — {event_date}"
-
-    lines = [
-        "Review your athlete profile:",
-        "",
-        f"Sport: {_answer_display(answers, 'primary_sport')}",
-        f"Goal: {_answer_display(answers, 'goal_type')}",
-        f"Event: {escape(str(event))}",
-        f"Goal priority: {_answer_display(answers, 'goal_priority')}",
-        f"Age: {_display(answers.get('age'))}",
-        f"Height: {_optional_metric(answers.get('height'), 'cm')}",
-        f"Weight: {_optional_metric(answers.get('weight'), 'kg')}",
-        f"Training days: {_display_list(answers.get('training_days'))}",
-        (
-            "Weekday availability: "
-            f"{_display_availability(answers.get('weekday_duration'))}"
-        ),
-        (
-            "Weekend availability: "
-            f"{_display_availability(answers.get('weekend_duration'))}"
-        ),
-        f"Equipment: {_answer_list_display(answers, 'equipment')}",
-        f"Pool access: {_display_access(answers.get('pool_access'))}",
-        f"Bike access: {_display_access(answers.get('bike_access'))}",
-        f"Health constraints: {_answer_list_display(answers, 'health_areas')}",
-        f"Constraint timing: {_display(answers.get('health_timing'))}",
-        f"Constraint description: {_display(answers.get('health_description'))}",
-        (
-            "Coach style: "
-            f"{_display(answers.get('coach_tone'))}; "
-            f"{_display(answers.get('coach_detail'))}"
-        ),
-        f"Baseline source: {_display(answers.get('baseline_source'))}",
-        "",
-        "Confirm only if this is correct.",
-    ]
-    return "\n".join(lines)
 
 
 def persisted_profile(profile: Mapping[str, Any]) -> str:
@@ -991,14 +768,6 @@ def _display_availability(value: Any) -> str:
         "VARIABLE": "Variable",
     }
     return labels.get(str(value), _display(value))
-
-
-def _display_access(value: Any) -> str:
-    if not isinstance(value, Mapping):
-        return _display_list(value)
-    access_type = _display(value.get("type"))
-    days = _display_list(value.get("days"))
-    return access_type if not value.get("days") else f"{access_type}: {days}"
 
 
 def _equipment_access_lines(value: Any) -> list[str]:

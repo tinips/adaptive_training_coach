@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import replace
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import event, func, select
@@ -21,35 +21,19 @@ from app.db.models import (
     ActivityFeedback,
     ActivitySourceLink,
     AthleteBaseline,
-    BaselinePreference,
-    BodyArea,
-    CoachPreference,
     DisciplineBaseline,
-    EquipmentAccess,
-    EquipmentAccessType,
-    EquipmentType,
-    GoalType,
-    HealthConstraint,
-    HealthConstraintType,
     OnboardingSession,
     Workout,
     WorkoutFlowSession,
 )
 from app.domain.enums import (
     ActivitySource,
-    BaselinePreferenceStatus,
-    BaselineSource,
     BaselineStatus,
-    CoachTone,
     ConnectionStatus,
-    DayOfWeek,
-    DetailLevel,
     Discipline,
-    GoalPriority,
     LevelLabel,
     OAuthProvider,
     OnboardingStep,
-    PrimarySport,
     SyncStatus,
     SyncType,
     WebhookAspectType,
@@ -60,12 +44,8 @@ from app.integrations.apple_health.models import ParsedWorkout
 from app.integrations.strava.exceptions import StravaAuthenticationError
 from app.integrations.tcx.models import ParsedTCXActivity, ParsedTCXPosition
 from app.repositories import (
-    AvailabilityRuleInput,
     BaselineRepository,
-    EquipmentAccessInput,
-    HealthConstraintInput,
     OnboardingRepository,
-    ProfileRepository,
     StravaRepository,
     UserRepository,
 )
@@ -171,12 +151,12 @@ async def test_onboarding_resumes_and_never_crosses_user_scope(
         assert created
         await repository.save_progress(
             user_id=first_user_id,
-            current_step=OnboardingStep.PRIMARY_SPORT,
-            answers={"consent": True},
-        )
-        await repository.begin_free_text(
-            user_id=first_user_id,
-            onboarding_step=OnboardingStep.PRIMARY_SPORT,
+            current_step=OnboardingStep.GOAL_INTAKE,
+            answers={
+                "consent": True,
+                "_goal_intake_phase": "COLLECTING",
+                "raw_goal_text": "Complete a marathon",
+            },
         )
         onboarding_id = onboarding.id
         await session.commit()
@@ -185,10 +165,8 @@ async def test_onboarding_resumes_and_never_crosses_user_scope(
         repository = OnboardingRepository(session)
         resumed = await repository.get_for_user(user_id=first_user_id)
         assert resumed is not None
-        assert resumed.current_step is OnboardingStep.PRIMARY_SPORT
-        assert resumed.answers == {"consent": True}
-        assert resumed.pending_free_text_step is OnboardingStep.PRIMARY_SPORT
-        assert resumed.pending_parsed_value is None
+        assert resumed.current_step is OnboardingStep.GOAL_INTAKE
+        assert resumed.answers["raw_goal_text"] == "Complete a marathon"
         assert (
             await repository.get_for_user(
                 user_id=second_user_id,
@@ -198,81 +176,7 @@ async def test_onboarding_resumes_and_never_crosses_user_scope(
         )
         locked = await repository.lock_for_user(user_id=first_user_id)
         assert locked.id == onboarding_id
-        await repository.set_pending_parse(
-            user_id=first_user_id,
-            onboarding_step=OnboardingStep.PRIMARY_SPORT,
-            parsed_value={"normalized_value": "OTHER"},
-        )
-        assert locked.answers == {"consent": True}
-
-
-async def test_profile_finalization_is_idempotent_owned_and_cascading(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    async with session_factory() as session:
-        first_user_id = await create_user(session, telegram_user_id=303)
-        second_user_id = await create_user(session, telegram_user_id=404)
-        repository = ProfileRepository(session)
-        arguments = {
-            "user_id": first_user_id,
-            "age": 36,
-            "height_cm": 178.0,
-            "weight_kg": 72.5,
-            "primary_sport": PrimarySport.TRIATHLON,
-            "goal_type": GoalType.HALF_IRONMAN_70_3,
-            "event_name": "Coastal 70.3",
-            "event_date": date(2027, 5, 9),
-            "goal_priority": GoalPriority.FINISH_SAFELY,
-            "availability": [
-                AvailabilityRuleInput(DayOfWeek.MONDAY, 60, False),
-                AvailabilityRuleInput(DayOfWeek.SUNDAY, None, True),
-            ],
-            "equipment": [
-                EquipmentAccessInput(
-                    EquipmentType.ROAD_BIKE,
-                    EquipmentAccessType.REGULAR,
-                    (DayOfWeek.SUNDAY,),
-                ),
-            ],
-            "constraints": [
-                HealthConstraintInput(
-                    BodyArea.KNEE,
-                    HealthConstraintType.HISTORICAL,
-                    "User-reported historical limitation",
-                ),
-            ],
-            "coach_tone": CoachTone.CONCISE_PRACTICAL,
-            "detail_level": DetailLevel.SHORT,
-            "baseline_source": BaselineSource.STRAVA,
-            "baseline_status": BaselinePreferenceStatus.SELECTED,
-        }
-        first = await repository.finalize_profile(**arguments)
-        second = await repository.finalize_profile(**arguments)
-        assert first.athlete_profile is not None
-        assert second.athlete_profile is not None
-        assert first.athlete_profile.id == second.athlete_profile.id
-        assert len(second.availability_rules) == 2
-        assert len(second.equipment_access) == 1
-        assert len(second.health_constraints) == 1
-        limitation = second.health_constraints[0]
-        assert limitation.is_historical
-        assert not limitation.is_current
-        other_user = await repository.get_bundle(user_id=second_user_id)
-        assert other_user.athlete_profile is None
-        assert other_user.availability_rules == ()
-
-        assert await UserRepository(session).delete(user_id=first_user_id)
-        await session.commit()
-        for model in (
-            EquipmentAccess,
-            HealthConstraint,
-            CoachPreference,
-            BaselinePreference,
-        ):
-            count = await session.scalar(
-                select(func.count()).select_from(model),
-            )
-            assert count == 0
+        assert locked.answers["consent"] is True
 
 
 async def test_strava_atomic_guards_dedup_and_token_erasure(

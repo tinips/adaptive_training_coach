@@ -11,12 +11,12 @@ from app.integrations.llm.mock import (
 from app.integrations.llm.models import StructuredOnboardingModel
 
 
-def create_onboarding_text_model(
+def create_goal_extraction_model(
     settings: Settings,
     *,
     fake_scenario: FakeLLMScenario = FakeLLMScenario.AUTO,
 ) -> StructuredOnboardingModel:
-    """Create one model adapter without constructing workflow topology."""
+    """Create the focused goal model adapter without workflow topology."""
 
     if settings.llm_mode == "mock":
         return DeterministicFakeOnboardingModel(

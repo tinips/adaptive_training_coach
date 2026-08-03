@@ -14,7 +14,6 @@ from app.bot.service import CoachBotApplicationService
 from app.domain.enums import (
     AppleHealthImportStatus,
     TrainingFileFormat,
-    TrainingImportContext,
     UserStatus,
     WorkoutFlowStep,
 )
@@ -48,7 +47,6 @@ def _feedback_result(
         user_id=user_id or uuid4(),
         activity_id=activity_id,
         state=state,
-        return_to_onboarding=False,
         pending_manual_average_heart_rate=pending_heart_rate,
         pending_discomfort_description=pending_description,
     )
@@ -109,7 +107,6 @@ async def test_daily_tcx_import_starts_feedback_for_the_owned_activity() -> None
     started_at = datetime(2026, 7, 29, 8, 30, tzinfo=UTC)
     outcome = TrainingFileImportOutcome(
         status=AppleHealthImportStatus.SUCCEEDED,
-        context=TrainingImportContext.DAILY,
         file_format=TrainingFileFormat.TCX,
         activity_id=activity_id,
         activities_imported=1,
@@ -162,92 +159,9 @@ async def test_daily_tcx_import_starts_feedback_for_the_owned_activity() -> None
         duration_seconds=3_600,
         distance_meters=10_000,
         average_heart_rate=None,
-        onboarding=False,
     )
     assert response.text == f"{summary}\n\n{messages.HEART_RATE_MISSING}"
     assert response.keyboard == keyboards.manual_heart_rate_offer_keyboard()
-
-
-@pytest.mark.asyncio
-async def test_onboarding_upload_delays_feedback_until_latest_enrichment() -> None:
-    identity = _identity()
-    user_id = uuid4()
-    activity_id = uuid4()
-    started_at = datetime(2026, 7, 29, 8, 30, tzinfo=UTC)
-    uploaded = TrainingFileImportOutcome(
-        status=AppleHealthImportStatus.SUCCEEDED,
-        context=TrainingImportContext.ONBOARDING,
-        file_format=TrainingFileFormat.TCX,
-        activity_id=activity_id,
-        activities_imported=1,
-        sport="RUNNING",
-        started_at=started_at,
-        duration_seconds=3_600,
-        distance_meters=10_000,
-        average_heart_rate=None,
-    )
-    finished = TrainingFileImportOutcome(
-        status=AppleHealthImportStatus.SUCCEEDED,
-        context=TrainingImportContext.ONBOARDING,
-        file_format=TrainingFileFormat.UNKNOWN,
-        activity_id=activity_id,
-        activities_imported=1,
-        discipline_counts={"RUNNING": 1},
-    )
-    latest_activity = SimpleNamespace(id=activity_id)
-    training_import = SimpleNamespace(
-        process_upload=AsyncMock(return_value=uploaded),
-        finish_onboarding_import=AsyncMock(return_value=finished),
-        latest_onboarding_activity=AsyncMock(return_value=latest_activity),
-    )
-    feedback = AsyncMock(spec=WorkoutFeedbackService)
-    feedback.snapshot.return_value = None
-    feedback.start_for_activity.return_value = _feedback_result(
-        WorkoutFlowStep.HR_OFFER,
-        user_id=user_id,
-        activity_id=activity_id,
-    )
-    service, onboarding, _ = _facade(
-        feedback=feedback,
-        training_import=training_import,
-        resolved_user_id=user_id,
-    )
-    onboarding.snapshot.return_value = SimpleNamespace(user_id=user_id)
-
-    upload_response = await service.handle_document(
-        identity,
-        SimpleNamespace(file_id="telegram-file"),
-        AsyncMock(),
-        AsyncMock(),
-    )
-
-    feedback.start_for_activity.assert_not_awaited()
-    assert upload_response.keyboard == keyboards.training_file_import_keyboard()
-
-    finish_response = await service.handle_callback(
-        identity,
-        "ob:v1:import:finish",
-    )
-
-    feedback.start_for_activity.assert_not_awaited()
-    training_import.finish_onboarding_import.assert_awaited_once_with(identity=identity)
-    assert finish_response.keyboard == keyboards.training_file_complete_keyboard(
-        can_enrich_latest=True
-    )
-
-    enrichment_response = await service.handle_callback(
-        identity,
-        "ob:v1:import:enrich_latest",
-    )
-
-    training_import.latest_onboarding_activity.assert_awaited_once_with(user_id=user_id)
-    feedback.start_for_activity.assert_awaited_once_with(
-        user_id=user_id,
-        activity_id=activity_id,
-        return_to_onboarding=True,
-    )
-    assert enrichment_response.text == messages.HEART_RATE_MISSING
-    assert enrichment_response.keyboard == keyboards.manual_heart_rate_offer_keyboard()
 
 
 @pytest.mark.asyncio
@@ -277,7 +191,6 @@ async def test_daily_apple_import_closes_waiting_flow_without_questions() -> Non
     identity = _identity()
     outcome = TrainingFileImportOutcome(
         status=AppleHealthImportStatus.SUCCEEDED,
-        context=TrainingImportContext.DAILY,
         file_format=TrainingFileFormat.APPLE_HEALTH_ZIP,
         activities_imported=3,
     )
@@ -309,7 +222,6 @@ async def test_daily_apple_import_closes_waiting_flow_without_questions() -> Non
             activities_imported=3,
             activities_updated=0,
             activities_skipped=0,
-            onboarding=False,
         )
         in response.text
     )
@@ -352,7 +264,6 @@ async def test_add_workout_back_cancels_waiting_flow_before_home() -> None:
 async def test_direct_daily_import_failure_returns_valid_home_actions() -> None:
     failed = TrainingFileImportOutcome(
         status=AppleHealthImportStatus.FAILED,
-        context=TrainingImportContext.DAILY,
         file_format=TrainingFileFormat.UNKNOWN,
         safe_error_code="unsupported_training_file",
     )

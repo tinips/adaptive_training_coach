@@ -1,5 +1,11 @@
 # Onboarding and Strava Vertical Slice
 
+> **2026-08-03 scope amendment:** The original multi-step onboarding described
+> below is retained as historical implementation context, not current product
+> behavior. Current onboarding ends immediately after explicit conversational
+> goal confirmation. See the final amendment section and
+> `docs/current-product-flow.md` for the supported architecture.
+
 ## Objective
 
 Build and validate a runnable, multi-user adaptive endurance coaching vertical
@@ -1064,3 +1070,141 @@ questions.
   was running with zero restarts.
 - No live Telegram chat journey, Strava provider flow, webhook, or live-LLM
   interaction was performed or claimed.
+
+## Follow-up: first conversational onboarding goal
+
+Requested on 2026-08-02. This follow-up changes only the first interaction
+after **Let's build my profile** and then hands off to the unchanged existing
+primary-sport question and remaining onboarding sequence.
+
+### Current decisions
+
+1. The goal intake is a resumable subflow over the existing `PRIMARY_SPORT`
+   step. Private phase keys and `goal_draft` live in
+   `onboarding_sessions.answers`; no generic conversation framework or new
+   onboarding enum is introduced.
+2. Each relevant free-text message is retained exactly before the focused,
+   stateless compiled LangGraph invokes the existing LangChain structured-output
+   model integration. The graph has no checkpointer and no database access.
+3. The narrow model contract contains `main_goal`, `event_date`,
+   `target_outcome`, `secondary_priority`, `missing_fields`,
+   `ambiguous_fields`, and `message_status`. Application code revalidates,
+   preserves valid earlier fields, rejects vague main goals, ignores
+   `secondary_priority` for completeness, and never invents dates.
+4. Clarification buttons are deterministic and never invoke an LLM. **Not yet**
+   resolves a missing date to a valid null date. Free-text clarification and
+   add/change messages invoke the same focused graph with the accumulated draft.
+5. OFF_TOPIC output never mutates the goal draft or canonical goal. Start again
+   clears only the temporary goal draft and retained goal messages; consent and
+   unrelated staged profile data remain.
+6. Explicit **No, that\u2019s right** confirmation transactionally writes the
+   canonical `training_goals` fields and removes the temporary draft before
+   rendering the unchanged primary-sport question.
+7. Migration `0007_conversational_training_goal` is required because the
+   existing table had only legacy enum goal type, event, and priority columns.
+   It adds the four conversational concepts, original description, and explicit
+   confirmed status while retaining all legacy columns for the untouched rest
+   of onboarding.
+
+### Progress
+
+- [x] Inspect the dirty worktree, current post-consent transition, onboarding
+  JSON staging, legacy structured graph, canonical goal table, finalization,
+  callbacks, rendering, and tests before implementation.
+- [x] Add the focused goal schema and compiled graph through the existing model
+  adapter, safe observer boundary, rate limit, and LLM usage persistence.
+- [x] Add raw-message staging, accumulated draft merging, prioritized
+  clarification, off-topic handling, add/change, restart, cancellation, and
+  explicit confirmation behavior.
+- [x] Add canonical conversational goal columns and ownership-scoped repository
+  persistence without changing the existing enum-driven remainder.
+- [x] Add focused structured-result, persistence, merge, callback, rendering,
+  and compatibility tests; update current-flow documentation.
+- [x] Run and record final full test, Ruff, formatting, mypy, diff, migration,
+  and Docker/runtime validation.
+
+### Validation evidence recorded so far
+
+- Focused goal graph, persistence, onboarding-service, and bot scenario suites:
+  `44 passed`.
+- Focused migration and conversational-goal suites after adding `0007`:
+  `12 passed`.
+- Full host suite: `344 passed, 1 failed`. The only failure is the unchanged
+  Windows training-import cleanup race
+  `test_actual_download_size_is_bounded_and_temp_metadata_is_cleared`; this
+  exact out-of-scope failure was already documented before this follow-up.
+- Full Linux suite in the built Compose application image: `345 passed in
+  50.63s`.
+- `ruff check .`, `ruff format --check .`, `mypy app`, and `git diff --check`
+  passed. Ruff checked 145 formatted files and mypy checked 113 source files.
+- The first PostgreSQL attempt exposed that the original revision identifier
+  exceeded the existing 32-character Alembic version column. Transactional DDL
+  rolled it back cleanly at `0006`; the identifier was shortened to
+  `0007_conversational_goal`, and all migration tests were rerun successfully.
+- Live Compose PostgreSQL upgraded from `0006_exact_workout_identity` to
+  `0007_conversational_goal`; `alembic current` reports head and `alembic check`
+  reports no new upgrade operations.
+- The Compose API image built successfully. No live Telegram chat, Strava,
+  webhook, or live-LLM request was performed or claimed.
+
+## 2026-08-03 retained conversational-goal checkpoint amendment
+
+### Decision
+
+The supported onboarding boundary is now Start, welcome/help/privacy, consent,
+setup introduction, conversational goal intake, clarification, confirmation,
+and the terminal `GOAL_CONFIRMED` checkpoint. The old profile continuation is
+removed rather than hidden: its enum states, state machine, generic onboarding
+text graph, callbacks, messages, keyboards, materialization/finalization
+writers, onboarding import branches, and tests no longer exist.
+
+Existing completed athletes retain their normalized records and post-profile
+features. Legacy profile tables and enum goal columns remain read-compatible
+because `ProfileService.get` still serves them. Daily Apple Health/TCX imports,
+workout feedback, baselines, and Strava remain available independently from
+onboarding. The conversational goal repository method is the sole canonical
+goal writer.
+
+Migration `0008_remove_legacy_onboarding` normalizes legacy sessions into the
+four retained checkpoints, preserves cancellation, maps old completed session
+status to active without downgrading user lifecycle status, removes unused
+onboarding control/provenance columns, and makes legacy goal classification
+columns nullable. Canonical goals, workouts, import outcomes, historical
+profiles, baselines, feedback, and Strava data are preserved.
+
+### Progress
+
+- [x] Inventory legacy runtime paths, persistence fields, tests, and docs.
+- [x] Reduce onboarding states, application service, repository, bot routing,
+  messages, and keyboards to the retained flow.
+- [x] Remove the generic onboarding text graph and retain one focused compiled
+  goal extraction operation.
+- [x] Remove post-goal profile finalization and onboarding-only import/feedback
+  coupling while preserving existing-athlete features.
+- [x] Add `0008` with portable upgrade/downgrade and session normalization.
+- [x] Replace legacy tests with focused goal, terminal checkpoint, migration,
+  historical profile, and daily-import coverage.
+- [x] Rewrite current product-flow documentation and amend the README.
+- [x] Complete the final full host, Ruff, formatting, mypy, PostgreSQL, Alembic,
+  and Compose validation pass.
+
+### Evidence before final validation
+
+- Test collection before cleanup: 345 tests.
+- Test collection after cleanup: 252 tests.
+- Focused retained-flow, migration, historical profile, daily import, and
+  feedback selection: 76 passed.
+- Portable empty-database upgrade, downgrade to `0007`, and re-upgrade to
+  `0008` completed successfully.
+- Final host suite: `252 passed in 77.39s`.
+- `ruff check .`, `ruff format --check .`, `mypy app`, and
+  `git diff --check` passed; mypy checked 105 source files and Ruff confirmed
+  133 files formatted.
+- Live Compose PostgreSQL upgraded transactionally from `0007` to
+  `0008_remove_legacy_onboarding`; `alembic current` reports head and
+  `alembic check` reports no pending schema operations.
+- `docker compose up -d --build` rebuilt the application image, the migration
+  container exited 0, PostgreSQL and FastAPI are healthy, the bot is running,
+  and live local `/health` and `/ready` returned `ok` and `ready`.
+- No live Telegram chat, live LLM call, Strava authorization, or webhook was
+  performed or claimed.

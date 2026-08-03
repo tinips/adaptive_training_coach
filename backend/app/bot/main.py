@@ -24,7 +24,7 @@ from app.services.profiles import ProfileService
 from app.services.strava.orchestrator import StravaCoordinator
 from app.services.training_import import TrainingFileImportService
 from app.services.workout_feedback import WorkoutFeedbackService
-from app.workflows.onboarding_text.graph import create_onboarding_text_parser
+from app.workflows.onboarding_goal.graph import create_goal_extractor
 
 TelegramApplication = Application[Any, Any, Any, Any, Any, Any]
 
@@ -64,7 +64,7 @@ def build_runtime(
     runtime_settings = settings or get_settings()
     runtime_engine = engine or create_engine(runtime_settings)
     session_factory = create_session_factory(runtime_engine)
-    parser = create_onboarding_text_parser(runtime_settings)
+    goal_extractor = create_goal_extractor(runtime_settings)
     telegram_token = runtime_settings.telegram_bot_token
     initial_sync_notifier = (
         TelegramInitialSyncNotifier(
@@ -86,7 +86,7 @@ def build_runtime(
     service = CoachBotApplicationService(
         onboarding=OnboardingService(
             session_factory=session_factory,
-            text_parser=parser,
+            goal_extractor=goal_extractor,
             settings=runtime_settings,
         ),
         profiles=ProfileService(session_factory),

@@ -9,11 +9,7 @@ from langchain_core.runnables import RunnableConfig, RunnableLambda
 
 from app.domain.enums import OnboardingStep
 from app.integrations.llm.models import (
-    EquipmentOnboardingOutput,
-    HealthAreasOnboardingOutput,
     LLMProviderError,
-    MultiValueOnboardingOutput,
-    NumericOnboardingOutput,
     StructuredModelResponse,
     StructuredOutputSchema,
 )
@@ -60,6 +56,7 @@ class DeterministicFakeOnboardingModel:
         messages: list[BaseMessage],
         config: RunnableConfig,
     ) -> StructuredModelResponse:
+        del step
         user_text = _last_user_text(messages)
         scenario, value = self._resolve_scenario(user_text)
 
@@ -72,36 +69,18 @@ class DeterministicFakeOnboardingModel:
                 return StructuredModelResponse(
                     output={"confidence": "not-a-number"},
                 )
-            if scenario is FakeLLMScenario.CLARIFICATION:
-                output = schema.model_validate(
-                    {
-                        "normalized_value": None,
-                        "display_value": None,
-                        "confidence": 0.55,
-                        "requires_clarification": True,
-                        "clarification_question": (
-                            "Could you describe that in one more specific phrase?"
-                        ),
-                        "safety_flag": False,
-                        "safety_reason": None,
-                    }
+            goal_output = schema.model_validate(
+                _fake_goal_output(
+                    value,
+                    needs_clarification=scenario
+                    in {
+                        FakeLLMScenario.CLARIFICATION,
+                        FakeLLMScenario.LOW_CONFIDENCE,
+                    },
                 )
-                return StructuredModelResponse(output=output)
-            confidence = 0.35 if scenario is FakeLLMScenario.LOW_CONFIDENCE else 0.98
-            normalized = _normalized_fake_value(step, schema, value)
-            output = schema.model_validate(
-                {
-                    "normalized_value": normalized,
-                    "display_value": value,
-                    "confidence": confidence,
-                    "requires_clarification": False,
-                    "clarification_question": None,
-                    "safety_flag": False,
-                    "safety_reason": None,
-                }
             )
             return StructuredModelResponse(
-                output=output,
+                output=goal_output,
                 prompt_tokens=8,
                 completion_tokens=12,
             )
@@ -139,42 +118,19 @@ def _last_user_text(messages: list[BaseMessage]) -> str:
     return ""
 
 
-def _normalized_fake_value(
-    step: OnboardingStep,
-    schema: StructuredOutputSchema,
+def _fake_goal_output(
     user_text: str,
-) -> str | int | float | list[str]:
-    if issubclass(
-        schema,
-        (
-            MultiValueOnboardingOutput,
-            EquipmentOnboardingOutput,
-            HealthAreasOnboardingOutput,
+    *,
+    needs_clarification: bool,
+) -> dict[str, object]:
+    return {
+        "main_goal": user_text or None,
+        "event_date": None,
+        "target_outcome": None if needs_clarification else "Achieve the stated goal",
+        "secondary_priority": None,
+        "missing_fields": ["target_outcome"] if needs_clarification else [],
+        "ambiguous_fields": [],
+        "message_status": (
+            "NEEDS_CLARIFICATION" if needs_clarification else "COMPLETE"
         ),
-    ):
-        return ["OTHER"]
-    if issubclass(schema, NumericOnboardingOutput):
-        try:
-            return float(user_text)
-        except ValueError:
-            return 0
-    folded = user_text.casefold().strip()
-    if step is OnboardingStep.PRIMARY_SPORT:
-        translations = {
-            "running": "RUNNING",
-            "correr": "RUNNING",
-            "córrer": "RUNNING",
-            "cycling": "CYCLING",
-            "ciclismo": "CYCLING",
-            "ciclisme": "CYCLING",
-            "swimming": "SWIMMING",
-            "natación": "SWIMMING",
-            "natació": "SWIMMING",
-            "triathlon": "TRIATHLON",
-            "triatlón": "TRIATHLON",
-            "triatló": "TRIATHLON",
-        }
-        return translations.get(folded, "OTHER")
-    if step in {OnboardingStep.GOAL_TYPE, OnboardingStep.GOAL_PRIORITY}:
-        return "OTHER"
-    return user_text
+    }

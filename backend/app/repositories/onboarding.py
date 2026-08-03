@@ -3,20 +3,18 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.base import utc_now
 from app.db.models import OnboardingSession
 from app.domain.enums import OnboardingStatus, OnboardingStep
 from app.repositories.errors import OwnedRecordNotFoundError
 
 
 class OnboardingRepository:
-    """Store only confirmed answers plus explicitly pending parse output."""
+    """Store the retained onboarding checkpoints and temporary goal draft."""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -105,77 +103,13 @@ class OnboardingRepository:
         user_id: uuid.UUID,
         current_step: OnboardingStep,
         answers: dict[str, object],
-        return_to_summary: bool | None = None,
     ) -> OnboardingSession:
-        """Replace confirmed staging data after one deterministic transition."""
+        """Replace retained staging data after one deterministic transition."""
 
         onboarding = await self.require_for_user(user_id=user_id)
         onboarding.current_step = current_step
         onboarding.answers = dict(answers)
-        if return_to_summary is not None:
-            onboarding.return_to_summary = return_to_summary
         await self._session.flush()
-        return onboarding
-
-    async def set_pending_parse(
-        self,
-        *,
-        user_id: uuid.UUID,
-        onboarding_step: OnboardingStep,
-        parsed_value: dict[str, object],
-    ) -> OnboardingSession:
-        """Store safe interpreted output without merging it into answers."""
-
-        onboarding = await self.require_for_user(user_id=user_id)
-        onboarding.pending_free_text_step = onboarding_step
-        onboarding.pending_parsed_value = dict(parsed_value)
-        await self._session.flush()
-        return onboarding
-
-    async def begin_free_text(
-        self,
-        *,
-        user_id: uuid.UUID,
-        onboarding_step: OnboardingStep,
-    ) -> OnboardingSession:
-        """Persist entry into an explicit Other/Write answer path."""
-
-        onboarding = await self.require_for_user(user_id=user_id)
-        onboarding.pending_free_text_step = onboarding_step
-        onboarding.pending_parsed_value = None
-        await self._session.flush()
-        return onboarding
-
-    async def clear_pending_parse(
-        self,
-        *,
-        user_id: uuid.UUID,
-    ) -> OnboardingSession:
-        """Discard a pending interpretation after confirmation or rejection."""
-
-        onboarding = await self.require_for_user(user_id=user_id)
-        onboarding.pending_free_text_step = None
-        onboarding.pending_parsed_value = None
-        await self._session.flush()
-        return onboarding
-
-    async def complete(
-        self,
-        *,
-        user_id: uuid.UUID,
-        completed_at: datetime | None = None,
-    ) -> OnboardingSession:
-        """Mark final confirmation idempotently."""
-
-        onboarding = await self.require_for_user(user_id=user_id)
-        if onboarding.status is not OnboardingStatus.COMPLETED:
-            onboarding.status = OnboardingStatus.COMPLETED
-            onboarding.current_step = OnboardingStep.SUMMARY
-            onboarding.completed_at = completed_at or utc_now()
-            onboarding.pending_free_text_step = None
-            onboarding.pending_parsed_value = None
-            onboarding.return_to_summary = False
-            await self._session.flush()
         return onboarding
 
     async def cancel(
@@ -187,9 +121,6 @@ class OnboardingRepository:
 
         onboarding = await self.require_for_user(user_id=user_id)
         onboarding.status = OnboardingStatus.CANCELLED
-        onboarding.pending_free_text_step = None
-        onboarding.pending_parsed_value = None
-        onboarding.return_to_summary = False
         await self._session.flush()
         return onboarding
 
@@ -204,9 +135,5 @@ class OnboardingRepository:
         onboarding.status = OnboardingStatus.ACTIVE
         onboarding.current_step = OnboardingStep.CONSENT
         onboarding.answers = {}
-        onboarding.pending_free_text_step = None
-        onboarding.pending_parsed_value = None
-        onboarding.return_to_summary = False
-        onboarding.completed_at = None
         await self._session.flush()
         return onboarding

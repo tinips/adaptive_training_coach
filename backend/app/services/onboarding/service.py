@@ -1,4 +1,4 @@
-"""Stateful onboarding use cases backed by PostgreSQL sessions."""
+"""Focused, durable onboarding through explicit conversational-goal confirmation."""
 
 from __future__ import annotations
 
@@ -18,51 +18,27 @@ from app.domain.enums import (
     OnboardingStep,
     UserStatus,
 )
+from app.integrations.llm.models import GoalExtractionOutput, GoalFieldName
 from app.repositories.llm_usage import LLMUsageRepository
 from app.repositories.onboarding import OnboardingRepository
+from app.repositories.profiles import ProfileRepository
 from app.repositories.users import UserRepository
 from app.schemas.common import TelegramIdentity
-from app.schemas.onboarding import (
-    OnboardingParseResult,
-    OnboardingTextParser,
-    SummaryEditSection,
-)
-from app.schemas.onboarding_service import OnboardingServiceResult
-from app.services.onboarding.state_machine import (
-    OnboardingStateMachine,
-    OnboardingStateMachineError,
-    answer_key,
-)
+from app.schemas.onboarding_goal import GoalExtractionWorkflowResult, GoalExtractor
+from app.schemas.onboarding_service import OnboardingResultKind, OnboardingServiceResult
 
-_DIRECT_TEXT_STEPS = {
-    OnboardingStep.EVENT_NAME,
-    OnboardingStep.EVENT_DATE,
-    OnboardingStep.AGE,
-    OnboardingStep.HEIGHT,
-    OnboardingStep.WEIGHT,
-}
-_MULTI_STEPS = {
-    OnboardingStep.TRAINING_DAYS,
-    OnboardingStep.EQUIPMENT,
-    OnboardingStep.POOL_ACCESS,
-    OnboardingStep.BIKE_ACCESS,
-    OnboardingStep.HEALTH_AREAS,
-}
-_MULTI_FREE_TEXT_STEPS = {
-    OnboardingStep.EQUIPMENT,
-    OnboardingStep.HEALTH_AREAS,
-}
-_EXPLICIT_FREE_TEXT_STEPS = {
-    OnboardingStep.PRIMARY_SPORT,
-    OnboardingStep.GOAL_TYPE,
-    OnboardingStep.GOAL_PRIORITY,
-    OnboardingStep.EQUIPMENT,
-    OnboardingStep.HEALTH_AREAS,
-    OnboardingStep.HEALTH_DESCRIPTION,
-}
 _PARSE_IN_FLIGHT_KEY = "_parse_in_flight"
 _PARSE_IN_FLIGHT_TTL = timedelta(minutes=10)
-_SETUP_INTRODUCTION_PENDING_KEY = "_setup_introduction_pending"
+_GOAL_PHASE_KEY = "_goal_intake_phase"
+_GOAL_PHASE_COLLECTING = "COLLECTING"
+_GOAL_PHASE_CLARIFYING = "CLARIFYING"
+_GOAL_PHASE_CONFIRMING = "CONFIRMING"
+_GOAL_PHASE_ADDING = "ADDING"
+_GOAL_DRAFT_KEY = "goal_draft"
+_RAW_GOAL_TEXT_KEY = "raw_goal_text"
+_GOAL_MESSAGES_KEY = "goal_messages"
+_GOAL_CLARIFICATION_FIELD_KEY = "_goal_clarification_field"
+_GOAL_CLARIFICATION_HINT_KEY = "_goal_clarification_hint"
 
 
 class OnboardingApplicationError(RuntimeError):
@@ -74,23 +50,20 @@ class OnboardingApplicationError(RuntimeError):
 
 
 class OnboardingService:
-    """Coordinate deterministic state, optional graph parsing, and persistence."""
+    """Own the only supported onboarding flow and its durable checkpoints."""
 
     def __init__(
         self,
         *,
         session_factory: async_sessionmaker[AsyncSession],
-        text_parser: OnboardingTextParser,
+        goal_extractor: GoalExtractor,
         settings: Settings,
     ) -> None:
         self._session_factory = session_factory
-        self._text_parser = text_parser
+        self._goal_extractor = goal_extractor
         self._settings = settings
 
-    async def start(
-        self,
-        identity: TelegramIdentity,
-    ) -> OnboardingServiceResult:
+    async def start(self, identity: TelegramIdentity) -> OnboardingServiceResult:
         """Create or resume one user and one durable onboarding session."""
 
         async with self._session_factory.begin() as session:
@@ -104,7 +77,7 @@ class OnboardingService:
             onboarding, onboarding_created = await OnboardingRepository(
                 session
             ).get_or_create(user_id=user.id)
-            if onboarding.status is OnboardingStatus.ACTIVE:
+            if user.status is UserStatus.NEW:
                 user = await users.update_status(
                     user_id=user.id,
                     status=UserStatus.ONBOARDING_IN_PROGRESS,
@@ -115,53 +88,35 @@ class OnboardingService:
                 created=created or onboarding_created,
             )
 
-    async def restart(
-        self,
-        identity: TelegramIdentity,
-    ) -> OnboardingServiceResult:
+    async def restart(self, identity: TelegramIdentity) -> OnboardingServiceResult:
+        """Restart a cancelled session from consent without deleting the account."""
+
         async with self._session_factory.begin() as session:
             user, current = await self._locked_state(session, identity)
             if current.status is not OnboardingStatus.CANCELLED:
                 raise OnboardingApplicationError("restart_not_allowed")
             onboarding = await OnboardingRepository(session).restart(user_id=user.id)
-            user = await UserRepository(session).update_status(
-                user_id=user.id,
-                status=UserStatus.ONBOARDING_IN_PROGRESS,
-            )
             return self._result(user, onboarding)
 
     async def confirm_consent(
         self,
         identity: TelegramIdentity,
     ) -> OnboardingServiceResult:
-        """Persist explicit consent once and pause before profile questions."""
+        """Persist explicit consent and advance to the setup introduction."""
 
         async with self._session_factory.begin() as session:
             user, onboarding = await self._locked_state(session, identity)
             self._require_active(onboarding)
-            self._require_no_pending(onboarding)
             answers = self._answers(onboarding)
-            if (
-                onboarding.current_step is OnboardingStep.PRIMARY_SPORT
-                and answers.get(answer_key(OnboardingStep.CONSENT)) is True
-            ):
+            if answers.get("consent") is True:
                 return self._result(user, onboarding)
             if onboarding.current_step is not OnboardingStep.CONSENT:
                 raise OnboardingApplicationError("stale_action")
-            try:
-                transition = OnboardingStateMachine.advance(
-                    current_step=OnboardingStep.CONSENT,
-                    answers=answers,
-                    value="CONTINUE",
-                )
-            except OnboardingStateMachineError as exc:
-                raise OnboardingApplicationError(exc.code) from exc
-            next_answers = dict(transition.answers)
-            next_answers[_SETUP_INTRODUCTION_PENDING_KEY] = True
+            answers["consent"] = True
             onboarding = await OnboardingRepository(session).save_progress(
                 user_id=user.id,
-                current_step=transition.current_step,
-                answers=cast(dict[str, object], next_answers),
+                current_step=OnboardingStep.SETUP_INTRODUCTION,
+                answers=cast(dict[str, object], answers),
             )
             return self._result(user, onboarding)
 
@@ -169,553 +124,259 @@ class OnboardingService:
         self,
         identity: TelegramIdentity,
     ) -> OnboardingServiceResult:
-        """Leave the post-consent introduction and expose the first question."""
+        """Advance from the setup introduction to conversational goal intake."""
 
         async with self._session_factory.begin() as session:
             user, onboarding = await self._locked_state(session, identity)
             self._require_active(onboarding)
-            self._require_no_pending(onboarding)
             answers = self._answers(onboarding)
-            if (
-                onboarding.current_step is not OnboardingStep.PRIMARY_SPORT
-                or answers.get(answer_key(OnboardingStep.CONSENT)) is not True
-            ):
+            if answers.get("consent") is not True:
                 raise OnboardingApplicationError("stale_action")
-            if answers.pop(_SETUP_INTRODUCTION_PENDING_KEY, None) is not None:
-                onboarding = await OnboardingRepository(session).save_progress(
-                    user_id=user.id,
-                    current_step=OnboardingStep.PRIMARY_SPORT,
-                    answers=cast(dict[str, object], answers),
-                )
-            return self._result(user, onboarding)
-
-    async def choose(
-        self,
-        identity: TelegramIdentity,
-        value: object,
-        *,
-        expected_step: OnboardingStep | None = None,
-    ) -> OnboardingServiceResult:
-        """Apply one predefined deterministic answer."""
-
-        async with self._session_factory.begin() as session:
-            user, onboarding = await self._locked_state(session, identity)
-            self._require_active(onboarding)
-            self._require_expected_step(onboarding, expected_step)
-            self._require_no_pending(onboarding)
-            self._require_profile_started(onboarding)
-            try:
-                transition = OnboardingStateMachine.advance(
-                    current_step=onboarding.current_step,
-                    answers=self._answers(onboarding),
-                    value=value,
-                    return_to_summary=onboarding.return_to_summary,
-                )
-            except OnboardingStateMachineError as exc:
-                raise OnboardingApplicationError(exc.code) from exc
-            next_answers = dict(transition.answers)
-            if onboarding.current_step is OnboardingStep.CONSENT:
-                next_answers[_SETUP_INTRODUCTION_PENDING_KEY] = True
-            onboarding = await OnboardingRepository(session).save_progress(
-                user_id=user.id,
-                current_step=transition.current_step,
-                answers=cast(dict[str, object], next_answers),
-                return_to_summary=transition.return_to_summary,
-            )
-            return self._result(user, onboarding)
-
-    async def skip(
-        self,
-        identity: TelegramIdentity,
-        *,
-        expected_step: OnboardingStep | None = None,
-    ) -> OnboardingServiceResult:
-        """Skip only an explicitly optional deterministic field."""
-
-        async with self._session_factory() as session:
-            user = await self._require_user(session, identity)
-            onboarding = await OnboardingRepository(session).require_for_user(
-                user_id=user.id
-            )
-            step = onboarding.current_step
-        if expected_step is not None and step is not expected_step:
-            raise OnboardingApplicationError("stale_action")
-        if step not in {
-            OnboardingStep.HEIGHT,
-            OnboardingStep.WEIGHT,
-            OnboardingStep.HEALTH_DESCRIPTION,
-        }:
-            raise OnboardingApplicationError("invalid_action")
-        return await self.choose(identity, None, expected_step=step)
-
-    async def toggle(
-        self,
-        identity: TelegramIdentity,
-        option: object,
-    ) -> OnboardingServiceResult:
-        """Toggle a selection for non-Telegram callers and focused state tests."""
-
-        return await self._update_multiselect(
-            identity,
-            option,
-            selected=None,
-            expected_step=None,
-        )
-
-    async def set_multiselect(
-        self,
-        identity: TelegramIdentity,
-        option: object,
-        *,
-        selected: bool,
-        expected_step: OnboardingStep,
-    ) -> OnboardingServiceResult:
-        """Set one selection idempotently for replay-safe Telegram callbacks."""
-
-        return await self._update_multiselect(
-            identity,
-            option,
-            selected=selected,
-            expected_step=expected_step,
-        )
-
-    async def _update_multiselect(
-        self,
-        identity: TelegramIdentity,
-        option: object,
-        *,
-        selected: bool | None,
-        expected_step: OnboardingStep | None,
-    ) -> OnboardingServiceResult:
-        async with self._session_factory.begin() as session:
-            user, onboarding = await self._locked_state(session, identity)
-            self._require_active(onboarding)
-            self._require_expected_step(onboarding, expected_step)
-            self._require_profile_started(onboarding)
-            self._require_no_pending(onboarding)
-            step = onboarding.current_step
-            if step not in _MULTI_STEPS:
-                raise OnboardingApplicationError("invalid_action")
-            answers = self._answers(onboarding)
-            temporary_key = self._temporary_selection_key(step)
-            current = self._current_selection(step, answers)
-            already_selected = isinstance(option, str) and option in current
-            if selected is not None and already_selected is selected:
+            if onboarding.current_step is OnboardingStep.GOAL_INTAKE:
                 return self._result(user, onboarding)
-            try:
-                update = OnboardingStateMachine.toggle_multiselect(
-                    step=step,
-                    current_values=current,
-                    option=option,
-                )
-            except OnboardingStateMachineError as exc:
-                raise OnboardingApplicationError(exc.code) from exc
-            answers[temporary_key] = cast(JsonValue, update.values)
+            if onboarding.current_step is not OnboardingStep.SETUP_INTRODUCTION:
+                raise OnboardingApplicationError("stale_action")
+            answers[_GOAL_PHASE_KEY] = _GOAL_PHASE_COLLECTING
             onboarding = await OnboardingRepository(session).save_progress(
                 user_id=user.id,
-                current_step=step,
+                current_step=OnboardingStep.GOAL_INTAKE,
                 answers=cast(dict[str, object], answers),
             )
             return self._result(user, onboarding)
 
-    async def continue_multiselect(
+    async def add_to_goal(
         self,
         identity: TelegramIdentity,
-        *,
-        expected_step: OnboardingStep | None = None,
     ) -> OnboardingServiceResult:
-        """Confirm all current selections and advance once."""
+        """Request one more free-text update to the accumulated draft."""
 
         async with self._session_factory.begin() as session:
             user, onboarding = await self._locked_state(session, identity)
             self._require_active(onboarding)
-            self._require_expected_step(onboarding, expected_step)
-            self._require_no_pending(onboarding)
-            step = onboarding.current_step
-            if step not in _MULTI_STEPS:
-                raise OnboardingApplicationError("invalid_action")
             answers = self._answers(onboarding)
-            temporary_key = self._temporary_selection_key(step)
-            selected = self._current_selection(step, answers)
-            value: object = selected
-            if (
-                step
-                in {
-                    OnboardingStep.POOL_ACCESS,
-                    OnboardingStep.BIKE_ACCESS,
-                }
-                and len(selected) == 1
-                and selected[0]
-                in {
-                    "IRREGULAR",
-                    "NO_REGULAR_ACCESS",
-                }
-            ):
-                value = selected[0]
-            try:
-                transition = OnboardingStateMachine.advance(
-                    current_step=step,
-                    answers=answers,
-                    value=value,
-                    return_to_summary=onboarding.return_to_summary,
-                )
-            except OnboardingStateMachineError as exc:
-                raise OnboardingApplicationError(exc.code) from exc
-            next_answers = dict(transition.answers)
-            next_answers.pop(temporary_key, None)
+            self._require_goal_phase(
+                onboarding,
+                answers,
+                {_GOAL_PHASE_CONFIRMING},
+            )
+            self._goal_draft_from_answers(answers, required=True)
+            answers[_GOAL_PHASE_KEY] = _GOAL_PHASE_ADDING
+            answers.pop(_GOAL_CLARIFICATION_FIELD_KEY, None)
+            answers.pop(_GOAL_CLARIFICATION_HINT_KEY, None)
             onboarding = await OnboardingRepository(session).save_progress(
                 user_id=user.id,
-                current_step=transition.current_step,
-                answers=cast(dict[str, object], next_answers),
-                return_to_summary=transition.return_to_summary,
+                current_step=OnboardingStep.GOAL_INTAKE,
+                answers=cast(dict[str, object], answers),
             )
             return self._result(user, onboarding)
 
-    async def begin_free_text(
+    async def restart_goal(
         self,
         identity: TelegramIdentity,
-        *,
-        expected_step: OnboardingStep | None = None,
     ) -> OnboardingServiceResult:
-        """Persist entry into an explicit model-backed path without invoking it."""
+        """Clear only the temporary goal draft while preserving consent."""
 
         async with self._session_factory.begin() as session:
             user, onboarding = await self._locked_state(session, identity)
             self._require_active(onboarding)
-            self._require_expected_step(onboarding, expected_step)
-            self._require_profile_started(onboarding)
-            if (
-                onboarding.current_step not in _EXPLICIT_FREE_TEXT_STEPS
-                or not OnboardingStateMachine.requires_free_text(
-                    onboarding.current_step,
-                    "OTHER",
-                )
-            ):
-                raise OnboardingApplicationError("invalid_action")
-            if onboarding.pending_free_text_step is onboarding.current_step:
-                return self._result(user, onboarding)
-            onboarding = await OnboardingRepository(session).begin_free_text(
-                user_id=user.id,
-                onboarding_step=onboarding.current_step,
+            answers = self._answers(onboarding)
+            self._require_goal_phase(
+                onboarding,
+                answers,
+                {
+                    _GOAL_PHASE_COLLECTING,
+                    _GOAL_PHASE_CLARIFYING,
+                    _GOAL_PHASE_CONFIRMING,
+                    _GOAL_PHASE_ADDING,
+                },
             )
-            return self._result(user, onboarding, kind="awaiting_text")
+            for key in (
+                _GOAL_DRAFT_KEY,
+                _RAW_GOAL_TEXT_KEY,
+                _GOAL_MESSAGES_KEY,
+                _GOAL_CLARIFICATION_FIELD_KEY,
+                _GOAL_CLARIFICATION_HINT_KEY,
+                _PARSE_IN_FLIGHT_KEY,
+            ):
+                answers.pop(key, None)
+            answers[_GOAL_PHASE_KEY] = _GOAL_PHASE_COLLECTING
+            onboarding = await OnboardingRepository(session).save_progress(
+                user_id=user.id,
+                current_step=OnboardingStep.GOAL_INTAKE,
+                answers=cast(dict[str, object], answers),
+            )
+            return self._result(user, onboarding)
+
+    async def confirm_goal(
+        self,
+        identity: TelegramIdentity,
+    ) -> OnboardingServiceResult:
+        """Persist the canonical goal and stop at GOAL_CONFIRMED."""
+
+        async with self._session_factory.begin() as session:
+            user, onboarding = await self._locked_state(session, identity)
+            self._require_active(onboarding)
+            answers = self._answers(onboarding)
+            self._require_goal_phase(
+                onboarding,
+                answers,
+                {_GOAL_PHASE_CONFIRMING},
+            )
+            draft = cast(
+                GoalExtractionOutput,
+                self._goal_draft_from_answers(answers, required=True),
+            )
+            ready, _ = self._goal_readiness(draft)
+            if not ready or draft.main_goal is None or draft.target_outcome is None:
+                raise OnboardingApplicationError("goal_draft_incomplete")
+            original = answers.get(_RAW_GOAL_TEXT_KEY)
+            if not isinstance(original, str) or not original:
+                raise OnboardingApplicationError("goal_draft_incomplete")
+            await ProfileRepository(session).upsert_conversational_training_goal(
+                user_id=user.id,
+                main_goal=draft.main_goal,
+                event_date=draft.event_date,
+                target_outcome=draft.target_outcome,
+                secondary_priority=draft.secondary_priority,
+                original_description=original,
+            )
+            for key in (
+                _GOAL_PHASE_KEY,
+                _GOAL_DRAFT_KEY,
+                _GOAL_CLARIFICATION_FIELD_KEY,
+                _GOAL_CLARIFICATION_HINT_KEY,
+                _PARSE_IN_FLIGHT_KEY,
+            ):
+                answers.pop(key, None)
+            onboarding = await OnboardingRepository(session).save_progress(
+                user_id=user.id,
+                current_step=OnboardingStep.GOAL_CONFIRMED,
+                answers=cast(dict[str, object], answers),
+            )
+            return self._result(user, onboarding)
+
+    async def choose_goal_clarification(
+        self,
+        identity: TelegramIdentity,
+        choice: str,
+    ) -> OnboardingServiceResult:
+        """Apply a narrow clarification button without invoking the LLM."""
+
+        async with self._session_factory.begin() as session:
+            user, onboarding = await self._locked_state(session, identity)
+            self._require_active(onboarding)
+            answers = self._answers(onboarding)
+            self._require_goal_phase(
+                onboarding,
+                answers,
+                {_GOAL_PHASE_CLARIFYING},
+            )
+            draft = cast(
+                GoalExtractionOutput,
+                self._goal_draft_from_answers(answers, required=True),
+            )
+            field = answers.get(_GOAL_CLARIFICATION_FIELD_KEY)
+            if field == "event_date":
+                if choice == "HAS_DATE":
+                    answers[_GOAL_CLARIFICATION_HINT_KEY] = "exact_date"
+                elif choice == "NOT_YET":
+                    draft = draft.model_copy(
+                        update={
+                            "event_date": None,
+                            "missing_fields": [
+                                item
+                                for item in draft.missing_fields
+                                if item != "event_date"
+                            ],
+                            "ambiguous_fields": [
+                                item
+                                for item in draft.ambiguous_fields
+                                if item != "event_date"
+                            ],
+                        }
+                    )
+                    self._stage_goal_draft(answers, draft)
+                else:
+                    raise OnboardingApplicationError("invalid_action")
+            elif field == "main_goal":
+                hints = {
+                    "PREPARE_RACE": ("Prepare for a race", "race"),
+                    "SPECIFIC_DISTANCE": (
+                        "Reach a specific running distance",
+                        "distance",
+                    ),
+                    "IMPROVE_PACE": ("Improve running pace", "pace"),
+                    "SOMETHING_ELSE": (None, "other"),
+                }
+                if choice == "RUN_CONSISTENTLY":
+                    draft = draft.model_copy(
+                        update={
+                            "main_goal": "Build a consistent running habit",
+                            "target_outcome": "Train consistently",
+                            "event_date": None,
+                            "missing_fields": [],
+                            "ambiguous_fields": [],
+                            "message_status": "COMPLETE",
+                        }
+                    )
+                    self._stage_goal_draft(answers, draft)
+                elif choice in hints:
+                    main_goal, hint = hints[choice]
+                    if main_goal is not None:
+                        draft = draft.model_copy(update={"main_goal": main_goal})
+                        answers[_GOAL_DRAFT_KEY] = cast(
+                            JsonValue,
+                            draft.model_dump(mode="json"),
+                        )
+                    answers[_GOAL_CLARIFICATION_HINT_KEY] = hint
+                else:
+                    raise OnboardingApplicationError("invalid_action")
+            else:
+                raise OnboardingApplicationError("invalid_action")
+            onboarding = await OnboardingRepository(session).save_progress(
+                user_id=user.id,
+                current_step=OnboardingStep.GOAL_INTAKE,
+                answers=cast(dict[str, object], answers),
+            )
+            return self._result(user, onboarding)
 
     async def handle_text(
         self,
         identity: TelegramIdentity,
         text: str,
     ) -> OnboardingServiceResult:
-        """Parse deterministic text or invoke the graph for an explicit path."""
+        """Invoke goal extraction only while the goal-intake checkpoint expects text."""
 
         async with self._session_factory() as session:
             user = await self._require_user(session, identity)
             onboarding = await OnboardingRepository(session).require_for_user(
                 user_id=user.id
             )
-            pending_step = onboarding.pending_free_text_step
-            current_step = onboarding.current_step
-        if pending_step is not None:
-            return await self._parse_free_text(
+            goal_phase = dict(onboarding.answers).get(_GOAL_PHASE_KEY)
+        if (
+            onboarding.status is OnboardingStatus.ACTIVE
+            and onboarding.current_step is OnboardingStep.GOAL_INTAKE
+            and isinstance(goal_phase, str)
+        ):
+            return await self._extract_goal(
                 identity=identity,
                 user_id=user.id,
-                step=pending_step,
                 text=text,
             )
-        if current_step not in _DIRECT_TEXT_STEPS:
-            raise OnboardingApplicationError("invalid_action")
-        return await self.choose(identity, text)
+        raise OnboardingApplicationError("invalid_action")
 
-    async def confirm_parsed(
-        self,
-        identity: TelegramIdentity,
-    ) -> OnboardingServiceResult:
-        """Confirm a safe pending parse, then stage or advance deterministically."""
+    async def cancel(self, identity: TelegramIdentity) -> OnboardingServiceResult:
+        """Cancel without deleting consent, goal staging, or canonical data."""
 
-        async with self._session_factory.begin() as session:
-            user, onboarding = await self._locked_state(session, identity)
-            self._require_active(onboarding)
-            if (
-                onboarding.pending_free_text_step is None
-                or onboarding.pending_parsed_value is None
-                or onboarding.pending_free_text_step is not onboarding.current_step
-            ):
-                raise OnboardingApplicationError("parsed_value_missing")
-            try:
-                parsed = OnboardingParseResult.model_validate(
-                    onboarding.pending_parsed_value
-                )
-            except ValidationError as exc:
-                raise OnboardingApplicationError("parsed_value_invalid") from exc
-            if parsed.normalized_value is None:
-                raise OnboardingApplicationError("parsed_value_invalid")
-
-            step = onboarding.current_step
-            answers = self._answers(onboarding)
-            self._preserve_other_display(step, answers, parsed)
-            repository = OnboardingRepository(session)
-            if step in _MULTI_FREE_TEXT_STEPS:
-                temporary_key = self._temporary_selection_key(step)
-                selected = self._current_selection(step, answers)
-                parsed_values = (
-                    parsed.normalized_value
-                    if isinstance(parsed.normalized_value, list)
-                    else [parsed.normalized_value]
-                )
-                for value in parsed_values:
-                    if isinstance(value, str) and value not in selected:
-                        selected.append(value)
-                answers[temporary_key] = cast(JsonValue, selected)
-                await repository.clear_pending_parse(user_id=user.id)
-                onboarding = await repository.save_progress(
-                    user_id=user.id,
-                    current_step=step,
-                    answers=cast(dict[str, object], answers),
-                )
-                return self._result(user, onboarding)
-
-            try:
-                transition = OnboardingStateMachine.advance(
-                    current_step=step,
-                    answers=answers,
-                    value=parsed.normalized_value,
-                    return_to_summary=onboarding.return_to_summary,
-                )
-            except OnboardingStateMachineError as exc:
-                raise OnboardingApplicationError("parsed_value_invalid") from exc
-            await repository.clear_pending_parse(user_id=user.id)
-            onboarding = await repository.save_progress(
-                user_id=user.id,
-                current_step=transition.current_step,
-                answers=cast(dict[str, object], transition.answers),
-                return_to_summary=transition.return_to_summary,
-            )
-            return self._result(user, onboarding)
-
-    async def retry_parsed(
-        self,
-        identity: TelegramIdentity,
-    ) -> OnboardingServiceResult:
-        """Discard the interpretation but keep awaiting explicit new text."""
-
-        async with self._session_factory.begin() as session:
-            user, onboarding = await self._locked_state(session, identity)
-            self._require_active(onboarding)
-            if onboarding.pending_free_text_step is None:
-                raise OnboardingApplicationError("stale_action")
-            if self._parse_is_in_flight(onboarding):
-                raise OnboardingApplicationError("parse_in_progress")
-            step = onboarding.pending_free_text_step
-            onboarding = await OnboardingRepository(session).begin_free_text(
-                user_id=user.id,
-                onboarding_step=step,
-            )
-            return self._result(user, onboarding, kind="awaiting_text")
-
-    async def back_to_options(
-        self,
-        identity: TelegramIdentity,
-    ) -> OnboardingServiceResult:
-        """Discard all pending interpretation state."""
-
-        async with self._session_factory.begin() as session:
-            user, onboarding = await self._locked_state(session, identity)
-            self._require_active(onboarding)
-            if onboarding.pending_free_text_step is None:
-                raise OnboardingApplicationError("stale_action")
-            if self._parse_is_in_flight(onboarding):
-                raise OnboardingApplicationError("parse_in_progress")
-            answers = self._answers(onboarding)
-            answers.pop(_PARSE_IN_FLIGHT_KEY, None)
-            repository = OnboardingRepository(session)
-            await repository.save_progress(
-                user_id=user.id,
-                current_step=onboarding.current_step,
-                answers=cast(dict[str, object], answers),
-            )
-            onboarding = await repository.clear_pending_parse(user_id=user.id)
-            return self._result(user, onboarding)
-
-    async def begin_summary_edit(
-        self,
-        identity: TelegramIdentity,
-        section: SummaryEditSection,
-    ) -> OnboardingServiceResult:
-        async with self._session_factory.begin() as session:
-            user, onboarding = await self._locked_state(session, identity)
-            self._require_active(onboarding)
-            self._require_no_pending(onboarding)
-            if onboarding.current_step is not OnboardingStep.SUMMARY:
-                raise OnboardingApplicationError("invalid_action")
-            transition = OnboardingStateMachine.begin_summary_edit(
-                section=section,
-                answers=self._answers(onboarding),
-            )
-            onboarding = await OnboardingRepository(session).save_progress(
-                user_id=user.id,
-                current_step=transition.current_step,
-                answers=cast(dict[str, object], transition.answers),
-                return_to_summary=True,
-            )
-            return self._result(user, onboarding)
-
-    async def back(
-        self,
-        identity: TelegramIdentity,
-        *,
-        expected_step: OnboardingStep | None = None,
-    ) -> OnboardingServiceResult:
-        async with self._session_factory.begin() as session:
-            user, onboarding = await self._locked_state(session, identity)
-            self._require_active(onboarding)
-            self._require_expected_step(onboarding, expected_step)
-            self._require_no_pending(onboarding)
-            answers = self._answers(onboarding)
-            if (
-                onboarding.current_step is OnboardingStep.PRIMARY_SPORT
-                and not onboarding.return_to_summary
-                and answers.get(answer_key(OnboardingStep.CONSENT)) is True
-            ):
-                if answers.get(_SETUP_INTRODUCTION_PENDING_KEY) is True:
-                    raise OnboardingApplicationError("stale_action")
-                answers[_SETUP_INTRODUCTION_PENDING_KEY] = True
-                onboarding = await OnboardingRepository(session).save_progress(
-                    user_id=user.id,
-                    current_step=OnboardingStep.PRIMARY_SPORT,
-                    answers=cast(dict[str, object], answers),
-                )
-                return self._result(user, onboarding)
-            try:
-                transition = OnboardingStateMachine.back(
-                    current_step=onboarding.current_step,
-                    answers=answers,
-                    return_to_summary=onboarding.return_to_summary,
-                )
-            except OnboardingStateMachineError as exc:
-                raise OnboardingApplicationError(exc.code) from exc
-            onboarding = await OnboardingRepository(session).save_progress(
-                user_id=user.id,
-                current_step=transition.current_step,
-                answers=cast(dict[str, object], transition.answers),
-                return_to_summary=transition.return_to_summary,
-            )
-            return self._result(user, onboarding)
-
-    async def apple_action(
-        self,
-        identity: TelegramIdentity,
-        action: str,
-    ) -> OnboardingServiceResult:
-        """Apply a deterministic file-import onboarding transition.
-
-        The legacy Apple-specific states remain readable for sessions created
-        before the unified file-import flow.
-        """
-
-        async with self._session_factory.begin() as session:
-            user, onboarding = await self._locked_state(session, identity)
-            self._require_active(onboarding)
-            self._require_no_pending(onboarding)
-            current = onboarding.current_step
-            transitions = {
-                (
-                    OnboardingStep.APPLE_HEALTH_PRIVACY_NOTICE,
-                    "continue",
-                ): OnboardingStep.APPLE_HEALTH_WAITING_FOR_FILE,
-                (
-                    OnboardingStep.APPLE_HEALTH_PRIVACY_NOTICE,
-                    "back",
-                ): OnboardingStep.BASELINE_SOURCE,
-                (
-                    OnboardingStep.APPLE_HEALTH_WAITING_FOR_FILE,
-                    "back",
-                ): OnboardingStep.APPLE_HEALTH_PRIVACY_NOTICE,
-                (
-                    OnboardingStep.APPLE_HEALTH_WAITING_FOR_FILE,
-                    "cancel",
-                ): OnboardingStep.BASELINE_SOURCE,
-                (
-                    OnboardingStep.APPLE_HEALTH_IMPORT_FAILED,
-                    "retry",
-                ): OnboardingStep.APPLE_HEALTH_WAITING_FOR_FILE,
-                (
-                    OnboardingStep.APPLE_HEALTH_IMPORT_FAILED,
-                    "back",
-                ): OnboardingStep.BASELINE_SOURCE,
-                (
-                    OnboardingStep.APPLE_HEALTH_IMPORT_COMPLETE,
-                    "continue",
-                ): OnboardingStep.SUMMARY,
-                (
-                    OnboardingStep.FILE_IMPORT_WAITING,
-                    "back",
-                ): OnboardingStep.BASELINE_SOURCE,
-                (
-                    OnboardingStep.FILE_IMPORT_WAITING,
-                    "choose_other",
-                ): OnboardingStep.BASELINE_SOURCE,
-                (
-                    OnboardingStep.FILE_IMPORT_PROCESSING,
-                    "back",
-                ): OnboardingStep.BASELINE_SOURCE,
-                (
-                    OnboardingStep.FILE_IMPORT_PROCESSING,
-                    "choose_other",
-                ): OnboardingStep.BASELINE_SOURCE,
-                (
-                    OnboardingStep.FILE_IMPORT_PROCESSING,
-                    "cancel",
-                ): OnboardingStep.BASELINE_SOURCE,
-                (
-                    OnboardingStep.FILE_IMPORT_COMPLETE,
-                    "continue",
-                ): OnboardingStep.SUMMARY,
-                (
-                    OnboardingStep.FILE_IMPORT_COMPLETE,
-                    "back",
-                ): OnboardingStep.FILE_IMPORT_WAITING,
-            }
-            next_step: OnboardingStep | None
-            if action == "choose_other" and current in {
-                OnboardingStep.APPLE_HEALTH_PRIVACY_NOTICE,
-                OnboardingStep.APPLE_HEALTH_WAITING_FOR_FILE,
-                OnboardingStep.APPLE_HEALTH_IMPORT_FAILED,
-                OnboardingStep.FILE_IMPORT_WAITING,
-                OnboardingStep.FILE_IMPORT_PROCESSING,
-            }:
-                next_step = OnboardingStep.BASELINE_SOURCE
-            else:
-                next_step = transitions.get((current, action))
-            if next_step is None:
-                raise OnboardingApplicationError("invalid_action")
-            answers = self._answers(onboarding)
-            if next_step is OnboardingStep.BASELINE_SOURCE:
-                answers.pop(answer_key(OnboardingStep.BASELINE_SOURCE), None)
-            onboarding = await OnboardingRepository(session).save_progress(
-                user_id=user.id,
-                current_step=next_step,
-                answers=cast(dict[str, object], answers),
-                return_to_summary=(
-                    False
-                    if next_step is OnboardingStep.SUMMARY
-                    else onboarding.return_to_summary
-                ),
-            )
-            return self._result(user, onboarding)
-
-    async def cancel(
-        self,
-        identity: TelegramIdentity,
-    ) -> OnboardingServiceResult:
         async with self._session_factory.begin() as session:
             user, onboarding = await self._locked_state(session, identity)
             self._require_active(onboarding)
             onboarding = await OnboardingRepository(session).cancel(user_id=user.id)
-            return self._result(user, onboarding, kind="cancelled")
+            return self._result(user, onboarding)
 
-    async def snapshot(
-        self,
-        identity: TelegramIdentity,
-    ) -> OnboardingServiceResult:
+    async def snapshot(self, identity: TelegramIdentity) -> OnboardingServiceResult:
+        """Load the current durable checkpoint for resume or navigation."""
+
         async with self._session_factory() as session:
             user = await self._require_user(session, identity)
             onboarding = await OnboardingRepository(session).require_for_user(
@@ -723,29 +384,35 @@ class OnboardingService:
             )
             return self._result(user, onboarding)
 
-    async def _parse_free_text(
+    async def _extract_goal(
         self,
         *,
         identity: TelegramIdentity,
         user_id: uuid.UUID,
-        step: OnboardingStep,
         text: str,
     ) -> OnboardingServiceResult:
-        confirmed_context: dict[str, object]
+        """Persist raw input, invoke the focused graph, and stage a merged draft."""
+
         parse_run_id = str(uuid.uuid4())
+        existing_draft: GoalExtractionOutput | None
         async with self._session_factory.begin() as session:
             user, onboarding = await self._locked_state(session, identity)
             self._require_active(onboarding)
             if user.id != user_id:
                 raise OnboardingApplicationError("user_not_found")
-            if (
-                onboarding.pending_free_text_step is not step
-                or onboarding.current_step is not step
-            ):
-                raise OnboardingApplicationError("stale_action")
+            answers = self._answers(onboarding)
+            self._require_goal_phase(
+                onboarding,
+                answers,
+                {
+                    _GOAL_PHASE_COLLECTING,
+                    _GOAL_PHASE_CLARIFYING,
+                    _GOAL_PHASE_ADDING,
+                },
+            )
             if self._parse_is_in_flight(onboarding):
                 raise OnboardingApplicationError("parse_in_progress")
-            confirmed_context = dict(onboarding.answers)
+            existing_draft = self._goal_draft_from_answers(answers)
             if self._settings.llm_mode == "live":
                 attempts = await LLMUsageRepository(session).count_since(
                     user_id=user_id,
@@ -759,7 +426,7 @@ class OnboardingService:
                         kind="rate_limited",
                         error_code="llm_rate_limited",
                     )
-            answers = self._answers(onboarding)
+            self._append_goal_message(answers, text)
             answers[_PARSE_IN_FLIGHT_KEY] = cast(
                 JsonValue,
                 {
@@ -769,12 +436,12 @@ class OnboardingService:
             )
             await OnboardingRepository(session).save_progress(
                 user_id=user_id,
-                current_step=step,
+                current_step=OnboardingStep.GOAL_INTAKE,
                 answers=cast(dict[str, object], answers),
             )
             usage = await LLMUsageRepository(session).record(
                 user_id=user_id,
-                onboarding_step=step,
+                onboarding_step=OnboardingStep.GOAL_INTAKE,
                 provider_mode=self._settings.llm_mode,
                 model=self._settings.llm_model,
                 status=LLMUsageStatus.PROVIDER_ERROR,
@@ -782,57 +449,31 @@ class OnboardingService:
             usage_id = usage.id
 
         try:
-            workflow = await self._text_parser.parse(
+            workflow = await self._goal_extractor.extract(
                 user_id=user_id,
-                step=step,
                 user_text=text,
-                confirmed_context=confirmed_context,
+                existing_draft=existing_draft,
             )
         except Exception:
-            async with self._session_factory.begin() as session:
-                user, onboarding = await self._locked_state(session, identity)
-                if self._owns_parse_run(onboarding, parse_run_id):
-                    await LLMUsageRepository(session).update_outcome(
-                        user_id=user.id,
-                        usage_id=usage_id,
-                        status=LLMUsageStatus.PROVIDER_ERROR,
-                        prompt_tokens=None,
-                        completion_tokens=None,
-                    )
-                    answers = self._answers(onboarding)
-                    answers.pop(_PARSE_IN_FLIGHT_KEY, None)
-                    repository = OnboardingRepository(session)
-                    await repository.save_progress(
-                        user_id=user.id,
-                        current_step=onboarding.current_step,
-                        answers=cast(dict[str, object], answers),
-                    )
-                    onboarding = await repository.begin_free_text(
-                        user_id=user.id,
-                        onboarding_step=step,
-                    )
-                    return self._result(
-                        user,
-                        onboarding,
-                        kind="provider_error",
-                        error_code="llm_provider_error",
-                    )
-            raise OnboardingApplicationError("stale_action") from None
+            workflow = GoalExtractionWorkflowResult(
+                outcome="provider_error",
+                error_code="llm_provider_error",
+            )
 
         async with self._session_factory.begin() as session:
             user, onboarding = await self._locked_state(session, identity)
-            if (
-                onboarding.pending_free_text_step is not step
-                or onboarding.current_step is not step
-                or not self._owns_parse_run(onboarding, parse_run_id)
-            ):
+            if not self._owns_parse_run(onboarding, parse_run_id):
                 raise OnboardingApplicationError("stale_action")
-            usage_status = {
-                "confirmation_required": LLMUsageStatus.SUCCEEDED,
-                "clarification_required": LLMUsageStatus.CLARIFICATION,
-                "fallback_required": LLMUsageStatus.FALLBACK,
-                "provider_error": LLMUsageStatus.PROVIDER_ERROR,
-            }[workflow.outcome]
+            usage_status = LLMUsageStatus.PROVIDER_ERROR
+            if workflow.outcome == "fallback_required":
+                usage_status = LLMUsageStatus.FALLBACK
+            elif workflow.outcome == "extracted":
+                usage_status = (
+                    LLMUsageStatus.SUCCEEDED
+                    if workflow.goal_draft is not None
+                    and workflow.goal_draft.message_status == "COMPLETE"
+                    else LLMUsageStatus.CLARIFICATION
+                )
             await LLMUsageRepository(session).update_outcome(
                 user_id=user.id,
                 usage_id=usage_id,
@@ -840,50 +481,62 @@ class OnboardingService:
                 prompt_tokens=workflow.prompt_tokens,
                 completion_tokens=workflow.completion_tokens,
             )
-            repository = OnboardingRepository(session)
             answers = self._answers(onboarding)
             answers.pop(_PARSE_IN_FLIGHT_KEY, None)
-            await repository.save_progress(
-                user_id=user.id,
-                current_step=step,
-                answers=cast(dict[str, object], answers),
-            )
-            if (
-                workflow.outcome == "confirmation_required"
-                and workflow.parse_result is not None
-            ):
-                onboarding = await repository.set_pending_parse(
+            repository = OnboardingRepository(session)
+            if workflow.outcome != "extracted" or workflow.goal_draft is None:
+                onboarding = await repository.save_progress(
                     user_id=user.id,
-                    onboarding_step=step,
-                    parsed_value=workflow.parse_result.model_dump(mode="json"),
+                    current_step=OnboardingStep.GOAL_INTAKE,
+                    answers=cast(dict[str, object], answers),
                 )
                 return self._result(
                     user,
                     onboarding,
-                    kind="interpretation",
-                    parse_result=workflow.parse_result,
+                    kind=(
+                        "fallback"
+                        if workflow.outcome == "fallback_required"
+                        else "provider_error"
+                    ),
+                    error_code=workflow.error_code,
                 )
+            try:
+                extracted = GoalExtractionOutput.model_validate(
+                    workflow.goal_draft.model_dump(mode="json")
+                )
+            except ValidationError:
+                onboarding = await repository.save_progress(
+                    user_id=user.id,
+                    current_step=OnboardingStep.GOAL_INTAKE,
+                    answers=cast(dict[str, object], answers),
+                )
+                return self._result(
+                    user,
+                    onboarding,
+                    kind="fallback",
+                    error_code="malformed_structured_output",
+                )
+            if extracted.message_status == "OFF_TOPIC":
+                self._remove_last_goal_message(answers)
+                onboarding = await repository.save_progress(
+                    user_id=user.id,
+                    current_step=OnboardingStep.GOAL_INTAKE,
+                    answers=cast(dict[str, object], answers),
+                )
+                return self._result(user, onboarding, kind="goal_off_topic")
 
-            onboarding = await repository.begin_free_text(
+            merged = self._merge_goal_draft(
+                existing=existing_draft,
+                extracted=extracted,
+                user_text=text,
+            )
+            self._stage_goal_draft(answers, merged)
+            onboarding = await repository.save_progress(
                 user_id=user.id,
-                onboarding_step=step,
+                current_step=OnboardingStep.GOAL_INTAKE,
+                answers=cast(dict[str, object], answers),
             )
-            kind = {
-                "clarification_required": "clarification",
-                "fallback_required": "fallback",
-                "provider_error": "provider_error",
-            }[workflow.outcome]
-            return self._result(
-                user,
-                onboarding,
-                kind=kind,
-                clarification_question=(
-                    workflow.parse_result.clarification_question
-                    if workflow.parse_result is not None
-                    else None
-                ),
-                error_code=workflow.error_code,
-            )
+            return self._result(user, onboarding)
 
     @staticmethod
     async def _require_user(
@@ -912,23 +565,16 @@ class OnboardingService:
             raise OnboardingApplicationError("onboarding_not_active")
 
     @staticmethod
-    def _require_expected_step(
+    def _require_goal_phase(
         onboarding: OnboardingSession,
-        expected_step: OnboardingStep | None,
+        answers: dict[str, JsonValue],
+        allowed_phases: set[str],
     ) -> None:
-        if expected_step is not None and onboarding.current_step is not expected_step:
-            raise OnboardingApplicationError("stale_action")
-
-    @staticmethod
-    def _require_no_pending(onboarding: OnboardingSession) -> None:
-        if onboarding.pending_free_text_step is not None:
-            raise OnboardingApplicationError("stale_action")
-
-    @staticmethod
-    def _require_profile_started(onboarding: OnboardingSession) -> None:
+        phase = answers.get(_GOAL_PHASE_KEY)
         if (
-            onboarding.current_step is OnboardingStep.PRIMARY_SPORT
-            and dict(onboarding.answers).get(_SETUP_INTRODUCTION_PENDING_KEY) is True
+            onboarding.current_step is not OnboardingStep.GOAL_INTAKE
+            or not isinstance(phase, str)
+            or phase not in allowed_phases
         ):
             raise OnboardingApplicationError("stale_action")
 
@@ -947,56 +593,181 @@ class OnboardingService:
         return utc_now() - started < _PARSE_IN_FLIGHT_TTL
 
     @staticmethod
-    def _owns_parse_run(
-        onboarding: OnboardingSession,
-        parse_run_id: str,
-    ) -> bool:
+    def _owns_parse_run(onboarding: OnboardingSession, parse_run_id: str) -> bool:
         marker = dict(onboarding.answers).get(_PARSE_IN_FLIGHT_KEY)
         return isinstance(marker, dict) and marker.get("run_id") == parse_run_id
 
     @staticmethod
-    def _answers(
-        onboarding: OnboardingSession,
-    ) -> dict[str, JsonValue]:
+    def _answers(onboarding: OnboardingSession) -> dict[str, JsonValue]:
         return cast(dict[str, JsonValue], dict(onboarding.answers))
 
-    @classmethod
-    def _current_selection(
-        cls,
-        step: OnboardingStep,
+    @staticmethod
+    def _goal_draft_from_answers(
         answers: dict[str, JsonValue],
-    ) -> list[str]:
-        temporary = answers.get(cls._temporary_selection_key(step))
-        if isinstance(temporary, list):
-            return [str(value) for value in temporary]
-        existing = answers.get(answer_key(step))
-        if isinstance(existing, list):
-            return [str(value) for value in existing]
-        if isinstance(existing, dict):
-            access_type = existing.get("type")
-            days = existing.get("days")
-            if access_type in {"IRREGULAR", "NO_REGULAR_ACCESS"}:
-                return [str(access_type)]
-            if isinstance(days, list):
-                return [str(value) for value in days]
-        return []
+        *,
+        required: bool = False,
+    ) -> GoalExtractionOutput | None:
+        raw = answers.get(_GOAL_DRAFT_KEY)
+        if raw is None and not required:
+            return None
+        try:
+            return GoalExtractionOutput.model_validate(raw)
+        except ValidationError as exc:
+            raise OnboardingApplicationError("goal_draft_invalid") from exc
 
     @staticmethod
-    def _temporary_selection_key(step: OnboardingStep) -> str:
-        return f"_selection_{answer_key(step)}"
-
-    @staticmethod
-    def _preserve_other_display(
-        step: OnboardingStep,
-        answers: dict[str, JsonValue],
-        parsed: OnboardingParseResult,
-    ) -> None:
-        normalized = parsed.normalized_value
-        contains_other = normalized == "OTHER" or (
-            isinstance(normalized, list) and "OTHER" in normalized
+    def _append_goal_message(answers: dict[str, JsonValue], text: str) -> None:
+        existing = answers.get(_GOAL_MESSAGES_KEY)
+        messages = (
+            [item for item in existing if isinstance(item, str)]
+            if isinstance(existing, list)
+            else []
         )
-        if contains_other and parsed.display_value:
-            answers[f"{answer_key(step)}_other_description"] = parsed.display_value
+        messages.append(text)
+        answers[_GOAL_MESSAGES_KEY] = cast(JsonValue, messages)
+        if not isinstance(answers.get(_RAW_GOAL_TEXT_KEY), str):
+            answers[_RAW_GOAL_TEXT_KEY] = text
+
+    @staticmethod
+    def _remove_last_goal_message(answers: dict[str, JsonValue]) -> None:
+        existing = answers.get(_GOAL_MESSAGES_KEY)
+        messages = (
+            [item for item in existing if isinstance(item, str)]
+            if isinstance(existing, list)
+            else []
+        )
+        if messages:
+            messages.pop()
+        if messages:
+            answers[_GOAL_MESSAGES_KEY] = cast(JsonValue, messages)
+            answers[_RAW_GOAL_TEXT_KEY] = messages[0]
+        else:
+            answers.pop(_GOAL_MESSAGES_KEY, None)
+            answers.pop(_RAW_GOAL_TEXT_KEY, None)
+
+    @classmethod
+    def _merge_goal_draft(
+        cls,
+        *,
+        existing: GoalExtractionOutput | None,
+        extracted: GoalExtractionOutput,
+        user_text: str,
+    ) -> GoalExtractionOutput:
+        main_goal = extracted.main_goal or (existing.main_goal if existing else None)
+        target_outcome = extracted.target_outcome or (
+            existing.target_outcome if existing else None
+        )
+        secondary_priority = extracted.secondary_priority or (
+            existing.secondary_priority if existing else None
+        )
+        event_date = extracted.event_date
+        if (
+            event_date is None
+            and existing is not None
+            and existing.event_date is not None
+            and not cls._explicit_no_date(user_text)
+        ):
+            event_date = existing.event_date
+
+        missing = [
+            field for field in extracted.missing_fields if field != "secondary_priority"
+        ]
+        ambiguous = [
+            field
+            for field in extracted.ambiguous_fields
+            if field != "secondary_priority"
+        ]
+        if main_goal is not None:
+            missing = [field for field in missing if field != "main_goal"]
+        if target_outcome is not None:
+            missing = [field for field in missing if field != "target_outcome"]
+        if event_date is not None:
+            missing = [field for field in missing if field != "event_date"]
+
+        return GoalExtractionOutput(
+            main_goal=main_goal,
+            event_date=event_date,
+            target_outcome=target_outcome,
+            secondary_priority=secondary_priority,
+            missing_fields=missing,
+            ambiguous_fields=ambiguous,
+            message_status=extracted.message_status,
+        )
+
+    @classmethod
+    def _stage_goal_draft(
+        cls,
+        answers: dict[str, JsonValue],
+        draft: GoalExtractionOutput,
+    ) -> None:
+        ready, clarification_field = cls._goal_readiness(draft)
+        status = "COMPLETE" if ready else "NEEDS_CLARIFICATION"
+        normalized = draft.model_copy(update={"message_status": status})
+        answers[_GOAL_DRAFT_KEY] = cast(
+            JsonValue,
+            normalized.model_dump(mode="json"),
+        )
+        answers.pop(_GOAL_CLARIFICATION_HINT_KEY, None)
+        if ready:
+            answers[_GOAL_PHASE_KEY] = _GOAL_PHASE_CONFIRMING
+            answers.pop(_GOAL_CLARIFICATION_FIELD_KEY, None)
+        else:
+            if clarification_field is None:
+                raise OnboardingApplicationError("goal_draft_invalid")
+            answers[_GOAL_PHASE_KEY] = _GOAL_PHASE_CLARIFYING
+            answers[_GOAL_CLARIFICATION_FIELD_KEY] = cast(
+                JsonValue,
+                clarification_field,
+            )
+
+    @classmethod
+    def _goal_readiness(
+        cls,
+        draft: GoalExtractionOutput,
+    ) -> tuple[bool, GoalFieldName | None]:
+        missing_or_ambiguous = set(draft.missing_fields) | set(draft.ambiguous_fields)
+        if (
+            draft.main_goal is None
+            or cls._is_vague_main_goal(draft.main_goal)
+            or "main_goal" in missing_or_ambiguous
+        ):
+            return False, "main_goal"
+        if draft.target_outcome is None or "target_outcome" in missing_or_ambiguous:
+            return False, "target_outcome"
+        if "event_date" in missing_or_ambiguous:
+            return False, "event_date"
+        return True, None
+
+    @staticmethod
+    def _is_vague_main_goal(value: str) -> bool:
+        folded = " ".join(value.casefold().strip(" .!?\n\t").split())
+        return folded in {
+            "run",
+            "running",
+            "training",
+            "train to run",
+            "i want to train to run",
+            "improve running",
+            "get better at running",
+            "prepare for a race",
+            "reach a specific running distance",
+        }
+
+    @staticmethod
+    def _explicit_no_date(value: str) -> bool:
+        folded = value.casefold()
+        return any(
+            phrase in folded
+            for phrase in (
+                "not yet",
+                "no date",
+                "don't have a date",
+                "do not have a date",
+                "don't have a race date",
+                "do not have a race date",
+                "not applicable",
+            )
+        )
 
     @classmethod
     def _result(
@@ -1004,52 +775,36 @@ class OnboardingService:
         user: User,
         onboarding: OnboardingSession,
         *,
-        kind: str | None = None,
-        parse_result: OnboardingParseResult | None = None,
-        clarification_question: str | None = None,
+        kind: OnboardingResultKind | None = None,
         error_code: str | None = None,
         created: bool = False,
     ) -> OnboardingServiceResult:
+        answers = cls._answers(onboarding)
         if kind is None:
             if onboarding.status is OnboardingStatus.CANCELLED:
                 kind = "cancelled"
-            elif onboarding.status is OnboardingStatus.COMPLETED:
-                kind = "completed"
-            elif onboarding.pending_parsed_value:
-                kind = "interpretation"
-            elif onboarding.pending_free_text_step is not None:
-                kind = "awaiting_text"
-            elif (
-                onboarding.current_step is OnboardingStep.PRIMARY_SPORT
-                and dict(onboarding.answers).get(_SETUP_INTRODUCTION_PENDING_KEY)
-                is True
-                and dict(onboarding.answers).get(answer_key(OnboardingStep.CONSENT))
-                is True
-            ):
-                kind = "setup_introduction"
-            elif onboarding.current_step is OnboardingStep.SUMMARY:
-                kind = "summary"
-            else:
+            elif onboarding.current_step is OnboardingStep.CONSENT:
                 kind = "step"
-        if parse_result is None and onboarding.pending_parsed_value:
-            try:
-                parse_result = OnboardingParseResult.model_validate(
-                    onboarding.pending_parsed_value
-                )
-            except ValidationError:
-                parse_result = None
+            elif onboarding.current_step is OnboardingStep.SETUP_INTRODUCTION:
+                kind = "setup_introduction"
+            elif onboarding.current_step is OnboardingStep.GOAL_CONFIRMED:
+                kind = "goal_confirmed"
+            else:
+                raw_phase = answers.get(_GOAL_PHASE_KEY)
+                phase = raw_phase if isinstance(raw_phase, str) else None
+                phase_kinds: dict[str, OnboardingResultKind] = {
+                    _GOAL_PHASE_CLARIFYING: "goal_clarification",
+                    _GOAL_PHASE_CONFIRMING: "goal_confirmation",
+                    _GOAL_PHASE_ADDING: "goal_addition",
+                }
+                kind = phase_kinds.get(phase or "", "goal_intake")
         return OnboardingServiceResult(
-            kind=cast(
-                object,
-                kind,
-            ),  # runtime validation ensures only declared result kinds
+            kind=kind,
             user_id=user.id,
             user_status=user.status,
             onboarding_status=onboarding.status,
             current_step=onboarding.current_step,
-            answers=cls._answers(onboarding),
-            parse_result=parse_result,
-            clarification_question=clarification_question,
+            answers=answers,
             error_code=error_code,
             created=created,
         )

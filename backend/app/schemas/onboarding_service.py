@@ -12,20 +12,20 @@ from app.domain.enums import (
     OnboardingStep,
     UserStatus,
 )
-from app.schemas.onboarding import OnboardingParseResult
 
 OnboardingResultKind = Literal[
     "step",
-    "summary",
-    "awaiting_text",
-    "interpretation",
-    "clarification",
     "fallback",
     "provider_error",
     "rate_limited",
     "setup_introduction",
+    "goal_intake",
+    "goal_clarification",
+    "goal_confirmation",
+    "goal_addition",
+    "goal_off_topic",
+    "goal_confirmed",
     "cancelled",
-    "completed",
 ]
 
 
@@ -40,7 +40,5 @@ class OnboardingServiceResult(BaseModel):
     onboarding_status: OnboardingStatus
     current_step: OnboardingStep
     answers: dict[str, JsonValue]
-    parse_result: OnboardingParseResult | None = None
-    clarification_question: str | None = None
     error_code: str | None = None
     created: bool = False

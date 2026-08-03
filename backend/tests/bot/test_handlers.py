@@ -110,7 +110,7 @@ async def test_callback_handler_acknowledges_and_delegates_action() -> None:
             return_value=TelegramResponse("next", edit_existing=True)
         ),
     )
-    update = _update(callback_data="ob:v1:set:running")
+    update = _update(callback_data="ob:v1:consent")
 
     await handlers.callback_handler(
         cast(Update, update),
@@ -118,7 +118,7 @@ async def test_callback_handler_acknowledges_and_delegates_action() -> None:
     )
 
     update.callback_query.answer.assert_awaited_once()
-    assert service.handle_callback.await_args.args[1] == "ob:v1:set:running"
+    assert service.handle_callback.await_args.args[1] == "ob:v1:consent"
     update.callback_query.edit_message_text.assert_awaited_once_with(
         "next",
         reply_markup=None,
@@ -132,7 +132,7 @@ async def test_callback_replay_does_not_send_duplicate_message() -> None:
             return_value=TelegramResponse("same", edit_existing=True)
         ),
     )
-    update = _update(callback_data="ob:v1:set:SPORT_SELECTION:RUNNING")
+    update = _update(callback_data="ob:v1:goal:confirm")
     update.callback_query.edit_message_text.side_effect = BadRequest(
         "Message is not modified"
     )

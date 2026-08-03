@@ -7,7 +7,7 @@ from datetime import UTC, date, datetime
 from telegram import InlineKeyboardMarkup
 
 from app.bot import keyboards, messages
-from app.domain.enums import OnboardingStep, SyncStatus, WorkoutFlowStep
+from app.domain.enums import SyncStatus, WorkoutFlowStep
 
 
 def _button_labels(markup: InlineKeyboardMarkup) -> list[str]:
@@ -35,20 +35,19 @@ def _button_pairs(markup: InlineKeyboardMarkup) -> list[tuple[str, str]]:
     ]
 
 
-def test_training_day_keyboard_marks_current_selections() -> None:
-    markup = keyboards.keyboard_for_step(
-        OnboardingStep.TRAINING_DAYS,
-        {"training_days": ["MONDAY", "SATURDAY"]},
-    )
-
-    assert markup is not None
-    labels = _button_labels(markup)
-    callbacks = _callback_values(markup)
-    assert "✓ Monday" in labels
-    assert "✓ Saturday" in labels
-    assert "Tuesday" in labels
-    assert "ob:v1:multi:remove:TRAINING_DAYS:MONDAY" in callbacks
-    assert "ob:v1:multi:add:TRAINING_DAYS:TUESDAY" in callbacks
+def test_goal_keyboards_expose_only_retained_actions() -> None:
+    assert _button_pairs(keyboards.goal_input_keyboard()) == [
+        ("Cancel", "ob:v1:cancel")
+    ]
+    assert _button_pairs(keyboards.goal_confirmation_keyboard()) == [
+        ("No, that\u2019s right", "ob:v1:goal:confirm"),
+        ("Yes, add something", "ob:v1:goal:add"),
+        ("Start again", "ob:v1:goal:restart"),
+        ("Cancel", "ob:v1:cancel"),
+    ]
+    assert _button_pairs(keyboards.goal_saved_keyboard()) == [
+        ("Back to welcome", "nav:v1:welcome")
+    ]
 
 
 def test_welcome_consent_and_setup_keyboards_match_visible_contract() -> None:
@@ -96,43 +95,33 @@ def test_user_facing_message_constants_do_not_advertise_slash_commands() -> None
 
 def test_every_callback_value_fits_telegram_limit() -> None:
     samples = [
-        keyboards.keyboard_for_step(step, {})
-        for step in OnboardingStep
-        if step not in {OnboardingStep.GOAL_TYPE}
+        keyboards.welcome_keyboard(),
+        keyboards.information_keyboard(),
+        keyboards.consent_keyboard(),
+        keyboards.setup_introduction_keyboard(),
+        keyboards.goal_input_keyboard(),
+        keyboards.goal_confirmation_keyboard(),
+        keyboards.goal_saved_keyboard(),
+        keyboards.goal_date_clarification_keyboard(),
+        keyboards.goal_main_clarification_keyboard(),
+        keyboards.cancelled_keyboard(),
+        keyboards.resume_keyboard(),
+        keyboards.cancel_confirmation_keyboard(),
+        keyboards.deletion_confirmation_keyboard(),
+        keyboards.strava_keyboard(connected=True),
+        keyboards.disconnect_confirmation_keyboard(),
+        keyboards.state_menu("ready", connected=True),
+        keyboards.add_workout_keyboard(),
+        keyboards.feedback_text_entry_keyboard(),
+        keyboards.manual_heart_rate_offer_keyboard(),
+        keyboards.manual_heart_rate_confirmation_keyboard(),
+        keyboards.rpe_keyboard(),
+        keyboards.mobility_keyboard(),
+        keyboards.discomfort_keyboard(),
+        keyboards.discomfort_area_keyboard(),
+        keyboards.discomfort_description_confirmation_keyboard(),
+        keyboards.discomfort_severity_keyboard(),
     ]
-    samples.append(
-        keyboards.keyboard_for_step(
-            OnboardingStep.GOAL_TYPE,
-            {"primary_sport": "triathlon"},
-        )
-    )
-    samples.extend(
-        [
-            keyboards.parsed_confirmation_keyboard(),
-            keyboards.welcome_keyboard(),
-            keyboards.information_keyboard(),
-            keyboards.consent_keyboard(),
-            keyboards.setup_introduction_keyboard(),
-            keyboards.cancelled_keyboard(),
-            keyboards.summary_keyboard(),
-            keyboards.resume_keyboard(),
-            keyboards.cancel_confirmation_keyboard(),
-            keyboards.deletion_confirmation_keyboard(),
-            keyboards.strava_keyboard(connected=True),
-            keyboards.disconnect_confirmation_keyboard(),
-            keyboards.state_menu("ready", connected=True),
-            keyboards.add_workout_keyboard(),
-            keyboards.feedback_text_entry_keyboard(),
-            keyboards.manual_heart_rate_offer_keyboard(),
-            keyboards.manual_heart_rate_confirmation_keyboard(),
-            keyboards.rpe_keyboard(),
-            keyboards.mobility_keyboard(),
-            keyboards.discomfort_keyboard(),
-            keyboards.discomfort_area_keyboard(),
-            keyboards.discomfort_description_confirmation_keyboard(),
-            keyboards.discomfort_severity_keyboard(),
-        ]
-    )
 
     callbacks = [
         callback
@@ -145,86 +134,16 @@ def test_every_callback_value_fits_telegram_limit() -> None:
     assert max(len(value.encode("utf-8")) for value in callbacks) <= 64
 
 
-def test_unified_onboarding_import_copy_and_buttons_match_product_contract() -> None:
-    baseline = keyboards.keyboard_for_step(
-        OnboardingStep.BASELINE_SOURCE,
-        {},
-        strava_enabled=False,
-        apple_health_enabled=True,
-    )
-    waiting = keyboards.keyboard_for_step(
-        OnboardingStep.FILE_IMPORT_WAITING,
-        {},
-    )
-
-    assert baseline is not None
-    assert waiting is not None
-    assert messages.step_prompt(OnboardingStep.BASELINE_SOURCE) == (
-        "How would you like to establish your initial training baseline?"
-    )
-    assert _button_labels(baseline)[:4] == [
-        "Import training history",
-        "Enter baseline manually",
-        "Decide later",
-        "Back",
-    ]
-    assert _callback_values(baseline)[:4] == [
-        "ob:v1:set:BASELINE_SOURCE:FILE_IMPORT",
-        "ob:v1:set:BASELINE_SOURCE:MANUAL",
-        "ob:v1:set:BASELINE_SOURCE:SKIP_FOR_NOW",
-        "ob:v1:back:BASELINE_SOURCE",
-    ]
-    assert messages.step_prompt(OnboardingStep.FILE_IMPORT_WAITING) == (
-        "Send an Apple Health export ZIP or one or more TCX workout files.\n\n"
-        "Apple Health ZIP is recommended for importing previous history.\n"
-        "TCX is useful for individual workouts.\n\n"
-        "You can upload multiple files and finish when you are done."
-    )
-    assert _button_pairs(waiting) == [
-        ("Finish import", "ob:v1:import:finish"),
-        ("Choose another method", "ob:v1:apple:choose_other"),
-        ("Back", "ob:v1:apple:back"),
-    ]
-
-
 def test_limited_import_copy_names_partial_unknown_baseline() -> None:
-    completion = messages.training_import_complete(
-        activities_imported=1,
-        activities_updated=0,
-        activities_skipped=0,
-        discipline_counts={"RUNNING": 1},
-        baseline_limited=True,
-    )
     daily_apple = messages.apple_health_file_result(
         activities_imported=1,
         activities_updated=0,
         activities_skipped=0,
-        onboarding=False,
         baseline_limited=True,
     )
 
-    assert "partial" in completion
-    assert "UNKNOWN" in completion
-    assert "Runs: 1" in completion
-    assert "Rides: 0" in completion
     assert "finish the import" not in daily_apple
     assert "partial" in daily_apple
-
-
-def test_apple_health_summary_uses_canonical_discipline_keys() -> None:
-    summary = messages.apple_health_import_success(
-        workouts_found=3,
-        activities_imported=3,
-        activities_updated=0,
-        activities_skipped=0,
-        heart_rate_records_matched=0,
-        warning_count=0,
-        discipline_counts={"CYCLING": 2, "HIKING": 1},
-    )
-
-    assert "Rides: 2" in summary
-    assert "Hikes: 1" in summary
-    assert "Runs: 0" in summary
 
 
 def test_ready_menu_exposes_daily_workout_action_and_required_home_actions() -> None:
@@ -352,54 +271,6 @@ def test_ready_disconnected_menu_offers_reconnect_without_sync_actions() -> None
     assert "Recalculate baseline" not in labels
 
 
-def test_baseline_keyboard_respects_flags_and_has_no_calibration() -> None:
-    disabled = _button_labels(
-        keyboards.keyboard_for_step(
-            OnboardingStep.BASELINE_SOURCE,
-            {},
-            strava_enabled=False,
-            apple_health_enabled=True,
-        )
-    )
-    enabled = _button_labels(
-        keyboards.keyboard_for_step(
-            OnboardingStep.BASELINE_SOURCE,
-            {},
-            strava_enabled=True,
-            apple_health_enabled=True,
-        )
-    )
-    tcx_only = _button_labels(
-        keyboards.keyboard_for_step(
-            OnboardingStep.BASELINE_SOURCE,
-            {},
-            strava_enabled=False,
-            apple_health_enabled=False,
-            tcx_enabled=True,
-        )
-    )
-    file_import_disabled = _button_labels(
-        keyboards.keyboard_for_step(
-            OnboardingStep.BASELINE_SOURCE,
-            {},
-            strava_enabled=False,
-            apple_health_enabled=False,
-            tcx_enabled=False,
-        )
-    )
-
-    assert disabled[:3] == [
-        "Import training history",
-        "Enter baseline manually",
-        "Decide later",
-    ]
-    assert tcx_only[:3] == disabled[:3]
-    assert "Import training history" not in file_import_disabled
-    assert "Connect Strava" not in disabled
-    assert enabled[0] == "Connect Strava"
-    assert "Calibration period" not in enabled
-
-
 def test_manual_sync_outcome_copy_covers_every_terminal_and_active_state() -> None:
     rendered = {status: messages.strava_sync_outcome(status) for status in SyncStatus}
 
@@ -436,36 +307,6 @@ def test_profile_rendering_uses_normalized_persisted_values() -> None:
     assert "IRONMAN 70.3 BCN" in text
     assert "Height: Not provided" in text
     assert "Monday, Saturday" in text
-
-
-def test_stale_other_descriptions_do_not_override_predefined_answers() -> None:
-    text = messages.onboarding_summary(
-        {
-            "primary_sport": "RUNNING",
-            "goal_type": "TEN_K",
-            "goal_type_other_description": "Ultra distance",
-            "event_status": False,
-            "goal_priority": "FINISH_SAFELY",
-            "age": 38,
-            "training_days": ["MONDAY"],
-            "weekday_duration": 60,
-            "weekend_duration": 120,
-            "equipment": ["RUNNING_SHOES"],
-            "equipment_other_description": "Rowing erg",
-            "health_areas": ["NONE"],
-            "health_areas_other_description": "Elbow",
-            "coach_tone": "CONCISE_PRACTICAL",
-            "coach_detail": "MEDIUM",
-            "baseline_source": "SKIP_FOR_NOW",
-        }
-    )
-
-    assert "Goal: Ten K" in text
-    assert "Equipment: Running Shoes" in text
-    assert "Health constraints: None" in text
-    assert "Ultra distance" not in text
-    assert "Rowing erg" not in text
-    assert "Elbow" not in text
 
 
 def test_baseline_rendering_states_confidence_and_non_medical_boundary() -> None:

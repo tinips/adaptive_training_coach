@@ -8,7 +8,7 @@ from typing import Protocol
 
 from app.bot.rendering import TelegramResponse
 from app.schemas.common import TelegramIdentity
-from app.services.apple_health import TelegramDocumentUpload
+from app.schemas.training_import import TelegramDocumentUpload
 
 
 class CoachBotService(Protocol):

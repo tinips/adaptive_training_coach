@@ -64,7 +64,7 @@ from app.domain.enums import (
     SyncStatus,
     SyncType,
     TrainingFileFormat,
-    TrainingImportContext,
+    TrainingGoalStatus,
     UserStatus,
     WebhookAspectType,
     WebhookObjectType,
@@ -367,29 +367,6 @@ class OnboardingSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         default=dict,
         nullable=False,
     )
-    pending_free_text_step: Mapped[OnboardingStep | None] = mapped_column(
-        persisted_enum(
-            OnboardingStep,
-            name="pending_onboarding_step",
-            length=32,
-        ),
-        nullable=True,
-    )
-    pending_parsed_value: Mapped[dict[str, object] | None] = mapped_column(
-        json_document(),
-        nullable=True,
-    )
-    return_to_summary: Mapped[bool] = mapped_column(
-        Boolean,
-        default=False,
-        server_default=text("false"),
-        nullable=False,
-    )
-    completed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
-    )
-
     user: Mapped[User] = relationship(
         back_populates="onboarding_session",
         lazy="raise",
@@ -443,14 +420,31 @@ class TrainingGoal(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
     )
-    goal_type: Mapped[GoalType] = mapped_column(
+    goal_type: Mapped[GoalType | None] = mapped_column(
         persisted_enum(GoalType, name="goal_type", length=32),
-        nullable=False,
+        nullable=True,
     )
     event_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     event_date: Mapped[date | None] = mapped_column(Date, nullable=True)
-    goal_priority: Mapped[GoalPriority] = mapped_column(
+    goal_priority: Mapped[GoalPriority | None] = mapped_column(
         persisted_enum(GoalPriority, name="goal_priority", length=24),
+        nullable=True,
+    )
+    main_goal: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    target_outcome: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    secondary_priority: Mapped[str | None] = mapped_column(
+        String(500),
+        nullable=True,
+    )
+    original_description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[TrainingGoalStatus] = mapped_column(
+        persisted_enum(
+            TrainingGoalStatus,
+            name="training_goal_status",
+            length=16,
+        ),
+        default=TrainingGoalStatus.CONFIRMED,
+        server_default=TrainingGoalStatus.CONFIRMED.value,
         nullable=False,
     )
 
@@ -1345,11 +1339,6 @@ class AppleHealthImportJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
     )
-    onboarding_session_id: Mapped[uuid.UUID | None] = mapped_column(
-        Uuid(as_uuid=True),
-        ForeignKey("onboarding_sessions.id", ondelete="SET NULL"),
-        nullable=True,
-    )
     workout_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True),
         ForeignKey("workouts.id", ondelete="SET NULL"),
@@ -1378,16 +1367,6 @@ class AppleHealthImportJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ),
         default=TrainingFileFormat.APPLE_HEALTH_ZIP,
         server_default=TrainingFileFormat.APPLE_HEALTH_ZIP.value,
-        nullable=False,
-    )
-    context: Mapped[TrainingImportContext] = mapped_column(
-        persisted_enum(
-            TrainingImportContext,
-            name="training_import_context",
-            length=16,
-        ),
-        default=TrainingImportContext.ONBOARDING,
-        server_default=TrainingImportContext.ONBOARDING.value,
         nullable=False,
     )
     status: Mapped[AppleHealthImportStatus] = mapped_column(
@@ -1680,12 +1659,6 @@ class WorkoutFlowSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     pending_discomfort_description: Mapped[str | None] = mapped_column(
         Text,
         nullable=True,
-    )
-    return_to_onboarding: Mapped[bool] = mapped_column(
-        Boolean,
-        default=False,
-        server_default=text("false"),
-        nullable=False,
     )
     completed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),

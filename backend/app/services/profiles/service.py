@@ -1,40 +1,22 @@
-"""Atomic profile finalization and ownership-scoped profile reads."""
+"""Ownership-scoped reads for existing normalized profiles."""
 
 from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping, Sequence
 
-from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.db.models import (
-    AvailabilityRule,
-    BodyArea,
-    EquipmentAccessType,
-    EquipmentType,
-)
+from app.db.models import AvailabilityRule
 from app.domain.enums import (
     BaselinePreferenceStatus,
     BaselineSource,
     DayOfWeek,
-    OnboardingStatus,
-    OnboardingStep,
     UserStatus,
 )
-from app.repositories.baselines import BaselineRepository
 from app.repositories.onboarding import OnboardingRepository
-from app.repositories.profiles import (
-    AvailabilityRuleInput,
-    EquipmentAccessInput,
-    HealthConstraintInput,
-    ProfileBundle,
-    ProfileRepository,
-)
-from app.repositories.users import UserRepository
+from app.repositories.profiles import ProfileBundle, ProfileRepository
 from app.schemas.profile import (
-    AccessSelection,
-    FinalOnboardingAnswers,
     PersistedEquipmentAccessData,
     PersistedHealthConstraintData,
     PersistedProfileData,
@@ -42,7 +24,7 @@ from app.schemas.profile import (
 
 
 class IncompleteProfileError(ValueError):
-    """Raised before writes when confirmed staging is incomplete."""
+    """Raised when historical normalized profile data is incomplete."""
 
     code = "incomplete_profile"
 
@@ -54,78 +36,13 @@ class BaselineSelectionUnavailableError(ValueError):
 
 
 class ProfileService:
-    """Materialize and query profiles while preserving transaction boundaries."""
+    """Read existing profiles without materializing removed onboarding answers."""
 
     def __init__(
         self,
         session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
         self._session_factory = session_factory
-
-    async def finalize(self, *, user_id: uuid.UUID) -> PersistedProfileData:
-        """Atomically and idempotently materialize confirmed onboarding answers."""
-
-        async with self._session_factory.begin() as session:
-            onboarding_repository = OnboardingRepository(session)
-            onboarding = await onboarding_repository.lock_for_user(
-                user_id=user_id,
-            )
-            profile_repository = ProfileRepository(session)
-            if onboarding.status is OnboardingStatus.COMPLETED:
-                bundle = await profile_repository.get_bundle(user_id=user_id)
-                return self._serialize_bundle(
-                    bundle,
-                    onboarding_answers=onboarding.answers,
-                )
-            if (
-                onboarding.current_step is not OnboardingStep.SUMMARY
-                or onboarding.pending_free_text_step is not None
-                or onboarding.pending_parsed_value is not None
-            ):
-                raise IncompleteProfileError
-
-            try:
-                answers = FinalOnboardingAnswers.model_validate(onboarding.answers)
-            except ValidationError as exc:
-                raise IncompleteProfileError from exc
-            if (
-                answers.baseline_source
-                in {
-                    BaselineSource.APPLE_HEALTH_EXPORT,
-                    BaselineSource.FILE_IMPORT,
-                }
-                and await BaselineRepository(session).get_latest(user_id=user_id)
-                is None
-            ):
-                raise IncompleteProfileError
-
-            bundle = await profile_repository.finalize_profile(
-                user_id=user_id,
-                age=answers.age,
-                height_cm=answers.height,
-                weight_kg=answers.weight,
-                primary_sport=answers.primary_sport,
-                goal_type=answers.goal_type,
-                event_name=answers.event_name,
-                event_date=answers.event_date,
-                goal_priority=answers.goal_priority,
-                availability=self._availability(answers),
-                equipment=self._equipment(answers),
-                constraints=self._constraints(answers),
-                coach_tone=answers.coach_tone,
-                detail_level=answers.coach_detail,
-                baseline_source=answers.baseline_source,
-                baseline_status=self._baseline_status(answers.baseline_source),
-            )
-            await onboarding_repository.complete(user_id=user_id)
-            await UserRepository(session).update_status(
-                user_id=user_id,
-                status=self._user_status(answers.baseline_source),
-            )
-            return self._serialize_bundle(
-                bundle,
-                onboarding_answers=onboarding.answers,
-            )
 
     async def get(self, *, user_id: uuid.UUID) -> PersistedProfileData | None:
         """Read a normalized profile only through its owning user."""
@@ -150,7 +67,7 @@ class ProfileService:
         user_id: uuid.UUID,
         source: BaselineSource,
     ) -> PersistedProfileData:
-        """Persist a post-profile manual/calibration choice without inventing data."""
+        """Retain baseline selection for users with an existing complete profile."""
 
         if source not in {BaselineSource.MANUAL, BaselineSource.CALIBRATION}:
             raise ValueError("Only pending manual or calibration sources are valid.")
@@ -185,166 +102,6 @@ class ProfileService:
             )
 
     @classmethod
-    def _availability(
-        cls,
-        answers: FinalOnboardingAnswers,
-    ) -> tuple[AvailabilityRuleInput, ...]:
-        rules: list[AvailabilityRuleInput] = []
-        for day in answers.training_days:
-            duration = (
-                answers.weekend_duration
-                if day in {DayOfWeek.SATURDAY, DayOfWeek.SUNDAY}
-                else answers.weekday_duration
-            )
-            rules.append(
-                AvailabilityRuleInput(
-                    day_of_week=day,
-                    available_minutes=(
-                        duration
-                        if isinstance(duration, int)
-                        else cls._over_duration_threshold(duration)
-                    ),
-                    is_variable=not isinstance(duration, int),
-                )
-            )
-        return tuple(rules)
-
-    @classmethod
-    def _equipment(
-        cls,
-        answers: FinalOnboardingAnswers,
-    ) -> tuple[EquipmentAccessInput, ...]:
-        records: list[EquipmentAccessInput] = []
-        bike_types = {
-            EquipmentType.ROAD_BIKE,
-            EquipmentType.MOUNTAIN_BIKE,
-            EquipmentType.INDOOR_BIKE_TRAINER,
-        }
-        equipment_types = list(dict.fromkeys(answers.equipment))
-        if (
-            answers.pool_access is not None
-            and EquipmentType.SWIMMING_POOL not in equipment_types
-        ):
-            equipment_types.append(EquipmentType.SWIMMING_POOL)
-        if answers.bike_access is not None and not any(
-            equipment_type in bike_types for equipment_type in equipment_types
-        ):
-            equipment_types.append(EquipmentType.ROAD_BIKE)
-
-        for equipment_type in equipment_types:
-            selection: AccessSelection | None = None
-            if equipment_type is EquipmentType.SWIMMING_POOL:
-                selection = answers.pool_access
-            elif equipment_type in bike_types:
-                selection = answers.bike_access
-            records.append(
-                cls._equipment_input(
-                    equipment_type=equipment_type,
-                    selection=selection,
-                    notes=(
-                        answers.equipment_other_description
-                        if equipment_type is EquipmentType.OTHER
-                        else None
-                    ),
-                )
-            )
-        return tuple(records)
-
-    @staticmethod
-    def _equipment_input(
-        *,
-        equipment_type: EquipmentType,
-        selection: AccessSelection | None,
-        notes: str | None = None,
-    ) -> EquipmentAccessInput:
-        if selection is None:
-            return EquipmentAccessInput(
-                equipment_type=equipment_type,
-                notes=notes,
-            )
-        return EquipmentAccessInput(
-            equipment_type=equipment_type,
-            access_type=selection.type,
-            access_days=(
-                tuple(selection.days)
-                if selection.type is EquipmentAccessType.REGULAR
-                else None
-            ),
-            notes=notes,
-        )
-
-    @staticmethod
-    def _constraints(
-        answers: FinalOnboardingAnswers,
-    ) -> tuple[HealthConstraintInput, ...]:
-        if answers.health_areas == ["NONE"]:
-            return ()
-        timing = answers.health_timing
-        if timing is None:
-            raise IncompleteProfileError
-        return tuple(
-            HealthConstraintInput(
-                body_area=BodyArea(area),
-                constraint_type=timing,
-                normalized_description=ProfileService._constraint_description(
-                    area=BodyArea(area),
-                    answers=answers,
-                ),
-            )
-            for area in answers.health_areas
-        )
-
-    @staticmethod
-    def _constraint_description(
-        *,
-        area: BodyArea,
-        answers: FinalOnboardingAnswers,
-    ) -> str | None:
-        descriptions: list[str] = []
-        if (
-            area is BodyArea.OTHER
-            and answers.health_areas_other_description is not None
-        ):
-            descriptions.append(answers.health_areas_other_description)
-        if answers.health_description is not None:
-            descriptions.append(answers.health_description)
-        return "; ".join(dict.fromkeys(descriptions)) or None
-
-    @staticmethod
-    def _over_duration_threshold(duration: str) -> int | None:
-        thresholds = {
-            "OVER_90": 90,
-            "OVER_180": 180,
-        }
-        return thresholds.get(duration)
-
-    @staticmethod
-    def _baseline_status(
-        source: BaselineSource,
-    ) -> BaselinePreferenceStatus:
-        if source is BaselineSource.STRAVA:
-            return BaselinePreferenceStatus.PENDING
-        if source in {
-            BaselineSource.APPLE_HEALTH_EXPORT,
-            BaselineSource.FILE_IMPORT,
-        }:
-            return BaselinePreferenceStatus.READY
-        if source in {BaselineSource.MANUAL, BaselineSource.CALIBRATION}:
-            return BaselinePreferenceStatus.NOT_IMPLEMENTED
-        return BaselinePreferenceStatus.SELECTED
-
-    @staticmethod
-    def _user_status(source: BaselineSource) -> UserStatus:
-        if source is BaselineSource.STRAVA:
-            return UserStatus.BASELINE_PENDING
-        if source in {
-            BaselineSource.APPLE_HEALTH_EXPORT,
-            BaselineSource.FILE_IMPORT,
-        }:
-            return UserStatus.BASELINE_READY
-        return UserStatus.PROFILE_COMPLETED
-
-    @classmethod
     def _serialize_bundle(
         cls,
         bundle: ProfileBundle,
@@ -355,7 +112,14 @@ class ProfileService:
         goal = bundle.training_goal
         coach = bundle.coach_preference
         baseline = bundle.baseline_preference
-        if profile is None or goal is None or coach is None or baseline is None:
+        if (
+            profile is None
+            or goal is None
+            or goal.goal_type is None
+            or goal.goal_priority is None
+            or coach is None
+            or baseline is None
+        ):
             raise IncompleteProfileError
 
         descriptions = [

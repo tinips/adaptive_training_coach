@@ -439,7 +439,6 @@ async def test_optional_discomfort_and_detail_skip_paths_remain_unknown(
     started = await service.start_for_activity(
         user_id=detail_user_id,
         activity_id=detail_activity_id,
-        return_to_onboarding=True,
     )
     await service.skip_rpe(detail_identity)
     await service.report_mobility(detail_identity)
@@ -447,7 +446,7 @@ async def test_optional_discomfort_and_detail_skip_paths_remain_unknown(
     severity = await service.skip_body_area(detail_identity)
     completed = await service.skip_severity(detail_identity)
 
-    assert started.return_to_onboarding is True
+    assert started.activity_id == detail_activity_id
     assert severity.state is WorkoutFlowStep.SEVERITY
     assert completed.feedback is not None
     assert completed.feedback.mobility_done is True

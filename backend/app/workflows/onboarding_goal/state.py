@@ -1,0 +1,22 @@
+"""Explicit state for one stateless goal-extraction graph run."""
+
+from __future__ import annotations
+
+from typing import TypedDict
+from uuid import UUID
+
+from app.integrations.llm.models import GoalExtractionOutput
+from app.schemas.onboarding_goal import GoalExtractionOutcome
+
+
+class GoalExtractionGraphState(TypedDict, total=False):
+    """No conversation history or checkpoint is retained by LangGraph."""
+
+    user_id: UUID
+    user_text: str
+    existing_draft: GoalExtractionOutput | None
+    goal_draft: GoalExtractionOutput
+    outcome: GoalExtractionOutcome
+    error_code: str | None
+    prompt_tokens: int | None
+    completion_tokens: int | None
