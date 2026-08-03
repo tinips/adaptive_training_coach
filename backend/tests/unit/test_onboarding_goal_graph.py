@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
+from typing import Any
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
-from langchain_core.messages import BaseMessage
-from langchain_core.runnables import RunnableConfig
+from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.runnables import Runnable, RunnableConfig, RunnableLambda
+from langchain_core.tools import BaseTool
 
 from app.domain.enums import OnboardingStep
 from app.integrations.llm.models import (
@@ -17,7 +21,13 @@ from app.integrations.llm.models import (
     StructuredOutputSchema,
 )
 from app.observability.protocol import ProviderMode
+from app.schemas.onboarding_goal import UpdatedOnboardingData
 from app.workflows.onboarding_goal.graph import build_goal_extraction_graph
+from app.workflows.onboarding_goal.nodes import (
+    UpdateOnboardingSchema,
+    build_onboarding_modification_messages,
+    update_onboarding_data,
+)
 
 
 @dataclass
@@ -25,6 +35,8 @@ class StructuredGoalModel:
     response: StructuredModelResponse
     schemas: list[StructuredOutputSchema] = field(default_factory=list)
     messages: list[list[BaseMessage]] = field(default_factory=list)
+    agent_responses: list[AIMessage] = field(default_factory=list)
+    bound_tool_names: list[str] = field(default_factory=list)
 
     @property
     def provider_mode(self) -> ProviderMode:
@@ -47,6 +59,50 @@ class StructuredGoalModel:
         self.schemas.append(schema)
         self.messages.append(messages)
         return self.response
+
+    def bind_tools(
+        self,
+        tools: Sequence[BaseTool],
+    ) -> Runnable[Any, AIMessage]:
+        self.bound_tool_names.extend(item.name for item in tools)
+
+        async def respond(
+            messages: list[BaseMessage],
+            config: RunnableConfig,
+        ) -> AIMessage:
+            del config
+            return self.agent_responses.pop(0)
+
+        return RunnableLambda(respond)
+
+
+def test_update_onboarding_schema_is_sparse_described_and_runtime_hidden() -> None:
+    validated = UpdateOnboardingSchema()
+    assert validated.model_dump(exclude={"runtime"}) == {
+        "main_goal": None,
+        "target_outcome": None,
+        "age": None,
+        "birth_year": None,
+        "gender": None,
+        "weight_kg": None,
+        "height_cm": None,
+        "event_date": None,
+    }
+
+    schema = update_onboarding_data.tool_call_schema.model_json_schema()
+    properties = schema["properties"]
+    assert set(properties) == {
+        "main_goal",
+        "target_outcome",
+        "age",
+        "birth_year",
+        "gender",
+        "weight_kg",
+        "height_cm",
+        "event_date",
+    }
+    assert "required" not in schema
+    assert all(properties[field].get("description") for field in properties)
 
 
 @pytest.mark.asyncio
@@ -250,3 +306,70 @@ async def test_ambiguous_date_remains_null_without_an_unhandled_error() -> None:
 
     assert result["outcome"] == "extracted"
     assert result["goal_patch"] == output
+
+
+@pytest.mark.asyncio
+async def test_onboarding_modification_calls_tool_updates_state_and_confirms() -> None:
+    user_id = uuid4()
+    updater = AsyncMock(
+        return_value=UpdatedOnboardingData(
+            updated_fields={
+                "main_goal": "Finish an Ironman 70.3",
+                "target_outcome": "Finish in a decent time",
+            }
+        )
+    )
+    model = StructuredGoalModel(
+        response=StructuredModelResponse(output=None),
+        agent_responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "update_onboarding_data",
+                        "args": {
+                            "main_goal": "Finish an Ironman 70.3",
+                            "target_outcome": "Finish in a decent time",
+                            "age": None,
+                        },
+                        "id": "update-goal-1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                content=(
+                    "Done — your goal is now to finish an Ironman 70.3 "
+                    "in a decent time."
+                )
+            ),
+        ],
+    )
+    graph = build_goal_extraction_graph(model=model)
+
+    result = await graph.ainvoke(
+        {
+            "user_id": user_id,
+            "action": "MODIFY_ONBOARDING_DATA",
+            "user_text": ("change my goal to finish my ironman 70.3 in a decent time"),
+            "messages": build_onboarding_modification_messages(
+                "change my goal to finish my ironman 70.3 in a decent time"
+            ),
+            "onboarding_updater": updater,
+            "onboarding_updated": False,
+        }
+    )
+
+    assert model.bound_tool_names == ["update_onboarding_data"]
+    updater.assert_awaited_once_with(
+        user_id=user_id,
+        payload={
+            "main_goal": "Finish an Ironman 70.3",
+            "target_outcome": "Finish in a decent time",
+        },
+    )
+    assert result["onboarding_updated"] is True
+    assert result["outcome"] == "onboarding_modified"
+    assert result["confirmation"] == (
+        "Done — your goal is now to finish an Ironman 70.3 in a decent time."
+    )

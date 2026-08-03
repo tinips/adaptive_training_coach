@@ -6,6 +6,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine
 from telegram import Update
 from telegram.constants import ParseMode
@@ -18,6 +19,7 @@ from app.bot.service import CoachBotApplicationService
 from app.bot.service_protocol import CoachBotService
 from app.config import Settings, get_settings
 from app.db.session import create_engine, create_session_factory
+from app.integrations.llm.factory import create_goal_extraction_model
 from app.logging import configure_logging
 from app.services.accounts import AccountQueryService, AccountService
 from app.services.onboarding import OnboardingService
@@ -26,6 +28,7 @@ from app.services.strava.orchestrator import StravaCoordinator
 from app.services.training_import import TrainingFileImportService
 from app.services.workout_feedback import WorkoutFeedbackService
 from app.workflows.onboarding_goal.graph import create_goal_extractor
+from app.workflows.telegram_orchestrator import TelegramAgentWorkspace
 
 TelegramApplication = Application[Any, Any, Any, Any, Any, Any]
 logger = logging.getLogger(__name__)
@@ -39,6 +42,7 @@ class BotRuntime:
     engine: AsyncEngine
     strava: StravaCoordinator
     apple_health: TrainingFileImportService
+    agent_workspace: TelegramAgentWorkspace
     service: CoachBotApplicationService
 
     async def recover(self) -> None:
@@ -46,6 +50,7 @@ class BotRuntime:
 
         await self.strava.recover_stale_work()
         await self.apple_health.recover_stale_work()
+        await self.agent_workspace.start()
 
     async def aclose(self) -> None:
         """Close provider and database connection pools exactly once."""
@@ -53,7 +58,10 @@ class BotRuntime:
         try:
             await self.strava.aclose()
         finally:
-            await self.engine.dispose()
+            try:
+                await self.agent_workspace.aclose()
+            finally:
+                await self.engine.dispose()
 
 
 def build_runtime(
@@ -67,6 +75,10 @@ def build_runtime(
     runtime_engine = engine or create_engine(runtime_settings)
     session_factory = create_session_factory(runtime_engine)
     goal_extractor = create_goal_extractor(runtime_settings)
+    agent_workspace = TelegramAgentWorkspace(
+        model=create_goal_extraction_model(runtime_settings),
+        postgres_dsn=_checkpoint_dsn(runtime_settings.database_url),
+    )
     telegram_token = runtime_settings.telegram_bot_token
     initial_sync_notifier = (
         TelegramInitialSyncNotifier(
@@ -101,14 +113,25 @@ def build_runtime(
         apple_health_enabled=runtime_settings.apple_health_import_enabled,
         tcx_enabled=runtime_settings.tcx_import_enabled,
         workout_feedback_enabled=runtime_settings.workout_feedback_enabled,
+        agent_workspace=agent_workspace,
     )
     return BotRuntime(
         settings=runtime_settings,
         engine=runtime_engine,
         strava=strava,
         apple_health=apple_health,
+        agent_workspace=agent_workspace,
         service=service,
     )
+
+
+def _checkpoint_dsn(database_url: str) -> str | None:
+    """Convert the SQLAlchemy async URL for psycopg, or use memory in tests."""
+
+    parsed = make_url(database_url)
+    if parsed.get_backend_name() != "postgresql":
+        return None
+    return parsed.set(drivername="postgresql").render_as_string(hide_password=False)
 
 
 def create_application(

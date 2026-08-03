@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections.abc import Mapping
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import cast
@@ -32,7 +33,11 @@ from app.repositories.onboarding import OnboardingRepository
 from app.repositories.profiles import ProfileRepository
 from app.repositories.users import UserRepository
 from app.schemas.common import TelegramIdentity
-from app.schemas.onboarding_goal import GoalExtractionWorkflowResult, GoalExtractor
+from app.schemas.onboarding_goal import (
+    GoalExtractionWorkflowResult,
+    GoalExtractor,
+    UpdatedOnboardingData,
+)
 from app.schemas.onboarding_service import OnboardingResultKind, OnboardingServiceResult
 
 _PARSE_IN_FLIGHT_KEY = "_parse_in_flight"
@@ -53,6 +58,13 @@ _WEIGHT_KG_KEY = "weight_kg"
 _HEIGHT_CM_KEY = "height_cm"
 _INTEGER_PATTERN = re.compile(r"[0-9]+")
 _WEIGHT_PATTERN = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+_ATHLETE_PROFILE_UPDATE_FIELDS = frozenset(
+    {"age", "birth_year", "gender", "weight_kg", "height_cm"}
+)
+_TRAINING_GOAL_UPDATE_FIELDS = frozenset({"main_goal", "target_outcome", "event_date"})
+_ONBOARDING_UPDATE_FIELDS = (
+    _ATHLETE_PROFILE_UPDATE_FIELDS | _TRAINING_GOAL_UPDATE_FIELDS
+)
 
 
 class OnboardingApplicationError(RuntimeError):
@@ -408,7 +420,174 @@ class OnboardingService:
             OnboardingStep.PROFILE_HEIGHT_INTAKE,
         }:
             return await self._handle_profile_text(identity, text)
+        if onboarding.status is OnboardingStatus.COMPLETED:
+            return await self._modify_onboarding_data(
+                user_id=user.id,
+                text=text,
+            )
         raise OnboardingApplicationError("invalid_action")
+
+    async def update_onboarding_data(
+        self,
+        *,
+        user_id: uuid.UUID,
+        payload: Mapping[str, JsonValue],
+    ) -> UpdatedOnboardingData:
+        """Validate and route one sparse athlete-data update across owned tables."""
+
+        clean_payload = self._validate_onboarding_update_payload(payload)
+        athlete_profile_payload = {
+            key: value
+            for key, value in clean_payload.items()
+            if key in _ATHLETE_PROFILE_UPDATE_FIELDS
+        }
+        training_goal_payload = {
+            key: value
+            for key, value in clean_payload.items()
+            if key in _TRAINING_GOAL_UPDATE_FIELDS
+        }
+        repository_goal_payload: dict[str, object] = dict(training_goal_payload)
+        event_date_value = repository_goal_payload.get("event_date")
+        if isinstance(event_date_value, str):
+            repository_goal_payload["event_date"] = date.fromisoformat(event_date_value)
+        async with self._session_factory.begin() as session:
+            profiles = ProfileRepository(session)
+            await profiles.lock_owner(user_id=user_id)
+            profile = await profiles.get_athlete_profile(user_id=user_id)
+            onboarding_repository = OnboardingRepository(session)
+            onboarding = await onboarding_repository.get_for_user(
+                user_id=user_id,
+                for_update=True,
+            )
+            if athlete_profile_payload:
+                if profile is None:
+                    if (
+                        onboarding is None
+                        or onboarding.status is not OnboardingStatus.ACTIVE
+                    ):
+                        raise OnboardingApplicationError("invalid_onboarding_update")
+                    unsupported_staged = set(athlete_profile_payload) - {
+                        _BIRTH_YEAR_KEY,
+                        _GENDER_KEY,
+                        _WEIGHT_KG_KEY,
+                        _HEIGHT_CM_KEY,
+                    }
+                    if unsupported_staged:
+                        raise OnboardingApplicationError("invalid_onboarding_update")
+                    answers = self._answers(onboarding)
+                    answers.update(athlete_profile_payload)
+                    await onboarding_repository.save_progress(
+                        user_id=user_id,
+                        current_step=onboarding.current_step,
+                        answers=cast(dict[str, object], answers),
+                    )
+                else:
+                    repository_profile_payload: dict[str, object] = dict(
+                        athlete_profile_payload
+                    )
+                    birth_year_value = repository_profile_payload.get("birth_year")
+                    if isinstance(birth_year_value, int):
+                        repository_profile_payload["age"] = (
+                            utc_now().year - birth_year_value
+                        )
+                    gender_value = repository_profile_payload.get("gender")
+                    if isinstance(gender_value, str):
+                        repository_profile_payload["gender"] = AthleteGender(
+                            gender_value
+                        )
+                    await profiles.update_athlete_profile_fields(
+                        user_id=user_id,
+                        payload=repository_profile_payload,
+                    )
+            if training_goal_payload:
+                await profiles.update_training_goal_fields(
+                    user_id=user_id,
+                    payload=repository_goal_payload,
+                )
+            return UpdatedOnboardingData(updated_fields=clean_payload)
+
+    @classmethod
+    def _validate_onboarding_update_payload(
+        cls,
+        payload: Mapping[str, JsonValue],
+    ) -> dict[str, JsonValue]:
+        if not payload:
+            raise OnboardingApplicationError("empty_onboarding_update")
+        unknown_fields = set(payload) - _ONBOARDING_UPDATE_FIELDS
+        if unknown_fields:
+            raise OnboardingApplicationError("invalid_onboarding_update")
+
+        clean_payload: dict[str, JsonValue] = {}
+        for key, value in payload.items():
+            if value is None:
+                continue
+            if key in {"main_goal", "target_outcome"}:
+                if not isinstance(value, str):
+                    raise OnboardingApplicationError("invalid_onboarding_update")
+                clean_payload[key] = cls._normalize_update_text(
+                    value,
+                    maximum=500,
+                )
+            elif key == "age":
+                if (
+                    not isinstance(value, int)
+                    or isinstance(value, bool)
+                    or not 16 <= value <= 100
+                ):
+                    raise OnboardingApplicationError("invalid_onboarding_update")
+                clean_payload[key] = value
+            elif key == "birth_year":
+                if (
+                    not isinstance(value, int)
+                    or isinstance(value, bool)
+                    or not 1940 <= value <= 2008
+                ):
+                    raise OnboardingApplicationError("invalid_onboarding_update")
+                clean_payload[key] = value
+            elif key == "gender":
+                if not isinstance(value, str):
+                    raise OnboardingApplicationError("invalid_onboarding_update")
+                try:
+                    clean_payload[key] = AthleteGender(value).value
+                except ValueError as exc:
+                    raise OnboardingApplicationError(
+                        "invalid_onboarding_update"
+                    ) from exc
+            elif key == "weight_kg":
+                if not isinstance(value, (int, float)) or isinstance(value, bool):
+                    raise OnboardingApplicationError("invalid_onboarding_update")
+                weight_kg = float(value)
+                if not 35.0 <= weight_kg <= 250.0:
+                    raise OnboardingApplicationError("invalid_onboarding_update")
+                clean_payload[key] = weight_kg
+            elif key == "height_cm":
+                if (
+                    not isinstance(value, int)
+                    or isinstance(value, bool)
+                    or not 120 <= value <= 230
+                ):
+                    raise OnboardingApplicationError("invalid_onboarding_update")
+                clean_payload[key] = value
+            elif key == "event_date":
+                if not isinstance(value, str):
+                    raise OnboardingApplicationError("invalid_onboarding_update")
+                try:
+                    parsed_event_date = date.fromisoformat(value)
+                except ValueError as exc:
+                    raise OnboardingApplicationError(
+                        "invalid_onboarding_update"
+                    ) from exc
+                clean_payload[key] = parsed_event_date.isoformat()
+        if not clean_payload:
+            raise OnboardingApplicationError("empty_onboarding_update")
+        return clean_payload
+
+    @staticmethod
+    def _normalize_update_text(value: str, *, maximum: int) -> str:
+        normalized = " ".join(value.split())
+        if not normalized or len(normalized) > maximum:
+            raise OnboardingApplicationError("invalid_onboarding_update")
+        return normalized
 
     async def _handle_profile_text(
         self,
@@ -551,6 +730,89 @@ class OnboardingService:
                 user_id=user.id
             )
             return self._result(user, onboarding)
+
+    async def _modify_onboarding_data(
+        self,
+        *,
+        user_id: uuid.UUID,
+        text: str,
+    ) -> OnboardingServiceResult:
+        """Invoke the agent while keeping the ownership-scoped write in this service."""
+
+        async with self._session_factory.begin() as session:
+            user = await UserRepository(session).require_by_id(user_id=user_id)
+            onboarding = await OnboardingRepository(session).require_for_user(
+                user_id=user_id
+            )
+            if onboarding.status is not OnboardingStatus.COMPLETED:
+                raise OnboardingApplicationError("stale_action")
+            usage_repository = LLMUsageRepository(session)
+            if self._settings.llm_mode == "live":
+                attempts = await usage_repository.count_since(
+                    user_id=user_id,
+                    since=utc_now() - timedelta(hours=1),
+                    provider_mode="live",
+                )
+                if attempts >= self._settings.llm_other_requests_per_hour:
+                    return self._result(
+                        user,
+                        onboarding,
+                        kind="rate_limited",
+                        error_code="llm_rate_limited",
+                    )
+            usage = await usage_repository.record(
+                user_id=user_id,
+                onboarding_step=OnboardingStep.GOAL_CONFIRMED,
+                provider_mode=self._settings.llm_mode,
+                model=self._settings.llm_model,
+                status=LLMUsageStatus.PROVIDER_ERROR,
+            )
+            usage_id = usage.id
+
+        try:
+            workflow = await self._goal_extractor.modify_onboarding_data(
+                user_id=user_id,
+                user_text=text,
+                onboarding_updater=self.update_onboarding_data,
+            )
+        except Exception:
+            workflow = None
+
+        async with self._session_factory.begin() as session:
+            user = await UserRepository(session).require_by_id(user_id=user_id)
+            onboarding = await OnboardingRepository(session).require_for_user(
+                user_id=user_id
+            )
+            usage_status = LLMUsageStatus.PROVIDER_ERROR
+            if workflow is not None:
+                if workflow.outcome == "onboarding_modified":
+                    usage_status = LLMUsageStatus.SUCCEEDED
+                elif workflow.outcome == "no_onboarding_update":
+                    usage_status = LLMUsageStatus.CLARIFICATION
+            await LLMUsageRepository(session).update_outcome(
+                user_id=user_id,
+                usage_id=usage_id,
+                status=usage_status,
+                prompt_tokens=None,
+                completion_tokens=None,
+            )
+            if workflow is None or workflow.outcome == "provider_error":
+                return self._result(
+                    user,
+                    onboarding,
+                    kind="provider_error",
+                    error_code=(
+                        workflow.error_code
+                        if workflow is not None
+                        else "workflow_failure"
+                    ),
+                )
+            return self._result(
+                user,
+                onboarding,
+                kind="onboarding_modification",
+                confirmation=workflow.confirmation,
+            )
 
     async def _extract_goal(
         self,
@@ -923,6 +1185,7 @@ class OnboardingService:
         *,
         kind: OnboardingResultKind | None = None,
         error_code: str | None = None,
+        confirmation: str | None = None,
         created: bool = False,
     ) -> OnboardingServiceResult:
         answers = cls._answers(onboarding)
@@ -962,5 +1225,6 @@ class OnboardingService:
             current_step=onboarding.current_step,
             answers=answers,
             error_code=error_code,
+            confirmation=confirmation,
             created=created,
         )

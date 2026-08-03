@@ -80,7 +80,7 @@ def test_initial_migration_upgrade_and_downgrade(
             for row in connection.execute("PRAGMA table_info('workout_flow_sessions')")
         }
 
-    assert revision == ("0010_remove_legacy_goal_fields",)
+    assert revision == ("0012_remove_fitness_level",)
     assert len(tables - {"alembic_version"}) == 28
     assert {
         "activity_feedback",
@@ -131,9 +131,13 @@ def test_initial_migration_upgrade_and_downgrade(
         training_goal_info[column][3] == 1
         for column in ("main_goal", "target_outcome", "original_description")
     )
-    assert {"birth_year", "gender", "weight_kg", "height_cm"}.issubset(
-        athlete_profile_columns
-    )
+    assert {
+        "birth_year",
+        "gender",
+        "weight_kg",
+        "height_cm",
+    }.issubset(athlete_profile_columns)
+    assert "fitness_level" not in athlete_profile_columns
 
     command.downgrade(configuration, "0004_discipline_workout_models")
     with sqlite3.connect(database_path) as connection:
@@ -186,7 +190,7 @@ def test_initial_migration_upgrade_and_downgrade(
                 "SELECT name FROM sqlite_master WHERE type = 'table'",
             )
         }
-    assert reupgraded_revision == ("0010_remove_legacy_goal_fields",)
+    assert reupgraded_revision == ("0012_remove_fitness_level",)
     assert "heart_rate_observations" not in reupgraded_tables
 
     command.downgrade(configuration, "base")
@@ -453,7 +457,7 @@ def test_unified_import_migration_preserves_and_backfills_0002_data(
             (import_job_id,),
         ).fetchone()
 
-    assert revision == ("0010_remove_legacy_goal_fields",)
+    assert revision == ("0012_remove_fitness_level",)
     assert apple_sources == [
         (exact_apple_id, "APPLE_HEALTH", "apple-exact"),
         (summary_apple_id, "APPLE_HEALTH", "apple-summary"),
@@ -856,7 +860,7 @@ def test_discipline_workout_migration_preserves_populated_0003_data(
             "PRAGMA foreign_key_check",
         ).fetchall()
 
-    assert revision_at_head == ("0010_remove_legacy_goal_fields",)
+    assert revision_at_head == ("0012_remove_fitness_level",)
     assert "heart_rate_observations" not in head_tables
     assert len(workout_rows) == len(activities)
     assert {row[0] for row in workout_rows} == {row["id"] for row in activities}

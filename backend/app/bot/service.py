@@ -9,11 +9,14 @@ from pathlib import Path
 from typing import Protocol, cast
 from uuid import UUID
 
+from langchain_core.messages import HumanMessage
+
 from app.bot import keyboards, messages
 from app.bot.rendering import TelegramResponse
 from app.domain.enums import (
     AppleHealthImportStatus,
     BaselineSource,
+    OnboardingStatus,
     OnboardingStep,
     SyncStatus,
     TrainingFileFormat,
@@ -38,6 +41,11 @@ from app.services.workout_feedback import (
     WorkoutFeedbackError,
     WorkoutFeedbackResult,
     WorkoutFeedbackService,
+)
+from app.workflows.telegram_orchestrator.workspace import (
+    TelegramAgentContext,
+    TelegramAgentWorkspace,
+    TelegramEventType,
 )
 
 logger = logging.getLogger(__name__)
@@ -100,6 +108,7 @@ class CoachBotApplicationService:
         apple_health_enabled: bool = True,
         tcx_enabled: bool = True,
         workout_feedback_enabled: bool = True,
+        agent_workspace: TelegramAgentWorkspace | None = None,
     ) -> None:
         self._onboarding = onboarding
         self._profiles = profiles
@@ -112,6 +121,92 @@ class CoachBotApplicationService:
         self._apple_health_enabled = apple_health_enabled
         self._tcx_enabled = tcx_enabled
         self._workout_feedback_enabled = workout_feedback_enabled
+        self._agent_workspace = agent_workspace
+
+    async def handle_agent_input(
+        self,
+        identity: TelegramIdentity,
+        message: HumanMessage,
+    ) -> TelegramResponse:
+        """Route one opaque Telegram event through the global agent workspace."""
+
+        raw_event_type = message.additional_kwargs.get("telegram_event_type", "text")
+        event_type: TelegramEventType = (
+            "callback" if raw_event_type == "callback" else "text"
+        )
+        if not isinstance(message.content, str) or not message.content.strip():
+            return TelegramResponse(messages.GENERIC_ERROR)
+        workspace = self._agent_workspace
+        if workspace is None:
+            return await self._dispatch_agent_event(
+                identity,
+                event_type,
+                message.content,
+            )
+        user_id = await self._account_queries.resolve_user_id(identity)
+
+        async def dispatch(
+            supplied_event_type: TelegramEventType,
+            content: str,
+        ) -> TelegramResponse:
+            return await self._dispatch_agent_event(
+                identity,
+                supplied_event_type,
+                content,
+            )
+
+        async def load_presentation() -> TelegramResponse:
+            snapshot = await self._onboarding.snapshot(identity)
+            return await self._render_onboarding(identity, snapshot)
+
+        return await workspace.invoke(
+            thread_id=f"telegram:{identity.telegram_user_id}",
+            message=message,
+            context=TelegramAgentContext(
+                user_id=user_id,
+                dispatcher=dispatch,
+                onboarding_updater=(
+                    self._onboarding.update_onboarding_data
+                    if user_id is not None
+                    else None
+                ),
+                presentation_loader=(
+                    load_presentation if user_id is not None else None
+                ),
+            ),
+        )
+
+    async def _dispatch_agent_event(
+        self,
+        identity: TelegramIdentity,
+        event_type: TelegramEventType,
+        content: str,
+    ) -> TelegramResponse:
+        """Application tool target; Telegram handlers never interpret the event."""
+
+        if event_type == "callback":
+            return await self.handle_callback(identity, content)
+        command_routes: dict[
+            str,
+            Callable[[TelegramIdentity], Awaitable[TelegramResponse]],
+        ] = {
+            "/start": self.start,
+            "/help": self._help,
+            "/profile": self.profile,
+            "/baseline": self.baseline,
+            "/add_workout": self.add_workout,
+            "/strava": self.strava,
+            "/cancel": self.cancel,
+            "/delete_me": self.delete_me,
+        }
+        command = command_routes.get(content.casefold())
+        if command is not None:
+            return await command(identity)
+        return await self.handle_text(identity, content)
+
+    async def _help(self, identity: TelegramIdentity) -> TelegramResponse:
+        del identity
+        return TelegramResponse(messages.HELP)
 
     async def start(self, identity: TelegramIdentity) -> TelegramResponse:
         result = await self._onboarding.start(identity)
@@ -212,7 +307,21 @@ class CoachBotApplicationService:
         try:
             response = await self._route_callback(identity, callback_data)
         except OnboardingApplicationError as exc:
-            response = TelegramResponse(messages.validation_error(exc.code))
+            if exc.code in {
+                "invalid_action",
+                "stale_action",
+                "onboarding_not_active",
+                "restart_not_allowed",
+            }:
+                try:
+                    response = await self._render_onboarding(
+                        identity,
+                        await self._onboarding.snapshot(identity),
+                    )
+                except OnboardingApplicationError:
+                    response = TelegramResponse(messages.NOT_FOUND)
+            else:
+                response = TelegramResponse(messages.validation_error(exc.code))
         except WorkoutFeedbackError as exc:
             response = TelegramResponse(messages.validation_error(exc.code))
         except IncompleteProfileError:
@@ -460,14 +569,6 @@ class CoachBotApplicationService:
                 keyboards.information_keyboard(),
             )
         if screen == "consent":
-            if (
-                snapshot.kind == "step"
-                and snapshot.current_step is OnboardingStep.CONSENT
-            ):
-                return TelegramResponse(
-                    messages.CONSENT,
-                    keyboards.consent_keyboard(),
-                )
             return await self._render_onboarding(identity, snapshot)
         raise OnboardingApplicationError("invalid_action")
 
@@ -486,7 +587,10 @@ class CoachBotApplicationService:
                 user_id,
             )
         deleted = await self._accounts.delete(user_id=user_id)
-        return TelegramResponse(messages.DELETED if deleted else messages.DELETE_FAILED)
+        return TelegramResponse(
+            messages.DELETED if deleted else messages.DELETE_FAILED,
+            clear_agent_thread=deleted,
+        )
 
     async def _confirmed_disconnect(
         self,
@@ -870,6 +974,10 @@ class CoachBotApplicationService:
             )
         if result.kind == "onboarding_completed":
             return TelegramResponse(messages.ONBOARDING_COMPLETED)
+        if result.kind == "onboarding_modification":
+            return TelegramResponse(
+                messages.onboarding_modification_response(result.confirmation)
+            )
         if result.kind == "fallback":
             return TelegramResponse(
                 messages.PARSE_FALLBACK,
@@ -878,12 +986,20 @@ class CoachBotApplicationService:
         if result.kind == "provider_error":
             return TelegramResponse(
                 messages.PARSE_PROVIDER_ERROR,
-                keyboards.goal_input_keyboard(),
+                (
+                    None
+                    if result.onboarding_status is OnboardingStatus.COMPLETED
+                    else keyboards.goal_input_keyboard()
+                ),
             )
         if result.kind == "rate_limited":
             return TelegramResponse(
                 messages.PARSE_RATE_LIMITED,
-                keyboards.goal_input_keyboard(),
+                (
+                    None
+                    if result.onboarding_status is OnboardingStatus.COMPLETED
+                    else keyboards.goal_input_keyboard()
+                ),
             )
         if result.kind == "cancelled":
             return TelegramResponse(

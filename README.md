@@ -42,6 +42,14 @@ What year were you born? Send the four-digit year (1940 to 2008).
 Profile completion does not start an import, select a baseline, calculate
 feasibility, or generate a plan.
 
+Every Telegram command, text message, and callback enters one global
+tool-calling LangGraph workspace. The handler creates a `HumanMessage` and does
+not inspect callback namespaces, onboarding steps, or numeric formats. The
+agent can dispatch the opaque event to application services or call
+`update_onboarding_data` for an explicit correction. The sparse update tool
+supports `main_goal`, `target_outcome`, `event_date`, `age`, `birth_year`,
+`gender`, `weight_kg`, and `height_cm` while preserving omitted values.
+
 The durable onboarding states are:
 
 - `CONSENT`
@@ -58,8 +66,8 @@ that user's session to consent.
 
 ## Goal extraction and persistence
 
-Deterministic callbacks do not invoke a model. Free-text goal messages use one
-compiled, stateless goal-extraction graph with this structured contract:
+Callbacks and free text first pass through the global agent. Goal extraction
+uses a focused nested graph with this structured contract:
 
 ```json
 {
@@ -86,8 +94,8 @@ state: consent, the first raw goal message, goal messages from this step, the
 structured draft, phase, and optional clarification metadata. An off-topic
 answer is removed from the retained goal messages and cannot alter the draft.
 
-The graph cannot write canonical data. Only explicit confirmation calls the
-single canonical writer in `ProfileRepository`, which upserts one
+The extraction path cannot write canonical data. Only explicit confirmation
+calls the canonical writer in `ProfileRepository`, which upserts one
 `training_goals` row containing:
 
 - `main_goal`
@@ -99,10 +107,17 @@ single canonical writer in `ProfileRepository`, which upserts one
 
 After confirmation, temporary draft and clarification state are removed. The
 original goal text and the relevant goal-message audit trail remain in the
-onboarding session. The four mandatory profile answers are validated without a
-model. On final height submission,
+onboarding session. The global agent interprets the four mandatory profile
+answers; application services deterministically revalidate every value. On
+final height submission,
 `ProfileRepository.upsert_mandatory_athlete_profile` writes `birth_year`,
 `gender`, `weight_kg`, and `height_cm` for the owning `user_id`.
+For a completed athlete, `update_onboarding_data` delegates through
+`OnboardingService`, which validates the sparse payload and routes profile
+fields to `athlete_profiles` and goal fields to `training_goals`. Each
+repository update is constrained by `user_id` and dynamically includes only
+the allowlisted supplied columns, preserving every omitted value and advancing
+`updated_at` only on the affected table.
 
 ## Architecture
 
@@ -113,16 +128,17 @@ The project is a modular monolith with two processes:
 2. `python-telegram-bot` runs Telegram long polling.
 
 Both use the same application-service and repository boundaries. PostgreSQL is
-the source of truth; LangGraph has no database checkpointing.
+the source of truth. The global Telegram graph uses native
+`AsyncPostgresSaver` checkpoints keyed by a stable Telegram thread ID; service
+callables remain invocation context and are never serialized. Account deletion
+also removes the corresponding agent thread.
 
 ```text
-Telegram handlers ---- application services ---- repositories ---- PostgreSQL
-                              |
-                              +-- focused goal LangGraph / LangChain model
-                              +-- Apple Health ZIP and TCX parsers
-                              +-- workout-feedback state service
-                              +-- Strava client and sync orchestration
-                              +-- deterministic baseline engine
+Telegram events ---- persistent global LangGraph ---- application tools
+                              |                         |
+                              |                         +-- services/repositories
+                              |                                     |
+                              +---- PostgreSQL checkpoints           +-- PostgreSQL
 ```
 
 Messages are centralized in `backend/app/bot/messages.py`; keyboard labels and
@@ -289,6 +305,9 @@ Migration `0010_remove_legacy_goal_fields` backfills legacy-only goal rows into
 the canonical representation, removes redundant `goal_type`, `event_name`, and
 `goal_priority` columns, and makes `main_goal`, `target_outcome`, and
 `original_description` required.
+
+Migration `0012_remove_fitness_level` removes the unused transient
+`fitness_level` column introduced by revision `0011`.
 
 The migration supports upgrade, downgrade, and re-upgrade in the portable
 SQLite migration tests and is also validated against Compose PostgreSQL.

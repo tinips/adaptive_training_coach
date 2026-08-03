@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from app.domain.enums import (
     OnboardingStatus,
@@ -24,6 +24,7 @@ OnboardingResultKind = Literal[
     "goal_confirmation",
     "goal_addition",
     "goal_off_topic",
+    "onboarding_modification",
     "goal_confirmed",
     "profile_birth_year_intake",
     "profile_gender_intake",
@@ -47,4 +48,5 @@ class OnboardingServiceResult(BaseModel):
     current_step: OnboardingStep
     answers: dict[str, JsonValue]
     error_code: str | None = None
+    confirmation: str | None = Field(default=None, max_length=1000)
     created: bool = False

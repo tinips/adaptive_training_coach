@@ -50,7 +50,7 @@ def _update(*, callback_data: str | None = None) -> Any:
 @pytest.mark.asyncio
 async def test_start_handler_delegates_identity_to_service() -> None:
     service = SimpleNamespace(
-        start=AsyncMock(
+        handle_agent_input=AsyncMock(
             return_value=TelegramResponse(
                 messages.WELCOME,
                 keyboards.welcome_keyboard(),
@@ -64,13 +64,16 @@ async def test_start_handler_delegates_identity_to_service() -> None:
         cast(ContextTypes.DEFAULT_TYPE, _context(service)),
     )
 
-    identity = service.start.await_args.args[0]
+    identity = service.handle_agent_input.await_args.args[0]
     assert identity == TelegramIdentity(
         telegram_user_id=8172,
         telegram_username="runner",
         first_name="Ada",
         language_code="es",
     )
+    message = service.handle_agent_input.await_args.args[1]
+    assert message.content == "/start"
+    assert message.additional_kwargs["telegram_event_type"] == "text"
     update.effective_message.reply_text.assert_awaited_once_with(
         messages.WELCOME,
         reply_markup=keyboards.welcome_keyboard(),
@@ -80,7 +83,7 @@ async def test_start_handler_delegates_identity_to_service() -> None:
 @pytest.mark.asyncio
 async def test_add_workout_handler_delegates_identity_to_service() -> None:
     service = SimpleNamespace(
-        add_workout=AsyncMock(return_value=TelegramResponse("send a file")),
+        handle_agent_input=AsyncMock(return_value=TelegramResponse("send a file")),
     )
     update = _update()
 
@@ -89,14 +92,14 @@ async def test_add_workout_handler_delegates_identity_to_service() -> None:
         cast(ContextTypes.DEFAULT_TYPE, _context(service)),
     )
 
-    service.add_workout.assert_awaited_once_with(
-        TelegramIdentity(
-            telegram_user_id=8172,
-            telegram_username="runner",
-            first_name="Ada",
-            language_code="es",
-        )
+    identity, message = service.handle_agent_input.await_args.args
+    assert identity == TelegramIdentity(
+        telegram_user_id=8172,
+        telegram_username="runner",
+        first_name="Ada",
+        language_code="es",
     )
+    assert message.content == "/add_workout"
     update.effective_message.reply_text.assert_awaited_once_with(
         "send a file",
         reply_markup=None,
@@ -106,7 +109,7 @@ async def test_add_workout_handler_delegates_identity_to_service() -> None:
 @pytest.mark.asyncio
 async def test_callback_handler_acknowledges_and_delegates_action() -> None:
     service = SimpleNamespace(
-        handle_callback=AsyncMock(
+        handle_agent_input=AsyncMock(
             return_value=TelegramResponse("next", edit_existing=True)
         ),
     )
@@ -118,7 +121,9 @@ async def test_callback_handler_acknowledges_and_delegates_action() -> None:
     )
 
     update.callback_query.answer.assert_awaited_once()
-    assert service.handle_callback.await_args.args[1] == "ob:v1:consent"
+    message = service.handle_agent_input.await_args.args[1]
+    assert message.content == "ob:v1:consent"
+    assert message.additional_kwargs["telegram_event_type"] == "callback"
     update.callback_query.edit_message_text.assert_awaited_once_with(
         "next",
         reply_markup=None,
@@ -128,7 +133,7 @@ async def test_callback_handler_acknowledges_and_delegates_action() -> None:
 @pytest.mark.asyncio
 async def test_callback_replay_does_not_send_duplicate_message() -> None:
     service = SimpleNamespace(
-        handle_callback=AsyncMock(
+        handle_agent_input=AsyncMock(
             return_value=TelegramResponse("same", edit_existing=True)
         ),
     )
@@ -149,7 +154,7 @@ async def test_callback_replay_does_not_send_duplicate_message() -> None:
 @pytest.mark.asyncio
 async def test_callback_edit_failure_falls_back_to_one_new_message() -> None:
     service = SimpleNamespace(
-        handle_callback=AsyncMock(
+        handle_agent_input=AsyncMock(
             return_value=TelegramResponse("replacement", edit_existing=True)
         ),
     )

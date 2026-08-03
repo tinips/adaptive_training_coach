@@ -6,12 +6,13 @@ import asyncio
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from time import monotonic
-from typing import cast
+from typing import Literal, cast
 from uuid import UUID, uuid4
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
+from langgraph.prebuilt import ToolNode, tools_condition
 
 from app.config import Settings
 from app.domain.enums import OnboardingStep
@@ -30,8 +31,17 @@ from app.observability.protocol import (
     AIWorkflowRunMetadata,
     AIWorkflowRunResult,
 )
-from app.schemas.onboarding_goal import GoalExtractionWorkflowResult
-from app.workflows.onboarding_goal.nodes import make_extract_goal_node
+from app.schemas.onboarding_goal import (
+    GoalExtractionWorkflowResult,
+    OnboardingModificationWorkflowResult,
+    OnboardingUpdateHandler,
+)
+from app.workflows.onboarding_goal.nodes import (
+    build_onboarding_modification_messages,
+    make_extract_goal_node,
+    make_onboarding_modification_agent_node,
+    update_onboarding_data,
+)
 from app.workflows.onboarding_goal.state import GoalExtractionGraphState
 
 CompiledGoalExtractionGraph = CompiledStateGraph[
@@ -46,7 +56,7 @@ def build_goal_extraction_graph(
     *,
     model: StructuredOnboardingModel,
 ) -> CompiledGoalExtractionGraph:
-    """Compile one extraction node without a LangGraph checkpointer."""
+    """Compile extraction and confirmed-goal tool paths without checkpoints."""
 
     builder: StateGraph[
         GoalExtractionGraphState,
@@ -55,9 +65,38 @@ def build_goal_extraction_graph(
         GoalExtractionGraphState,
     ] = StateGraph(GoalExtractionGraphState)
     builder.add_node("extract_goal", make_extract_goal_node(model))
-    builder.add_edge(START, "extract_goal")
+    builder.add_node("agent", make_onboarding_modification_agent_node(model))
+    builder.add_node(
+        "tools",
+        ToolNode([update_onboarding_data], handle_tool_errors=False),
+    )
+    builder.add_conditional_edges(
+        START,
+        _initial_route,
+        {
+            "extract_goal": "extract_goal",
+            "agent": "agent",
+        },
+    )
     builder.add_edge("extract_goal", END)
+    builder.add_conditional_edges(
+        "agent",
+        tools_condition,
+        {
+            "tools": "tools",
+            "__end__": END,
+        },
+    )
+    builder.add_edge("tools", "agent")
     return builder.compile(name="onboarding_goal_extraction")
+
+
+def _initial_route(
+    state: GoalExtractionGraphState,
+) -> Literal["extract_goal", "agent"]:
+    if state.get("action") == "MODIFY_ONBOARDING_DATA":
+        return "agent"
+    return "extract_goal"
 
 
 class LangGraphGoalExtractor:
@@ -165,6 +204,92 @@ class LangGraphGoalExtractor:
                     latency_ms=latency_ms,
                     prompt_tokens=result.prompt_tokens,
                     completion_tokens=result.completion_tokens,
+                    error_code=result.error_code,
+                )
+            )
+        return result
+
+    async def modify_onboarding_data(
+        self,
+        *,
+        user_id: UUID,
+        user_text: str,
+        onboarding_updater: OnboardingUpdateHandler,
+    ) -> OnboardingModificationWorkflowResult:
+        """Run one stateless agent/tool loop for completed onboarding data."""
+
+        started_at = datetime.now(UTC)
+        started_clock = monotonic()
+        metadata = AIWorkflowRunMetadata(
+            workflow_name=self._workflow_name,
+            run_id=uuid4(),
+            onboarding_step=OnboardingStep.GOAL_CONFIRMED,
+            provider_mode=self._model.provider_mode,
+            model_name=self._model.model_name,
+            started_at=started_at,
+        )
+        await self._observe_started(metadata)
+        initial_state: GoalExtractionGraphState = {
+            "user_id": user_id,
+            "action": "MODIFY_ONBOARDING_DATA",
+            "user_text": user_text,
+            "messages": build_onboarding_modification_messages(user_text),
+            "onboarding_updater": onboarding_updater,
+            "onboarding_updated": False,
+        }
+        try:
+            raw_state = await asyncio.wait_for(
+                self._graph.ainvoke(
+                    initial_state,
+                    config=build_langchain_run_config(
+                        metadata,
+                        callbacks=self._callbacks,
+                    ),
+                ),
+                timeout=self._timeout_seconds,
+            )
+            state = cast(GoalExtractionGraphState, raw_state)
+            outcome = state.get("outcome", "no_onboarding_update")
+            if outcome not in {
+                "onboarding_modified",
+                "no_onboarding_update",
+                "provider_error",
+            }:
+                outcome = "provider_error"
+            result = OnboardingModificationWorkflowResult(
+                outcome=outcome,
+                confirmation=state.get("confirmation") or None,
+                error_code=state.get("error_code"),
+            )
+        except TimeoutError:
+            result = OnboardingModificationWorkflowResult(
+                outcome="provider_error",
+                error_code="workflow_timeout",
+            )
+        except Exception:
+            result = OnboardingModificationWorkflowResult(
+                outcome="provider_error",
+                error_code="workflow_failure",
+            )
+
+        completed_at = datetime.now(UTC)
+        latency_ms = max(0, round((monotonic() - started_clock) * 1000))
+        if result.outcome == "provider_error":
+            await self._observe_failed(
+                AIWorkflowRunError(
+                    metadata=metadata,
+                    failed_at=completed_at,
+                    latency_ms=latency_ms,
+                    error_code=result.error_code or "provider_failure",
+                )
+            )
+        else:
+            await self._observe_completed(
+                AIWorkflowRunResult(
+                    metadata=metadata,
+                    outcome="confirmation_required",
+                    completed_at=completed_at,
+                    latency_ms=latency_ms,
                     error_code=result.error_code,
                 )
             )

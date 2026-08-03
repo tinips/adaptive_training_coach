@@ -9,6 +9,7 @@ from uuid import UUID
 
 import pytest
 import pytest_asyncio
+from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -27,7 +28,11 @@ from app.integrations.llm.models import (
 from app.repositories.onboarding import OnboardingRepository
 from app.repositories.profiles import ProfileRepository
 from app.schemas.common import TelegramIdentity
-from app.schemas.onboarding_goal import GoalExtractionWorkflowResult
+from app.schemas.onboarding_goal import (
+    GoalExtractionWorkflowResult,
+    OnboardingModificationWorkflowResult,
+    OnboardingUpdateHandler,
+)
 from app.services.onboarding import OnboardingService
 
 
@@ -50,6 +55,8 @@ class QueueGoalExtractor:
         default_factory=list
     )
     current_dates: list[str] = field(default_factory=list)
+    modification_updates: list[dict[str, JsonValue]] = field(default_factory=list)
+    modification_calls: list[tuple[UUID, str]] = field(default_factory=list)
 
     async def extract(
         self,
@@ -64,6 +71,21 @@ class QueueGoalExtractor:
         self.calls.append((action, user_text, existing_draft))
         self.current_dates.append(current_date)
         return self.results.pop(0)
+
+    async def modify_onboarding_data(
+        self,
+        *,
+        user_id: UUID,
+        user_text: str,
+        onboarding_updater: OnboardingUpdateHandler,
+    ) -> OnboardingModificationWorkflowResult:
+        self.modification_calls.append((user_id, user_text))
+        update = self.modification_updates.pop(0)
+        saved = await onboarding_updater(user_id=user_id, payload=update)
+        return OnboardingModificationWorkflowResult(
+            outcome="onboarding_modified",
+            confirmation=f"Updated: {', '.join(saved.updated_fields)}.",
+        )
 
 
 def identity(telegram_id: int = 6201) -> TelegramIdentity:
@@ -483,6 +505,91 @@ async def test_confirmation_persists_goal_and_starts_mandatory_profile(
         assert goal.secondary_priority is None
         assert goal.original_description == raw
         assert goal.status is TrainingGoalStatus.CONFIRMED
+        original_updated_at = goal.updated_at
+
+    updated = await onboarding.update_onboarding_data(
+        user_id=confirmed.user_id,
+        payload={
+            "main_goal": "Finish an Ironman 70.3",
+            "target_outcome": "Finish in a decent time",
+        },
+    )
+
+    assert updated.updated_fields == {
+        "main_goal": "Finish an Ironman 70.3",
+        "target_outcome": "Finish in a decent time",
+    }
+    async with factory() as session:
+        goal = await ProfileRepository(session).get_training_goal(
+            user_id=confirmed.user_id
+        )
+        assert goal is not None
+        assert goal.main_goal == "Finish an Ironman 70.3"
+        assert goal.target_outcome == "Finish in a decent time"
+        assert goal.original_description == raw
+        assert goal.event_date is not None
+        assert goal.event_date.isoformat() == "2026-10-04"
+        assert goal.updated_at > original_updated_at
+
+
+@pytest.mark.asyncio
+async def test_completed_athlete_goal_modification_uses_owned_service_update(
+    goal_database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
+) -> None:
+    _, factory = goal_database
+    extractor = QueueGoalExtractor(
+        [
+            extracted(
+                main_goal="Complete a marathon",
+                target_outcome="Finish safely",
+            )
+        ],
+        modification_updates=[
+            {
+                "main_goal": "Finish an Ironman 70.3",
+                "target_outcome": "Finish in a decent time",
+                "age": 35,
+                "weight_kg": 75.25,
+            }
+        ],
+    )
+    onboarding = service(factory, extractor)
+    athlete = identity(6210)
+    await start_goal(onboarding, athlete)
+    await onboarding.handle_text(
+        athlete,
+        "I want to complete a marathon and finish safely.",
+    )
+    confirmed = await onboarding.confirm_goal(athlete)
+    await onboarding.handle_text(athlete, "1990")
+    await onboarding.choose_gender(athlete, "OTHER_UNSPECIFIED")
+    await onboarding.handle_text(athlete, "72.5")
+    await onboarding.handle_text(athlete, "178")
+
+    request = "change my goal to finish my ironman 70.3 in a decent time"
+    result = await onboarding.handle_text(athlete, request)
+
+    assert result.kind == "onboarding_modification"
+    assert result.confirmation == (
+        "Updated: main_goal, target_outcome, age, weight_kg."
+    )
+    assert extractor.modification_calls == [(confirmed.user_id, request)]
+    async with factory() as session:
+        goal = await ProfileRepository(session).get_training_goal(
+            user_id=confirmed.user_id
+        )
+        assert goal is not None
+        assert goal.main_goal == "Finish an Ironman 70.3"
+        assert goal.target_outcome == "Finish in a decent time"
+        assert goal.original_description == (
+            "I want to complete a marathon and finish safely."
+        )
+        profile = await ProfileRepository(session).get_athlete_profile(
+            user_id=confirmed.user_id
+        )
+        assert profile is not None
+        assert profile.age == 35
+        assert profile.weight_kg == 75.25
 
 
 @pytest.mark.asyncio

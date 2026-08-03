@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import cast
 
+from langchain_core.messages import HumanMessage
 from telegram import Update
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import ContextTypes
@@ -25,57 +25,56 @@ async def start_handler(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    await _delegate(update, context, "start")
+    await _agent_delegate(update, context, "/start")
 
 
 async def help_handler(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    del context
-    await _deliver(update, TelegramResponse(messages.HELP))
+    await _agent_delegate(update, context, "/help")
 
 
 async def profile_handler(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    await _delegate(update, context, "profile")
+    await _agent_delegate(update, context, "/profile")
 
 
 async def baseline_handler(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    await _delegate(update, context, "baseline")
+    await _agent_delegate(update, context, "/baseline")
 
 
 async def add_workout_handler(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    await _delegate(update, context, "add_workout")
+    await _agent_delegate(update, context, "/add_workout")
 
 
 async def strava_handler(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    await _delegate(update, context, "strava")
+    await _agent_delegate(update, context, "/strava")
 
 
 async def cancel_handler(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    await _delegate(update, context, "cancel")
+    await _agent_delegate(update, context, "/cancel")
 
 
 async def delete_handler(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    await _delegate(update, context, "delete_me")
+    await _agent_delegate(update, context, "/delete_me")
 
 
 async def callback_handler(
@@ -89,7 +88,13 @@ async def callback_handler(
     identity = _identity(update)
     if identity is None:
         return
-    response = await _service(context).handle_callback(identity, query.data)
+    response = await _service(context).handle_agent_input(
+        identity,
+        HumanMessage(
+            content=query.data,
+            additional_kwargs={"telegram_event_type": "callback"},
+        ),
+    )
     await _deliver(update, response)
 
 
@@ -101,7 +106,13 @@ async def text_handler(
     identity = _identity(update)
     if message is None or message.text is None or identity is None:
         return
-    response = await _service(context).handle_text(identity, message.text)
+    response = await _service(context).handle_agent_input(
+        identity,
+        HumanMessage(
+            content=message.text,
+            additional_kwargs={"telegram_event_type": "text"},
+        ),
+    )
     await _deliver(update, response)
 
 
@@ -170,20 +181,21 @@ async def global_error_handler(
             logger.warning("Could not deliver neutral Telegram error response")
 
 
-async def _delegate(
+async def _agent_delegate(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
-    operation: str,
+    content: str,
 ) -> None:
     identity = _identity(update)
     if identity is None:
         return
-    service = _service(context)
-    method = cast(
-        Callable[[TelegramIdentity], Awaitable[TelegramResponse]],
-        getattr(service, operation),
+    response = await _service(context).handle_agent_input(
+        identity,
+        HumanMessage(
+            content=content,
+            additional_kwargs={"telegram_event_type": "text"},
+        ),
     )
-    response = await method(identity)
     await _deliver(update, response)
 
 
@@ -212,11 +224,17 @@ async def _deliver(update: Update, response: TelegramResponse) -> None:
     if message is None:
         return
 
+    reply_markup = response.keyboard
+    if reply_markup is None and response.button_rows:
+        from app.bot.keyboards import dynamic_keyboard
+
+        reply_markup = dynamic_keyboard(response.button_rows)
+
     if response.edit_existing and query is not None:
         try:
             await query.edit_message_text(
                 response.text,
-                reply_markup=response.keyboard,
+                reply_markup=reply_markup,
             )
             return
         except BadRequest as exc:
@@ -224,4 +242,4 @@ async def _deliver(update: Update, response: TelegramResponse) -> None:
                 return
             logger.info("Telegram message edit unavailable; sending a new message")
 
-    await message.reply_text(response.text, reply_markup=response.keyboard)
+    await message.reply_text(response.text, reply_markup=reply_markup)

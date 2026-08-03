@@ -6,6 +6,8 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Protocol
 
+from langchain_core.messages import HumanMessage
+
 from app.bot.rendering import TelegramResponse
 from app.schemas.common import TelegramIdentity
 from app.schemas.training_import import TelegramDocumentUpload
@@ -13,6 +15,12 @@ from app.schemas.training_import import TelegramDocumentUpload
 
 class CoachBotService(Protocol):
     """Facade that owns all stateful bot use cases."""
+
+    async def handle_agent_input(
+        self,
+        identity: TelegramIdentity,
+        message: HumanMessage,
+    ) -> TelegramResponse: ...
 
     async def start(self, identity: TelegramIdentity) -> TelegramResponse: ...
 

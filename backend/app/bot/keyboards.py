@@ -6,7 +6,31 @@ from collections.abc import Sequence
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+from app.bot.rendering import TelegramButtonSpec
 from app.domain.enums import WorkoutFlowStep
+
+
+def dynamic_keyboard(
+    rows: Sequence[Sequence[TelegramButtonSpec]],
+) -> InlineKeyboardMarkup | None:
+    """Render graph-provided button metadata without interpreting its meaning."""
+
+    if not rows:
+        return None
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    spec.text,
+                    callback_data=spec.callback_data,
+                    url=spec.url,
+                )
+                for spec in row
+            ]
+            for row in rows
+        ]
+    )
+
 
 LABELS = {
     "lets_go": "Let's go",

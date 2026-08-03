@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage
-from langchain_core.runnables import RunnableConfig
+from langchain_core.runnables import Runnable, RunnableConfig, RunnableLambda
+from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, SecretStr
 
 from app.domain.enums import OnboardingStep
 from app.integrations.llm.models import (
     LLMConfigurationError,
+    LLMProviderError,
     StructuredModelResponse,
     StructuredOutputSchema,
 )
@@ -52,15 +55,25 @@ class OpenAICompatibleOnboardingModel:
             return self._chat_model
         if self._api_key is None or not self._api_key.get_secret_value():
             raise LLMConfigurationError("llm_api_key_missing")
-        self._chat_model = ChatOpenAI(
-            api_key=self._api_key,
-            base_url=self._base_url,
-            model=self._model_name,
-            temperature=0,
-            timeout=self._timeout_seconds,
-            max_retries=1,
-            extra_body={"thinking": {"type": "disabled"}},
-        )
+        if self._base_url and "deepseek.com" in self._base_url.casefold():
+            self._chat_model = ChatOpenAI(
+                api_key=self._api_key,
+                base_url=self._base_url,
+                model=self._model_name,
+                temperature=0,
+                timeout=self._timeout_seconds,
+                max_retries=1,
+                extra_body={"thinking": {"type": "disabled"}},
+            )
+        else:
+            self._chat_model = ChatOpenAI(
+                api_key=self._api_key,
+                base_url=self._base_url,
+                model=self._model_name,
+                temperature=0,
+                timeout=self._timeout_seconds,
+                max_retries=1,
+            )
         return self._chat_model
 
     async def ainvoke_structured(
@@ -94,6 +107,24 @@ class OpenAICompatibleOnboardingModel:
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
         )
+
+    def bind_tools(
+        self,
+        tools: Sequence[BaseTool],
+    ) -> Runnable[Any, AIMessage]:
+        """Bind lazily so missing live credentials never break process startup."""
+
+        async def invoke(
+            messages: list[BaseMessage],
+            config: RunnableConfig,
+        ) -> AIMessage:
+            runnable = self._get_chat_model().bind_tools(tools)
+            response = await runnable.ainvoke(messages, config=config)
+            if not isinstance(response, AIMessage):
+                raise LLMProviderError("llm_invalid_tool_response")
+            return response
+
+        return RunnableLambda(invoke, name="live_onboarding_tool_agent")
 
 
 def _token_usage(raw: object) -> tuple[int | None, int | None]:

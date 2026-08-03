@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
-from langchain_core.messages import BaseMessage
-from langchain_core.runnables import RunnableConfig
+from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.runnables import Runnable, RunnableConfig
+from langchain_core.tools import BaseTool
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.domain.enums import OnboardingStep
@@ -118,3 +120,9 @@ class StructuredOnboardingModel(Protocol):
         config: RunnableConfig,
     ) -> StructuredModelResponse:
         """Invoke a LangChain runnable that returns structured output."""
+
+    def bind_tools(
+        self,
+        tools: Sequence[BaseTool],
+    ) -> Runnable[Any, AIMessage]:
+        """Return a tool-capable chat runnable without invoking the provider."""

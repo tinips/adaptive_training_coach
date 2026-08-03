@@ -13,10 +13,7 @@ GENERIC_ERROR = (
     "Something went wrong. Your saved progress is safe. Please try again in a moment."
 )
 NOT_FOUND = "I could not find that saved item for your account."
-CALLBACK_EXPIRED = (
-    "That button is no longer valid. Use the visible buttons to continue from "
-    "your current screen."
-)
+CALLBACK_EXPIRED = "I refreshed the conversation so you can continue from here."
 WELCOME = (
     "Welcome to Adaptive Endurance Coach 👋\n\n"
     "I\u2019m glad you\u2019re here.\n\n"
@@ -272,6 +269,18 @@ GOAL_SAVED = (
     "This is the first part of your athlete profile. We\u2019ll continue building "
     "the rest of your profile step by step."
 )
+ONBOARDING_MODIFICATION_FALLBACK = (
+    "Tell me which goal, outcome, birth year, category, age, weight, or height "
+    "to change."
+)
+
+
+def onboarding_modification_response(confirmation: str | None) -> str:
+    """Safely render the model's concise post-tool confirmation."""
+
+    return escape(confirmation or ONBOARDING_MODIFICATION_FALLBACK)
+
+
 PROFILE_BIRTH_YEAR_INTAKE = (
     "Your goal has been saved.\n\n"
     "What year were you born? Send the four-digit year (1940 to 2008)."

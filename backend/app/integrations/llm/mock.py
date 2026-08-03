@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import json
+import re
+from collections.abc import Sequence
 from enum import StrEnum
+from typing import Any
 
-from langchain_core.messages import BaseMessage, HumanMessage
-from langchain_core.runnables import RunnableConfig, RunnableLambda
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.runnables import Runnable, RunnableConfig, RunnableLambda
+from langchain_core.tools import BaseTool
 
 from app.domain.enums import OnboardingStep
 from app.integrations.llm.models import (
@@ -91,6 +96,67 @@ class DeterministicFakeOnboardingModel:
             raise LLMProviderError("mock_invalid_internal_response")
         return result
 
+    def bind_tools(
+        self,
+        tools: Sequence[BaseTool],
+    ) -> Runnable[Any, AIMessage]:
+        """Provide deterministic tool calls for local onboarding modifications."""
+
+        tool_names = {item.name for item in tools}
+
+        async def respond(
+            messages: list[BaseMessage],
+            config: RunnableConfig,
+        ) -> AIMessage:
+            del config
+            latest = messages[-1]
+            if isinstance(latest, ToolMessage):
+                if latest.name == "dispatch_telegram_input" and isinstance(
+                    latest.content, str
+                ):
+                    decoded = json.loads(latest.content)
+                    if isinstance(decoded, dict) and isinstance(
+                        decoded.get("response_text"), str
+                    ):
+                        return AIMessage(content=decoded["response_text"])
+                return AIMessage(
+                    content="Your onboarding data has been updated successfully."
+                )
+            text = _last_user_text(messages)
+            payload = _fake_onboarding_update(text)
+            if "update_onboarding_data" in tool_names and payload:
+                return AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "update_onboarding_data",
+                            "args": payload,
+                            "id": "mock-update-onboarding",
+                            "type": "tool_call",
+                        }
+                    ],
+                )
+            if "dispatch_telegram_input" in tool_names:
+                event_type = "text"
+                if isinstance(latest, HumanMessage):
+                    raw_event_type = latest.additional_kwargs.get("telegram_event_type")
+                    if raw_event_type == "callback":
+                        event_type = "callback"
+                return AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "dispatch_telegram_input",
+                            "args": {"event_type": event_type, "content": text},
+                            "id": "mock-dispatch-telegram",
+                            "type": "tool_call",
+                        }
+                    ],
+                )
+            return AIMessage(content="Tell me what onboarding data to change.")
+
+        return RunnableLambda(respond, name="deterministic_onboarding_tool_agent")
+
     def _resolve_scenario(
         self,
         user_text: str,
@@ -134,3 +200,35 @@ def _fake_goal_output(
             "NEEDS_CLARIFICATION" if needs_clarification else "COMPLETE"
         ),
     }
+
+
+def _fake_onboarding_update(user_text: str) -> dict[str, object]:
+    folded = user_text.casefold()
+    if "ironman 70.3" in folded and "decent time" in folded:
+        return {
+            "main_goal": "Finish an Ironman 70.3",
+            "target_outcome": "Finish in a decent time",
+        }
+    payload: dict[str, object] = {}
+    age = re.search(r"\bage(?:\s+(?:to|is))?\s+(\d{2,3})\b", folded)
+    weight = re.search(
+        r"\bweight(?:\s+(?:to|is))?\s+(\d{2,3}(?:\.\d+)?)\s*(?:kg)?\b",
+        folded,
+    )
+    birth_year = re.search(
+        r"\b(?:birth year|born)(?:\s+(?:to|is|in))?\s+((?:19|20)\d{2})\b",
+        folded,
+    )
+    height = re.search(
+        r"\bheight(?:\s+(?:to|is))?\s+(\d{3})\s*(?:cm)?\b",
+        folded,
+    )
+    if age is not None:
+        payload["age"] = int(age.group(1))
+    if weight is not None:
+        payload["weight_kg"] = float(weight.group(1))
+    if birth_year is not None:
+        payload["birth_year"] = int(birth_year.group(1))
+    if height is not None:
+        payload["height_cm"] = int(height.group(1))
+    return payload

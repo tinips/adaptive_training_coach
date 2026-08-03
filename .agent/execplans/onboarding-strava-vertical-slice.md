@@ -1387,3 +1387,221 @@ remain intentional audit/lifecycle fields rather than duplicate semantics.
   `alembic check` reported no new operations. Direct schema inspection showed
   only `user_id`, canonical goal fields, lifecycle/audit fields, and common
   identifiers/timestamps in `training_goals`.
+
+## 2026-08-03 post-onboarding goal modification tool
+
+### Decision and progress
+
+- [x] Add a Pydantic-validated LangChain `update_athlete_goal` tool whose
+  injected runtime delegates persistence to `OnboardingService` for the active
+  `user_id`.
+- [x] Extend the compiled graph with a reusable agent -> native `ToolNode` ->
+  agent loop using `tools_condition`, while binding only the goal update tool.
+- [x] Add an ownership-scoped canonical repository update that preserves
+  `event_date`, `secondary_priority`, and `original_description` and advances
+  `updated_at`.
+- [x] Route completed-athlete chat through the tool-capable workflow and render
+  the escaped natural confirmation through centralized Telegram messages.
+- [x] Retain safe per-user LLM usage reservations/rate limiting without storing
+  the raw request or updated goal data.
+- [x] Add graph regression and service persistence coverage for the Ironman
+  70.3 goal-change request.
+
+### Validation evidence
+
+- Focused graph and service suites: `17 passed`.
+- Final full host suite: `263 passed in 95.58s`.
+- `ruff check .`, `ruff format --check .`, `mypy app`, and `git diff --check`
+  passed; Ruff confirmed 136 formatted files and mypy checked 105 source files.
+- The graph/tool regression used a mocked service updater; the service use-case
+  suite additionally verified the owned database update and field preservation.
+- Live Telegram and live-provider LLM behavior were not exercised and are not
+  claimed.
+
+## 2026-08-03 generic onboarding-data modification refactor
+
+### Decision and progress
+
+- [x] Replace the goal-only tool schema with sparse `UpdateOnboardingSchema`
+  fields for goal, age, weight, and fitness-level changes, each with explicit
+  model-facing descriptions and room for future athlete data.
+- [x] Rename the bound tool to `update_onboarding_data`, accept dynamic keyword
+  arguments, and remove null values before crossing the service boundary.
+- [x] Route allowlisted fields in `OnboardingService` to independent athlete
+  profile and training goal sub-payloads, invoking only affected repositories.
+- [x] Replace fixed assignments with ownership-filtered dynamic SQLAlchemy
+  updates that preserve every omitted column.
+- [x] Add nullable `athlete_profiles.fitness_level` through reversible migration
+  `0011_add_athlete_fitness_level` and expose it in persisted profile output.
+- [x] Expand regression coverage for schema metadata, null filtering, mixed
+  multi-table persistence, field preservation, and migration head state.
+
+### Validation evidence
+
+- Focused graph, service, and migration suites: `22 passed`.
+- Final full host suite: `264 passed in 72.48s`.
+- `ruff check .`, `ruff format --check .`, `mypy app`, and `git diff --check`
+  passed; Ruff confirmed 136 formatted files and mypy checked 105 source files.
+- Live PostgreSQL upgraded from `0010_remove_legacy_goal_fields` to
+  `0011_add_athlete_fitness_level`; `alembic check` reported no new upgrade
+  operations.
+- Live Telegram and live-provider LLM behavior were not exercised and are not
+  claimed.
+
+## 2026-08-03 live multi-turn modification orchestrator evaluation
+
+### Decision and progress
+
+- [x] Remove the mocked `test_dynamic_orchestrator_incomplete_goal_flow` unit
+  regression and its message-capture scaffolding.
+- [x] Add an opt-in `live` pytest suite that requires a real OpenAI-compatible
+  provider credential and refuses any PostgreSQL database whose name does not
+  contain `test`; it never falls back to the deterministic model or SQLite.
+- [x] Exercise the compiled graph across retained multi-turn history for a
+  cancelled goal request followed by a weight update and a later Ironman goal.
+- [x] Require vague goals such as “something fast” to clarify without a tool
+  call, then accept the concrete follow-up “a 5k race”.
+- [x] Support sparse `event_date` modifications and verify one tool call can
+  atomically route age and weight to `athlete_profiles` plus goal and future
+  event date to `training_goals` while preserving omitted fields.
+- [x] Strengthen the live system prompt with concrete-goal validity, newest-turn
+  authority, abandoned-intent handling, one-call multi-field behavior, and
+  strictly future yearless-date rules.
+- [x] Limit the DeepSeek-specific `thinking` request extension to DeepSeek URLs
+  so the same live adapter remains valid with the OpenAI API.
+
+### Validation evidence
+
+- A freshly migrated disposable PostgreSQL database named
+  `adaptive_coach_live_test` reached revision `0011_add_athlete_fitness_level`.
+- The actual configured live provider passed all three orchestrator cases:
+  `3 passed in 19.59s`. No mock model or mock repository was used.
+- Default full suite: `264 passed, 3 live tests skipped in 103.00s`; the skips
+  are intentional unless `RUN_LIVE_AGENT_TESTS=1` is supplied.
+- `ruff check .` and `ruff format --check .` passed with 137 formatted files;
+  `mypy app` reported no issues in 105 source files.
+
+## 2026-08-03 unused fitness-level removal
+
+### Decision and progress
+
+`fitness_level` is not part of the current product and must not appear in the
+tool schema, service allowlist, normalized profile contract, Telegram output,
+or final PostgreSQL schema. Revision `0011` remains in migration history for
+databases that already applied it; new revision `0012_remove_fitness_level`
+drops the transient column and restores it only during downgrade.
+
+- [x] Remove `fitness_level` from the SQLAlchemy model, persisted profile
+  schema/service, Telegram rendering, live tool schema/prompt, deterministic
+  model, onboarding service routing, and repository allowlist.
+- [x] Remove fitness-level expectations from unit and use-case tests while
+  retaining mixed athlete-profile and training-goal update coverage.
+- [x] Add the reversible `0012_remove_fitness_level` migration and assert the
+  column is absent at migration head.
+- [x] Inspect both local PostgreSQL databases before migration and confirm zero
+  non-null fitness-level values.
+- [x] Upgrade the Adminer-visible development database and isolated live-test
+  database to `0012_remove_fitness_level`; direct schema inspection reports
+  zero matching columns in both.
+
+### Surprise
+
+The first draft revision identifier exceeded PostgreSQL's 32-character
+`alembic_version.version_num` limit. PostgreSQL rolled back the transactional
+DDL and version update together. The final identifier was shortened to
+`0012_remove_fitness_level`, after which both upgrades completed cleanly.
+
+### Validation evidence
+
+- Focused graph, onboarding, and portable migration suites: `22 passed`.
+- Final full suite: `264 passed, 3 opt-in live tests skipped in 97.37s`.
+- `ruff check .`, `ruff format --check .`, `mypy app`, and `git diff --check`
+  passed; Ruff confirmed 137 formatted files and mypy checked 105 source files.
+- PostgreSQL `alembic check` reported no new upgrade operations after the live
+  development upgrade to `0012_remove_fitness_level`.
+
+## 2026-08-03 global Telegram agent workspace
+
+### Decision
+
+The earlier “deterministic callbacks do not invoke an LLM” and “LangGraph has
+no checkpointer” boundaries are superseded for the Telegram conversation
+surface. Commands, text, and callback payloads now enter one persistent global
+LangGraph workspace as `HumanMessage` values. Telegram handlers do not inspect
+onboarding steps, callback namespaces, or numeric formats.
+
+The global graph uses native `AsyncPostgresSaver` persistence with a stable
+`telegram:<telegram_user_id>` thread ID. Application callables and authenticated
+user context are supplied through `ToolRuntime.context`, so they are not
+serialized. The existing focused goal graph remains a nested stateless workflow
+for its narrow structured-extraction job.
+
+### Progress
+
+- [x] Add a universal `handle_agent_input` boundary and route every Telegram
+  command, text message, and callback through it as a `HumanMessage`.
+- [x] Add a reusable agent -> `ToolNode` -> agent graph with
+  `dispatch_telegram_input` and `update_onboarding_data` tools.
+- [x] Persist global message history with `AsyncPostgresSaver`; use an in-memory
+  saver only for explicitly non-PostgreSQL test runtimes.
+- [x] Keep injected dispatch/update callables outside checkpoint state and keep
+  all personal-data writes ownership-scoped by the resolved internal user ID.
+- [x] Return checkpoint-safe button metadata from tools and render it generically
+  at the Telegram delivery boundary.
+- [x] Extend sparse corrections to birth year, category, weight, and height;
+  corrections made before profile materialization update owned onboarding
+  staging without forcing a local Telegram transition.
+- [x] Replace stale/invalid callback delivery with the athlete's current durable
+  presentation instead of the former “button is no longer valid” response.
+- [x] Delete the persistent graph thread after successful account deletion.
+- [x] Add the official PostgreSQL checkpoint and psycopg binary/pool dependencies
+  and make the test-image dependency mode explicit.
+
+### Validation evidence
+
+- Focused handler, runtime, workspace, graph, onboarding, and journey suites:
+  `32 passed`; focused correction/workspace/handler suite: `11 passed`.
+- `mypy app` reported no issues in 107 source files.
+- A real PostgreSQL smoke test created the native checkpoint tables, resumed the
+  same thread after closing and recreating the workspace, processed a callback,
+  deleted the thread, and verified zero remaining checkpoints for that thread.
+- The composed bot runtime started and closed successfully against the migrated
+  isolated PostgreSQL test database with the persistent workspace enabled.
+- Final repository validation: `266 passed, 3 opt-in live tests skipped in
+  90.60s`; `ruff check .`, `ruff format --check .`, `mypy app`, and
+  `git diff --check` passed. Ruff confirmed 140 formatted files and mypy
+  checked 107 source files.
+
+### Runtime correction after deployment
+
+The first Telegram verification still returned the former expired-button text
+because the running bot container was built from the pre-workspace image. After
+rebuilding, a live-provider replay exposed a second issue: DeepSeek requested
+both `update_onboarding_data` and `dispatch_telegram_input` for the same explicit
+birth-year correction. Parallel tool commands attempted to write the same
+single-value presentation channels and LangGraph raised
+`InvalidConcurrentGraphUpdate`.
+
+- [x] Require exactly one tool call in the global system prompt.
+- [x] Normalize provider output before `ToolNode`: an explicit onboarding
+  update is authoritative over generic dispatch, and only one call executes.
+- [x] Add regression coverage reproducing the provider's parallel correction
+  and dispatch calls.
+- [x] Rebuild and recreate the production bot container without changing the
+  database or API containers.
+- [x] Replay `sorr my year birth is 2003` against the configured live provider;
+  only the update tool executed with `birth_year=2003`, followed by a natural
+  confirmation and the current gender prompt.
+- [x] Final validation after the runtime fix: `267 passed, 3 opt-in live tests
+  skipped in 99.58s`; Ruff lint/format and `mypy app` passed.
+
+The first completed-onboarding goal edit revealed a separate contextual routing
+failure. With the athlete's full durable history, the global model sent
+`change my goal to a marathon` to generic dispatch instead of the sparse update
+tool. The nested modification workflow then returned a transient provider error,
+which surfaced as the legacy parse-failure message. The global tool prompt now
+makes the latest turn authoritative, excludes explicit field modifications from
+generic dispatch, and includes concrete goal and weight routing examples. A
+read-only replay against the affected persistent history selected only
+`update_onboarding_data(main_goal="marathon")`. Focused graph tests (`11 passed`),
+Ruff, and mypy passed before the bot image was rebuilt and restarted.

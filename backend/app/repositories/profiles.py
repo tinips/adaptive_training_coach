@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.base import utc_now
@@ -142,6 +143,70 @@ class ProfileRepository:
         goal.secondary_priority = secondary_priority
         goal.original_description = original_description
         goal.status = TrainingGoalStatus.CONFIRMED
+        await self._session.flush()
+        return goal
+
+    async def update_athlete_profile_fields(
+        self,
+        *,
+        user_id: uuid.UUID,
+        payload: Mapping[str, object],
+    ) -> AthleteProfile:
+        """Dynamically update allowed fields on the owning athlete profile."""
+
+        allowed_fields = {
+            "age",
+            "birth_year",
+            "gender",
+            "weight_kg",
+            "height_cm",
+        }
+        values: dict[str, object] = {}
+        for key, value in payload.items():
+            if key not in allowed_fields:
+                raise ValueError("unsupported athlete profile update field")
+            values[key] = value
+        if not values:
+            raise ValueError("athlete profile update payload is empty")
+        values["updated_at"] = utc_now()
+
+        profile = await self._session.scalar(
+            update(AthleteProfile)
+            .where(AthleteProfile.user_id == user_id)
+            .values(**values)
+            .returning(AthleteProfile)
+        )
+        if profile is None:
+            raise OwnedRecordNotFoundError("athlete profile not found")
+        await self._session.flush()
+        return profile
+
+    async def update_training_goal_fields(
+        self,
+        *,
+        user_id: uuid.UUID,
+        payload: Mapping[str, object],
+    ) -> TrainingGoal:
+        """Dynamically update allowed fields on the owning training goal."""
+
+        allowed_fields = {"main_goal", "target_outcome", "event_date"}
+        values: dict[str, object] = {}
+        for key, value in payload.items():
+            if key not in allowed_fields:
+                raise ValueError("unsupported training goal update field")
+            values[key] = value
+        if not values:
+            raise ValueError("training goal update payload is empty")
+        values["updated_at"] = utc_now()
+
+        goal = await self._session.scalar(
+            update(TrainingGoal)
+            .where(TrainingGoal.user_id == user_id)
+            .values(**values)
+            .returning(TrainingGoal)
+        )
+        if goal is None:
+            raise OwnedRecordNotFoundError("training goal not found")
         await self._session.flush()
         return goal
 

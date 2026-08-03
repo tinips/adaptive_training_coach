@@ -92,6 +92,11 @@ async def test_profile_inputs_validate_deterministically_and_complete_atomically
 
     gender = await service.handle_text(identity, "1990")
     assert gender.current_step is OnboardingStep.PROFILE_GENDER_INTAKE
+    corrected = await service.update_onboarding_data(
+        user_id=user_id,
+        payload={"birth_year": 2004},
+    )
+    assert corrected.updated_fields == {"birth_year": 2004}
     with pytest.raises(OnboardingApplicationError, match="invalid_action"):
         await service.choose_gender(identity, "NOT_A_CATEGORY")
 
@@ -122,7 +127,7 @@ async def test_profile_inputs_validate_deterministically_and_complete_atomically
             user_id=user_id
         )
         assert profile is not None
-        assert profile.birth_year == 1990
+        assert profile.birth_year == 2004
         assert profile.gender is AthleteGender.OTHER_UNSPECIFIED
         assert profile.weight_kg == 72.5
         assert profile.height_cm == 178.0
