@@ -272,6 +272,23 @@ GOAL_SAVED = (
     "This is the first part of your athlete profile. We\u2019ll continue building "
     "the rest of your profile step by step."
 )
+PROFILE_BIRTH_YEAR_INTAKE = (
+    "Your goal has been saved.\n\n"
+    "What year were you born? Send the four-digit year (1940 to 2008)."
+)
+PROFILE_GENDER_INTAKE = (
+    "Which competitive category / biological sex should I use for your athlete profile?"
+)
+PROFILE_WEIGHT_INTAKE = (
+    "What is your current weight in kilograms? Send a number from 40.0 to 200.0."
+)
+PROFILE_HEIGHT_INTAKE = (
+    "What is your height in centimeters? Send a whole number from 120 to 230."
+)
+ONBOARDING_COMPLETED = (
+    "Your athlete profile is complete. Your birth year, category, weight, and "
+    "height have been saved."
+)
 GOAL_OFF_TOPIC = (
     "We can come back to equipment later. Right now, I\u2019m building your athlete "
     "profile.\n\n"
@@ -344,6 +361,13 @@ VALIDATION_ERRORS: dict[str, str] = {
     "incomplete_profile": (
         "Some required answers are missing. Your progress is safe; resume onboarding "
         "to complete them."
+    ),
+    "invalid_birth_year": ("Enter a four-digit birth year from 1940 to 2008."),
+    "invalid_weight_kg": (
+        "Enter your weight in kilograms as a number from 40.0 to 200.0."
+    ),
+    "invalid_height_cm": (
+        "Enter your height in centimeters as a whole number from 120 to 230."
     ),
     "apple_health_import_disabled": ("Apple Health import is currently unavailable."),
     "import_already_active": ("An Apple Health import is already in progress."),
@@ -527,14 +551,26 @@ def validation_error(code: str) -> str:
 def persisted_profile(profile: Mapping[str, Any]) -> str:
     """Render normalized persisted profile data."""
 
+    if "birth_year" in profile and "gender" in profile:
+        return "\n".join(
+            [
+                "Your saved athlete profile:",
+                "",
+                f"Birth year: {_display(profile.get('birth_year'))}",
+                f"Category: {_display(profile.get('gender'))}",
+                f"Weight: {_optional_metric(profile.get('weight_kg'), 'kg')}",
+                f"Height: {_optional_metric(profile.get('height_cm'), 'cm')}",
+            ]
+        )
+
     lines = [
         "Your saved athlete profile:",
         "",
         f"Sport: {_answer_display(profile, 'primary_sport')}",
-        f"Goal: {_answer_display(profile, 'goal_type')}",
-        f"Event: {_display_free_text(profile.get('event_name'))}",
+        f"Goal: {_display_free_text(profile.get('main_goal'))}",
         f"Event date: {_display(profile.get('event_date'))}",
-        f"Goal priority: {_answer_display(profile, 'goal_priority')}",
+        f"Target outcome: {_display_free_text(profile.get('target_outcome'))}",
+        f"Secondary priority: {_display_free_text(profile.get('secondary_priority'))}",
         f"Age: {_display(profile.get('age'))}",
         f"Height: {_optional_metric(profile.get('height_cm'), 'cm')}",
         f"Weight: {_optional_metric(profile.get('weight_kg'), 'kg')}",

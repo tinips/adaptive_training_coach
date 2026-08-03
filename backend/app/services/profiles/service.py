@@ -19,6 +19,7 @@ from app.repositories.profiles import ProfileBundle, ProfileRepository
 from app.schemas.profile import (
     PersistedEquipmentAccessData,
     PersistedHealthConstraintData,
+    PersistedMandatoryProfileData,
     PersistedProfileData,
 )
 
@@ -44,13 +45,30 @@ class ProfileService:
     ) -> None:
         self._session_factory = session_factory
 
-    async def get(self, *, user_id: uuid.UUID) -> PersistedProfileData | None:
+    async def get(
+        self,
+        *,
+        user_id: uuid.UUID,
+    ) -> PersistedProfileData | PersistedMandatoryProfileData | None:
         """Read a normalized profile only through its owning user."""
 
         async with self._session_factory() as session:
             bundle = await ProfileRepository(session).get_bundle(user_id=user_id)
             if bundle.athlete_profile is None:
                 return None
+            athlete = bundle.athlete_profile
+            if (
+                athlete.birth_year is not None
+                and athlete.gender is not None
+                and athlete.weight_kg is not None
+                and athlete.height_cm is not None
+            ):
+                return PersistedMandatoryProfileData(
+                    birth_year=athlete.birth_year,
+                    gender=athlete.gender,
+                    weight_kg=athlete.weight_kg,
+                    height_cm=athlete.height_cm,
+                )
             onboarding = await OnboardingRepository(session).get_for_user(
                 user_id=user_id,
             )
@@ -66,7 +84,7 @@ class ProfileService:
         *,
         user_id: uuid.UUID,
         source: BaselineSource,
-    ) -> PersistedProfileData:
+    ) -> PersistedProfileData | PersistedMandatoryProfileData:
         """Retain baseline selection for users with an existing complete profile."""
 
         if source not in {BaselineSource.MANUAL, BaselineSource.CALIBRATION}:
@@ -78,6 +96,7 @@ class ProfileService:
             if profile is None:
                 raise IncompleteProfileError
             if user.status not in {
+                UserStatus.ONBOARDING_COMPLETED,
                 UserStatus.PROFILE_COMPLETED,
                 UserStatus.BASELINE_PENDING,
                 UserStatus.BASELINE_FAILED,
@@ -91,6 +110,20 @@ class ProfileService:
             user.status = UserStatus.BASELINE_PENDING
             await session.flush()
             bundle = await repository.get_bundle(user_id=user_id)
+            athlete = bundle.athlete_profile
+            if (
+                athlete is not None
+                and athlete.birth_year is not None
+                and athlete.gender is not None
+                and athlete.weight_kg is not None
+                and athlete.height_cm is not None
+            ):
+                return PersistedMandatoryProfileData(
+                    birth_year=athlete.birth_year,
+                    gender=athlete.gender,
+                    weight_kg=athlete.weight_kg,
+                    height_cm=athlete.height_cm,
+                )
             onboarding = await OnboardingRepository(session).get_for_user(
                 user_id=user_id,
             )
@@ -112,14 +145,7 @@ class ProfileService:
         goal = bundle.training_goal
         coach = bundle.coach_preference
         baseline = bundle.baseline_preference
-        if (
-            profile is None
-            or goal is None
-            or goal.goal_type is None
-            or goal.goal_priority is None
-            or coach is None
-            or baseline is None
-        ):
+        if profile is None or goal is None or coach is None or baseline is None:
             raise IncompleteProfileError
 
         descriptions = [
@@ -157,10 +183,10 @@ class ProfileService:
         ]
         return PersistedProfileData(
             primary_sport=profile.primary_sport,
-            goal_type=goal.goal_type,
-            event_name=goal.event_name,
+            main_goal=goal.main_goal,
             event_date=goal.event_date,
-            goal_priority=goal.goal_priority,
+            target_outcome=goal.target_outcome,
+            secondary_priority=goal.secondary_priority,
             age=profile.age,
             height_cm=profile.height_cm,
             weight_kg=profile.weight_kg,

@@ -15,7 +15,7 @@ from app.bot.rendering import TelegramResponse
 from app.bot.service import CoachBotApplicationService
 from app.config import Settings
 from app.db.base import Base
-from app.domain.enums import OnboardingStep, UserStatus
+from app.domain.enums import AthleteGender, OnboardingStatus, OnboardingStep, UserStatus
 from app.integrations.llm.models import (
     GoalExtractionAction,
     GoalExtractionOutput,
@@ -42,8 +42,9 @@ class QueueGoalExtractor:
         action: GoalExtractionAction,
         user_text: str,
         existing_draft: GoalExtractionOutput | None,
+        current_date: str,
     ) -> GoalExtractionWorkflowResult:
-        del user_id, action, user_text, existing_draft
+        del user_id, action, user_text, existing_draft, current_date
         return self.results.pop(0)
 
 
@@ -140,7 +141,7 @@ def _buttons(response: TelegramResponse) -> list[tuple[str, str]]:
 
 
 @pytest.mark.asyncio
-async def test_retained_journey_stops_after_explicit_goal_confirmation(
+async def test_journey_collects_mandatory_profile_after_goal_confirmation(
     journey: tuple[CoachBotApplicationService, async_sessionmaker[AsyncSession]],
 ) -> None:
     bot, factory = journey
@@ -157,6 +158,14 @@ async def test_retained_journey_stops_after_explicit_goal_confirmation(
     addition = await bot.handle_callback(athlete, "ob:v1:goal:add")
     updated = await bot.handle_text(athlete, "I also want to maintain strength.")
     saved = await bot.handle_callback(athlete, "ob:v1:goal:confirm")
+    gender = await bot.handle_text(athlete, "1990")
+    weight = await bot.handle_callback(
+        athlete,
+        "ob:v1:profile:gender:FEMALE",
+    )
+    height = await bot.handle_text(athlete, "62.5")
+    completed = await bot.handle_text(athlete, "168")
+    displayed_profile = await bot.profile(athlete)
 
     assert welcome.text == messages.WELCOME
     assert consent.text == messages.CONSENT
@@ -166,26 +175,35 @@ async def test_retained_journey_stops_after_explicit_goal_confirmation(
     assert confirmation.text.startswith("Here\u2019s what I understood:")
     assert addition.text == messages.GOAL_ADDITION
     assert "Maintain strength" in updated.text
-    assert saved.text == (
-        "Your goal has been saved.\n\n"
-        "This is the first part of your athlete profile. We\u2019ll continue building "
-        "the rest of your profile step by step."
-    )
-    assert _buttons(saved) == [("Back to welcome", "nav:v1:welcome")]
+    assert saved.text == messages.PROFILE_BIRTH_YEAR_INTAKE
+    assert gender.text == messages.PROFILE_GENDER_INTAKE
+    assert ("Female", "ob:v1:profile:gender:FEMALE") in _buttons(gender)
+    assert weight.text == messages.PROFILE_WEIGHT_INTAKE
+    assert height.text == messages.PROFILE_HEIGHT_INTAKE
+    assert completed.text == messages.ONBOARDING_COMPLETED
+    assert "Birth year: 1990" in displayed_profile.text
+    assert "Category: Female" in displayed_profile.text
 
     async with factory() as session:
         user = await UserRepository(session).get_by_telegram_id(
             athlete.telegram_user_id
         )
         assert user is not None
-        assert user.status is UserStatus.ONBOARDING_IN_PROGRESS
+        assert user.status is UserStatus.ONBOARDING_COMPLETED
         state = await OnboardingRepository(session).require_for_user(user_id=user.id)
-        assert state.current_step is OnboardingStep.GOAL_CONFIRMED
+        assert state.status is OnboardingStatus.COMPLETED
+        assert state.current_step is OnboardingStep.PROFILE_HEIGHT_INTAKE
         goal = await ProfileRepository(session).get_training_goal(user_id=user.id)
         assert goal is not None
         assert goal.main_goal == "Complete a marathon"
         assert goal.target_outcome == "Finish safely"
         assert goal.secondary_priority == "Maintain strength"
+        profile = await ProfileRepository(session).get_athlete_profile(user_id=user.id)
+        assert profile is not None
+        assert profile.birth_year == 1990
+        assert profile.gender is AthleteGender.FEMALE
+        assert profile.weight_kg == 62.5
+        assert profile.height_cm == 168.0
 
     back = await bot.handle_callback(athlete, "nav:v1:welcome")
     assert back.text == messages.WELCOME

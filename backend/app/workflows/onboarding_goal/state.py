@@ -20,6 +20,7 @@ class GoalExtractionGraphState(TypedDict, total=False):
     action: GoalExtractionAction
     user_text: str
     existing_draft: GoalExtractionOutput | None
+    current_date: str
     goal_patch: GoalExtractionPatch
     outcome: GoalExtractionOutcome
     error_code: str | None

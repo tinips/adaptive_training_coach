@@ -28,6 +28,7 @@ from app.schemas.common import TelegramIdentity
 from app.schemas.workouts import workout_metrics
 
 _COMPLETED_PROFILE_STATUSES = {
+    UserStatus.ONBOARDING_COMPLETED,
     UserStatus.PROFILE_COMPLETED,
     UserStatus.BASELINE_PENDING,
     UserStatus.BASELINE_IMPORTING,

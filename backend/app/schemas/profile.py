@@ -11,17 +11,25 @@ from app.db.models import (
     BodyArea,
     EquipmentAccessType,
     EquipmentType,
-    GoalType,
     HealthConstraintType,
 )
 from app.domain.enums import (
+    AthleteGender,
     BaselineSource,
     CoachTone,
     DayOfWeek,
     DetailLevel,
-    GoalPriority,
     PrimarySport,
 )
+
+
+class PersistedMandatoryProfileData(BaseModel):
+    """The mandatory profile collected after conversational goal confirmation."""
+
+    birth_year: int
+    gender: AthleteGender
+    weight_kg: float
+    height_cm: float
 
 
 class PersistedEquipmentAccessData(BaseModel):
@@ -45,10 +53,10 @@ class PersistedProfileData(BaseModel):
     """Safe, delivery-neutral representation of a normalized profile."""
 
     primary_sport: PrimarySport
-    goal_type: GoalType
-    event_name: str | None
+    main_goal: str
     event_date: date | None
-    goal_priority: GoalPriority
+    target_outcome: str
+    secondary_priority: str | None
     age: int
     height_cm: float | None
     weight_kg: float | None

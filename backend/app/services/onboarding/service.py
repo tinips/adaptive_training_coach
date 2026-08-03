@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import re
 import uuid
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from typing import cast
 
 from pydantic import JsonValue, ValidationError
@@ -13,6 +15,7 @@ from app.config import Settings
 from app.db.base import utc_now
 from app.db.models import OnboardingSession, User
 from app.domain.enums import (
+    AthleteGender,
     LLMUsageStatus,
     OnboardingStatus,
     OnboardingStep,
@@ -44,6 +47,12 @@ _RAW_GOAL_TEXT_KEY = "raw_goal_text"
 _GOAL_MESSAGES_KEY = "goal_messages"
 _GOAL_CLARIFICATION_FIELD_KEY = "_goal_clarification_field"
 _GOAL_CLARIFICATION_HINT_KEY = "_goal_clarification_hint"
+_BIRTH_YEAR_KEY = "birth_year"
+_GENDER_KEY = "gender"
+_WEIGHT_KG_KEY = "weight_kg"
+_HEIGHT_CM_KEY = "height_cm"
+_INTEGER_PATTERN = re.compile(r"[0-9]+")
+_WEIGHT_PATTERN = re.compile(r"[0-9]+(?:\.[0-9]+)?")
 
 
 class OnboardingApplicationError(RuntimeError):
@@ -216,7 +225,7 @@ class OnboardingService:
         self,
         identity: TelegramIdentity,
     ) -> OnboardingServiceResult:
-        """Persist the canonical goal and stop at GOAL_CONFIRMED."""
+        """Persist the canonical goal and begin mandatory profile intake."""
 
         async with self._session_factory.begin() as session:
             user, onboarding = await self._locked_state(session, identity)
@@ -255,7 +264,32 @@ class OnboardingService:
                 answers.pop(key, None)
             onboarding = await OnboardingRepository(session).save_progress(
                 user_id=user.id,
-                current_step=OnboardingStep.GOAL_CONFIRMED,
+                current_step=OnboardingStep.PROFILE_BIRTH_YEAR_INTAKE,
+                answers=cast(dict[str, object], answers),
+            )
+            return self._result(user, onboarding)
+
+    async def choose_gender(
+        self,
+        identity: TelegramIdentity,
+        choice: str,
+    ) -> OnboardingServiceResult:
+        """Persist one deterministic competition-category callback selection."""
+
+        try:
+            gender = AthleteGender(choice)
+        except ValueError as exc:
+            raise OnboardingApplicationError("invalid_action") from exc
+        async with self._session_factory.begin() as session:
+            user, onboarding = await self._locked_state(session, identity)
+            self._require_active(onboarding)
+            if onboarding.current_step is not OnboardingStep.PROFILE_GENDER_INTAKE:
+                raise OnboardingApplicationError("stale_action")
+            answers = self._answers(onboarding)
+            answers[_GENDER_KEY] = gender.value
+            onboarding = await OnboardingRepository(session).save_progress(
+                user_id=user.id,
+                current_step=OnboardingStep.PROFILE_WEIGHT_INTAKE,
                 answers=cast(dict[str, object], answers),
             )
             return self._result(user, onboarding)
@@ -350,7 +384,7 @@ class OnboardingService:
         identity: TelegramIdentity,
         text: str,
     ) -> OnboardingServiceResult:
-        """Invoke goal extraction only while the goal-intake checkpoint expects text."""
+        """Route text to deterministic profile validation or focused goal extraction."""
 
         async with self._session_factory() as session:
             user = await self._require_user(session, identity)
@@ -368,7 +402,136 @@ class OnboardingService:
                 user_id=user.id,
                 text=text,
             )
+        if onboarding.status is OnboardingStatus.ACTIVE and onboarding.current_step in {
+            OnboardingStep.PROFILE_BIRTH_YEAR_INTAKE,
+            OnboardingStep.PROFILE_WEIGHT_INTAKE,
+            OnboardingStep.PROFILE_HEIGHT_INTAKE,
+        }:
+            return await self._handle_profile_text(identity, text)
         raise OnboardingApplicationError("invalid_action")
+
+    async def _handle_profile_text(
+        self,
+        identity: TelegramIdentity,
+        text: str,
+    ) -> OnboardingServiceResult:
+        """Validate, stage, and materialize mandatory profile values atomically."""
+
+        async with self._session_factory.begin() as session:
+            user, onboarding = await self._locked_state(session, identity)
+            self._require_active(onboarding)
+            answers = self._answers(onboarding)
+            step = onboarding.current_step
+
+            if step is OnboardingStep.PROFILE_BIRTH_YEAR_INTAKE:
+                birth_year = self._parse_integer(
+                    text,
+                    minimum=1940,
+                    maximum=2008,
+                )
+                if birth_year is None:
+                    return self._result(
+                        user,
+                        onboarding,
+                        kind="profile_validation_error",
+                        error_code="invalid_birth_year",
+                    )
+                answers[_BIRTH_YEAR_KEY] = birth_year
+                onboarding = await OnboardingRepository(session).save_progress(
+                    user_id=user.id,
+                    current_step=OnboardingStep.PROFILE_GENDER_INTAKE,
+                    answers=cast(dict[str, object], answers),
+                )
+                return self._result(user, onboarding)
+
+            if step is OnboardingStep.PROFILE_WEIGHT_INTAKE:
+                weight_kg = self._parse_weight(text)
+                if weight_kg is None:
+                    return self._result(
+                        user,
+                        onboarding,
+                        kind="profile_validation_error",
+                        error_code="invalid_weight_kg",
+                    )
+                answers[_WEIGHT_KG_KEY] = weight_kg
+                onboarding = await OnboardingRepository(session).save_progress(
+                    user_id=user.id,
+                    current_step=OnboardingStep.PROFILE_HEIGHT_INTAKE,
+                    answers=cast(dict[str, object], answers),
+                )
+                return self._result(user, onboarding)
+
+            if step is OnboardingStep.PROFILE_HEIGHT_INTAKE:
+                height_cm = self._parse_integer(
+                    text,
+                    minimum=120,
+                    maximum=230,
+                )
+                if height_cm is None:
+                    return self._result(
+                        user,
+                        onboarding,
+                        kind="profile_validation_error",
+                        error_code="invalid_height_cm",
+                    )
+                staged_birth_year = answers.get(_BIRTH_YEAR_KEY)
+                raw_gender = answers.get(_GENDER_KEY)
+                staged_weight_kg = answers.get(_WEIGHT_KG_KEY)
+                if (
+                    not isinstance(staged_birth_year, int)
+                    or isinstance(staged_birth_year, bool)
+                    or not isinstance(raw_gender, str)
+                    or not isinstance(staged_weight_kg, (int, float))
+                    or isinstance(staged_weight_kg, bool)
+                ):
+                    raise OnboardingApplicationError("incomplete_profile")
+                try:
+                    gender = AthleteGender(raw_gender)
+                except ValueError as exc:
+                    raise OnboardingApplicationError("incomplete_profile") from exc
+                answers[_HEIGHT_CM_KEY] = height_cm
+                await ProfileRepository(session).upsert_mandatory_athlete_profile(
+                    user_id=user.id,
+                    birth_year=staged_birth_year,
+                    gender=gender,
+                    weight_kg=float(staged_weight_kg),
+                    height_cm=float(height_cm),
+                )
+                onboarding = await OnboardingRepository(session).save_progress(
+                    user_id=user.id,
+                    current_step=OnboardingStep.PROFILE_HEIGHT_INTAKE,
+                    answers=cast(dict[str, object], answers),
+                )
+                onboarding.status = OnboardingStatus.COMPLETED
+                user = await UserRepository(session).update_status(
+                    user_id=user.id,
+                    status=UserStatus.ONBOARDING_COMPLETED,
+                )
+                await session.flush()
+                return self._result(user, onboarding)
+
+            raise OnboardingApplicationError("invalid_action")
+
+    @staticmethod
+    def _parse_integer(text: str, *, minimum: int, maximum: int) -> int | None:
+        candidate = text.strip()
+        if _INTEGER_PATTERN.fullmatch(candidate) is None:
+            return None
+        value = int(candidate)
+        return value if minimum <= value <= maximum else None
+
+    @staticmethod
+    def _parse_weight(text: str) -> float | None:
+        candidate = text.strip()
+        if _WEIGHT_PATTERN.fullmatch(candidate) is None:
+            return None
+        try:
+            value = Decimal(candidate)
+        except InvalidOperation:
+            return None
+        if not value.is_finite() or not Decimal("40.0") <= value <= Decimal("200.0"):
+            return None
+        return float(value)
 
     async def cancel(self, identity: TelegramIdentity) -> OnboardingServiceResult:
         """Cancel without deleting consent, goal staging, or canonical data."""
@@ -463,6 +626,7 @@ class OnboardingService:
                 action=action,
                 user_text=text,
                 existing_draft=existing_draft,
+                current_date=date.today().isoformat(),
             )
         except Exception:
             workflow = GoalExtractionWorkflowResult(
@@ -763,7 +927,9 @@ class OnboardingService:
     ) -> OnboardingServiceResult:
         answers = cls._answers(onboarding)
         if kind is None:
-            if onboarding.status is OnboardingStatus.CANCELLED:
+            if onboarding.status is OnboardingStatus.COMPLETED:
+                kind = "onboarding_completed"
+            elif onboarding.status is OnboardingStatus.CANCELLED:
                 kind = "cancelled"
             elif onboarding.current_step is OnboardingStep.CONSENT:
                 kind = "step"
@@ -771,6 +937,14 @@ class OnboardingService:
                 kind = "setup_introduction"
             elif onboarding.current_step is OnboardingStep.GOAL_CONFIRMED:
                 kind = "goal_confirmed"
+            elif onboarding.current_step is OnboardingStep.PROFILE_BIRTH_YEAR_INTAKE:
+                kind = "profile_birth_year_intake"
+            elif onboarding.current_step is OnboardingStep.PROFILE_GENDER_INTAKE:
+                kind = "profile_gender_intake"
+            elif onboarding.current_step is OnboardingStep.PROFILE_WEIGHT_INTAKE:
+                kind = "profile_weight_intake"
+            elif onboarding.current_step is OnboardingStep.PROFILE_HEIGHT_INTAKE:
+                kind = "profile_height_intake"
             else:
                 raw_phase = answers.get(_GOAL_PHASE_KEY)
                 phase = raw_phase if isinstance(raw_phase, str) else None

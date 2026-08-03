@@ -48,6 +48,12 @@ def test_goal_keyboards_expose_only_retained_actions() -> None:
     assert _button_pairs(keyboards.goal_saved_keyboard()) == [
         ("Back to welcome", "nav:v1:welcome")
     ]
+    assert _button_pairs(keyboards.profile_gender_keyboard()) == [
+        ("Male", "ob:v1:profile:gender:MALE"),
+        ("Female", "ob:v1:profile:gender:FEMALE"),
+        ("Other / Unspecified", "ob:v1:profile:gender:OTHER_UNSPECIFIED"),
+        ("Cancel", "ob:v1:cancel"),
+    ]
 
 
 def test_welcome_consent_and_setup_keyboards_match_visible_contract() -> None:
@@ -102,6 +108,8 @@ def test_every_callback_value_fits_telegram_limit() -> None:
         keyboards.goal_input_keyboard(),
         keyboards.goal_confirmation_keyboard(),
         keyboards.goal_saved_keyboard(),
+        keyboards.profile_text_input_keyboard(),
+        keyboards.profile_gender_keyboard(),
         keyboards.goal_date_clarification_keyboard(),
         keyboards.goal_main_clarification_keyboard(),
         keyboards.cancelled_keyboard(),
@@ -287,10 +295,10 @@ def test_profile_rendering_uses_normalized_persisted_values() -> None:
     text = messages.persisted_profile(
         {
             "primary_sport": "triathlon",
-            "goal_type": "ironman_70_3",
-            "event_name": "IRONMAN 70.3 BCN",
+            "main_goal": "Complete IRONMAN 70.3 BCN",
             "event_date": date(2027, 5, 2),
-            "goal_priority": "finish_safely",
+            "target_outcome": "Finish safely",
+            "secondary_priority": None,
             "age": 38,
             "height_cm": None,
             "weight_kg": 72.4,
@@ -304,7 +312,8 @@ def test_profile_rendering_uses_normalized_persisted_values() -> None:
     )
 
     assert "Triathlon" in text
-    assert "IRONMAN 70.3 BCN" in text
+    assert "Complete IRONMAN 70.3 BCN" in text
+    assert "Target outcome: Finish safely" in text
     assert "Height: Not provided" in text
     assert "Monday, Saturday" in text
 

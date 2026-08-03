@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from datetime import date
 from uuid import UUID
 
 import pytest
@@ -48,6 +49,7 @@ class QueueGoalExtractor:
     calls: list[tuple[GoalExtractionAction, str, GoalExtractionOutput | None]] = field(
         default_factory=list
     )
+    current_dates: list[str] = field(default_factory=list)
 
     async def extract(
         self,
@@ -56,9 +58,11 @@ class QueueGoalExtractor:
         action: GoalExtractionAction,
         user_text: str,
         existing_draft: GoalExtractionOutput | None,
+        current_date: str,
     ) -> GoalExtractionWorkflowResult:
         del user_id
         self.calls.append((action, user_text, existing_draft))
+        self.current_dates.append(current_date)
         return self.results.pop(0)
 
 
@@ -163,6 +167,7 @@ async def test_raw_goal_is_retained_and_complete_draft_waits_for_confirmation(
         "message_status": "COMPLETE",
     }
     assert extractor.calls == [("CREATE_GOAL", raw, None)]
+    assert extractor.current_dates == [date.today().isoformat()]
     async with factory() as session:
         assert (
             await ProfileRepository(session).get_training_goal(user_id=result.user_id)
@@ -440,7 +445,7 @@ async def test_explicit_main_goal_correction_overrides_only_that_field(
 
 
 @pytest.mark.asyncio
-async def test_confirmation_persists_canonical_goal_and_stops_at_checkpoint(
+async def test_confirmation_persists_goal_and_starts_mandatory_profile(
     goal_database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
 ) -> None:
     _, factory = goal_database
@@ -462,8 +467,8 @@ async def test_confirmation_persists_canonical_goal_and_stops_at_checkpoint(
     confirmed = await onboarding.confirm_goal(athlete)
 
     assert draft.kind == "goal_confirmation"
-    assert confirmed.kind == "goal_confirmed"
-    assert confirmed.current_step is OnboardingStep.GOAL_CONFIRMED
+    assert confirmed.kind == "profile_birth_year_intake"
+    assert confirmed.current_step is OnboardingStep.PROFILE_BIRTH_YEAR_INTAKE
     assert "goal_draft" not in confirmed.answers
     assert confirmed.answers["raw_goal_text"] == raw
     async with factory() as session:

@@ -25,6 +25,12 @@ OnboardingResultKind = Literal[
     "goal_addition",
     "goal_off_topic",
     "goal_confirmed",
+    "profile_birth_year_intake",
+    "profile_gender_intake",
+    "profile_weight_intake",
+    "profile_height_intake",
+    "profile_validation_error",
+    "onboarding_completed",
     "cancelled",
 ]
 

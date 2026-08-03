@@ -59,6 +59,7 @@ DownloadCallback = Callable[[Path], Awaitable[None]]
 ProgressCallback = Callable[[str], Awaitable[None]]
 
 _COMPLETED_PROFILE_STATES = {
+    UserStatus.ONBOARDING_COMPLETED,
     UserStatus.PROFILE_COMPLETED,
     UserStatus.BASELINE_PENDING,
     UserStatus.BASELINE_IMPORTING,

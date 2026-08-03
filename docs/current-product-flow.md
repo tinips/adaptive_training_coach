@@ -1,14 +1,12 @@
 # Current Product Flow
 
-This document describes the supported Telegram onboarding after the legacy
-post-goal profile flow was removed. It is an implementation map, not a future
-product roadmap.
+This document describes the supported Telegram onboarding with the focused
+goal flow and mandatory deterministic athlete-profile phase.
 
 ## Supported boundary
 
-Onboarding begins at Telegram Start and ends at the durable
-`GOAL_CONFIRMED` checkpoint. No path from that checkpoint collects more profile
-data or starts baseline work.
+Onboarding begins at Telegram Start and ends after the mandatory birth year,
+category, weight, and height values have been validated and persisted.
 
 ```text
 Start
@@ -21,14 +19,17 @@ Start
           -> add/change -> extraction -> confirmation
           -> start again -> goal intake
           -> cancel -> cancelled session
-          -> confirm -> GOAL_CONFIRMED
-  -> Back to welcome
+          -> confirm -> PROFILE_BIRTH_YEAR_INTAKE
+  -> PROFILE_GENDER_INTAKE
+  -> PROFILE_WEIGHT_INTAKE
+  -> PROFILE_HEIGHT_INTAKE
+  -> lifecycle ONBOARDING_COMPLETED
 ```
 
-The removed flow included sport, event configuration, demographics,
+The broader removed flow still includes sport, event configuration,
 availability, equipment, health limitations, coach style, baseline choice,
-onboarding imports, summary editing, finalization, and completion routing. None
-of those states, callbacks, messages, keyboards, or service methods are active.
+onboarding imports, and summary editing. Only the four mandatory demographic
+fields described here have been restored.
 
 ## Screens and callbacks
 
@@ -43,7 +44,10 @@ of those states, callbacks, messages, keyboards, or service methods are active.
 | Goal clarification | One missing/ambiguous detail | Optional focused choices plus Cancel; free text always allowed | Existing draft is merged, not replaced |
 | Goal confirmation | Concise four-field summary | No, that's right `ob:v1:goal:confirm`; Yes, add something `ob:v1:goal:add`; Start again `ob:v1:goal:restart`; Cancel | No canonical write until confirm |
 | Goal addition | Requests one free-text change | Cancel | Next extraction receives the existing draft |
-| Goal saved | Terminal checkpoint copy | Back to welcome `nav:v1:welcome` | Canonical goal upsert; step `GOAL_CONFIRMED` |
+| Goal saved / birth year | Requests four-digit text | Cancel | Canonical goal upsert; step `PROFILE_BIRTH_YEAR_INTAKE` |
+| Category | Male, Female, Other / Unspecified | `ob:v1:profile:gender:<value>`; Cancel | Validated category; step `PROFILE_WEIGHT_INTAKE` |
+| Weight | Requests kilograms as text | Cancel | Numeric 40.0-200.0; step `PROFILE_HEIGHT_INTAKE` |
+| Height | Requests centimeters as text | Cancel | Integer 120-230; atomic profile upsert and lifecycle completion |
 | Cancel confirmation | Two-step cancellation | Yes, cancel `ob:v1:cancel:confirm`; Keep onboarding `ob:v1:cancel:keep` | Status becomes `CANCELLED` only after confirmation |
 | Cancelled | Resume affordance | Restart onboarding `ob:v1:restart`; Back to welcome | Restart clears only the onboarding session and returns to consent |
 
@@ -109,6 +113,10 @@ text, and unknown missing/ambiguous field names. Application code then enforces:
 - `target_outcome` must be present;
 - an event date may be exact, explicitly unknown/not applicable, or absent for
   a non-event goal;
+- a month and day without a year resolves to the next strictly future calendar
+  occurrence relative to the date captured by `OnboardingService`;
+- an explicitly supplied past date is not rewritten and returns to date
+  clarification;
 - an ambiguous date must be clarified;
 - `secondary_priority` is optional;
 - vague phrases such as "train to run" do not pass readiness.
@@ -163,17 +171,19 @@ text is extracted and merged. **Start again** removes only goal draft, goal raw
 text, goal messages, clarification metadata, and parse-in-flight state. Consent
 and unrelated retained session keys are not deleted.
 
-**No, that's right** performs the only canonical write and then shows:
+**No, that's right** performs the canonical goal write and then shows:
 
 ```text
 Your goal has been saved.
 
-This is the first part of your athlete profile. We'll continue building the rest of your profile step by step.
+What year were you born? Send the four-digit year (1940 to 2008).
 ```
 
-The user lifecycle remains `ONBOARDING_IN_PROGRESS`. The application does not
-mark profile completion, start Strava, import a file, calculate a baseline, or
-evaluate goal feasibility.
+The next four steps are ordinary deterministic Python. No LangGraph or model is
+invoked. Invalid text keeps the current state and produces a centralized error
+prompt. The final valid height upserts the four values through
+`ProfileRepository`, marks the onboarding session `COMPLETED`, and changes the
+user lifecycle to `ONBOARDING_COMPLETED` in the same transaction.
 
 ## Temporary and canonical persistence
 
@@ -181,8 +191,8 @@ evaluate goal feasibility.
 
 `onboarding_sessions` stores:
 
-- `status`: `ACTIVE` or `CANCELLED`;
-- `current_step`: one of the four retained steps;
+- `status`: `ACTIVE`, `COMPLETED`, or `CANCELLED`;
+- `current_step`: one of the goal or mandatory-profile steps;
 - `answers.consent`;
 - `answers.raw_goal_text`: exact first relevant goal message;
 - `answers.goal_messages`: relevant goal-step messages only;
@@ -190,6 +200,8 @@ evaluate goal feasibility.
 - `answers._goal_intake_phase`;
 - optional clarification metadata;
 - a short-lived parse-run ownership marker while extraction is in flight.
+- staged `birth_year`, `gender`, `weight_kg`, and `height_cm` values during the
+  deterministic profile phase.
 
 No unconfirmed data is written to `training_goals`.
 
@@ -215,9 +227,14 @@ writer. The owned `training_goals` row represents:
 | `original_description` | Exact first raw goal message |
 | `status` | `CONFIRMED` |
 
-Legacy `goal_type`, `event_name`, and `goal_priority` remain nullable/readable
-only so profiles completed by the prior implementation can still be displayed.
-No active onboarding writer populates them.
+`main_goal`, `target_outcome`, and `original_description` are required canonical
+columns. Migration `0010_remove_legacy_goal_fields` maps legacy-only rows into
+that representation before removing the redundant `goal_type`, `event_name`,
+and `goal_priority` columns.
+
+The owned `athlete_profiles` row additionally stores the mandatory
+`birth_year`, `gender`, `weight_kg`, and `height_cm` values. Repository reads and
+writes always include the authenticated `user_id`.
 
 ## Error and concurrency behavior
 
@@ -229,6 +246,7 @@ No active onboarding writer populates them.
   changes and renders a retry-safe goal screen.
 - Raw goal text is never emitted in application logs or LLM usage rows.
 - All session and goal repository operations include the owning user ID.
+- Profile validation is deterministic and profile values are never logged.
 
 ## Legacy-data migration
 
@@ -261,6 +279,14 @@ It preserves canonical goals, users, historical normalized profile records,
 workouts and detail tables, source links, import jobs and their outcomes,
 feedback, baselines, OAuth connections, sync jobs, and webhook events.
 
+Migration `0009_mandatory_profile` expands the state and lifecycle constraints,
+adds `birth_year` and `gender` to `athlete_profiles`, and preserves legacy rows
+by keeping the new columns nullable at the database compatibility boundary.
+
+Migration `0010_remove_legacy_goal_fields` preserves meaningful legacy goal
+content through deterministic backfill, removes the three superseded columns,
+and enforces non-null canonical goal text.
+
 ## Existing-athlete features outside onboarding
 
 Existing completed profiles may still use profile reads, account menus, daily
@@ -279,7 +305,9 @@ Focused tests cover:
 - optional secondary priority;
 - add/change, start again, cancel, and confirm behavior;
 - absence of a canonical goal before confirmation;
-- the terminal `GOAL_CONFIRMED` screen and unchanged user lifecycle;
+- deterministic birth year, category, weight, and height validation;
+- state preservation after invalid values and no model calls during profile intake;
+- atomic owned profile upsert and `ONBOARDING_COMPLETED` lifecycle transition;
 - migration mapping, column removal, upgrade, downgrade, and re-upgrade;
 - retained daily imports, workout feedback, historical profile reads, Strava,
   and deterministic baseline behavior.

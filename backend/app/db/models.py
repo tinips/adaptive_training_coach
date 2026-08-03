@@ -39,6 +39,7 @@ from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin, utc_now
 from app.domain.enums import (
     ActivitySource,
     AppleHealthImportStatus,
+    AthleteGender,
     BaselinePreferenceStatus,
     BaselineSource,
     BaselineStatus,
@@ -49,7 +50,6 @@ from app.domain.enums import (
     DetailLevel,
     Discipline,
     DiscomfortSeverity,
-    GoalPriority,
     HikingType,
     LevelLabel,
     LLMUsageStatus,
@@ -71,32 +71,6 @@ from app.domain.enums import (
     WebhookProcessingStatus,
     WorkoutFlowStep,
 )
-
-
-class GoalType(StrEnum):
-    """Normalized goal categories supported by the onboarding milestone."""
-
-    FIVE_K = "FIVE_K"
-    TEN_K = "TEN_K"
-    HALF_MARATHON = "HALF_MARATHON"
-    MARATHON = "MARATHON"
-    TRAIL = "TRAIL"
-    CYCLING_EVENT = "CYCLING_EVENT"
-    GRAN_FONDO = "GRAN_FONDO"
-    SPRINT_TRIATHLON = "SPRINT_TRIATHLON"
-    OLYMPIC_TRIATHLON = "OLYMPIC_TRIATHLON"
-    HALF_IRONMAN_70_3 = "HALF_IRONMAN_70_3"
-    IRONMAN = "IRONMAN"
-    FIRST_TRIATHLON = "FIRST_TRIATHLON"
-    IMPROVE_TECHNIQUE = "IMPROVE_TECHNIQUE"
-    OPEN_WATER_SWIMMING = "OPEN_WATER_SWIMMING"
-    SPECIFIC_EVENT = "SPECIFIC_EVENT"
-    GENERAL_HEALTH = "GENERAL_HEALTH"
-    IMPROVE_ENDURANCE = "IMPROVE_ENDURANCE"
-    IMPROVE_PERFORMANCE = "IMPROVE_PERFORMANCE"
-    LOSE_BODY_FAT = "LOSE_BODY_FAT"
-    BUILD_STRENGTH = "BUILD_STRENGTH"
-    OTHER = "OTHER"
 
 
 class EquipmentType(StrEnum):
@@ -381,6 +355,10 @@ class AthleteProfile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         UniqueConstraint("user_id", name="uq_athlete_profiles_user_id"),
         CheckConstraint("age >= 16 AND age <= 100", name="age_range"),
         CheckConstraint(
+            "birth_year IS NULL OR (birth_year >= 1940 AND birth_year <= 2008)",
+            name="birth_year_range",
+        ),
+        CheckConstraint(
             "height_cm IS NULL OR (height_cm >= 120 AND height_cm <= 230)",
             name="height_cm_range",
         ),
@@ -396,6 +374,11 @@ class AthleteProfile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         nullable=False,
     )
     age: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    birth_year: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    gender: Mapped[AthleteGender | None] = mapped_column(
+        persisted_enum(AthleteGender, name="athlete_gender", length=24),
+        nullable=True,
+    )
     height_cm: Mapped[float | None] = mapped_column(Float, nullable=True)
     weight_kg: Mapped[float | None] = mapped_column(Float, nullable=True)
     primary_sport: Mapped[PrimarySport] = mapped_column(
@@ -420,23 +403,14 @@ class TrainingGoal(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
     )
-    goal_type: Mapped[GoalType | None] = mapped_column(
-        persisted_enum(GoalType, name="goal_type", length=32),
-        nullable=True,
-    )
-    event_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     event_date: Mapped[date | None] = mapped_column(Date, nullable=True)
-    goal_priority: Mapped[GoalPriority | None] = mapped_column(
-        persisted_enum(GoalPriority, name="goal_priority", length=24),
-        nullable=True,
-    )
-    main_goal: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    target_outcome: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    main_goal: Mapped[str] = mapped_column(String(500), nullable=False)
+    target_outcome: Mapped[str] = mapped_column(String(500), nullable=False)
     secondary_priority: Mapped[str | None] = mapped_column(
         String(500),
         nullable=True,
     )
-    original_description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    original_description: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[TrainingGoalStatus] = mapped_column(
         persisted_enum(
             TrainingGoalStatus,
@@ -2087,7 +2061,6 @@ __all__ = [
     "EquipmentAccess",
     "EquipmentAccessType",
     "EquipmentType",
-    "GoalType",
     "HealthConstraint",
     "HealthConstraintType",
     "HikingWorkoutDetails",

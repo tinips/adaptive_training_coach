@@ -91,6 +91,7 @@ class LangGraphGoalExtractor:
         action: GoalExtractionAction,
         user_text: str,
         existing_draft: GoalExtractionOutput | None,
+        current_date: str,
     ) -> GoalExtractionWorkflowResult:
         started_at = datetime.now(UTC)
         started_clock = monotonic()
@@ -108,6 +109,7 @@ class LangGraphGoalExtractor:
             "action": action,
             "user_text": user_text,
             "existing_draft": existing_draft,
+            "current_date": current_date,
         }
         try:
             raw_state = await asyncio.wait_for(

@@ -9,6 +9,7 @@ from datetime import date
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.base import utc_now
 from app.db.models import (
     AthleteProfile,
     AvailabilityRule,
@@ -20,8 +21,10 @@ from app.db.models import (
     User,
 )
 from app.domain.enums import (
+    AthleteGender,
     BaselinePreferenceStatus,
     BaselineSource,
+    PrimarySport,
     TrainingGoalStatus,
 )
 from app.repositories.errors import OwnedRecordNotFoundError
@@ -141,6 +144,32 @@ class ProfileRepository:
         goal.status = TrainingGoalStatus.CONFIRMED
         await self._session.flush()
         return goal
+
+    async def upsert_mandatory_athlete_profile(
+        self,
+        *,
+        user_id: uuid.UUID,
+        birth_year: int,
+        gender: AthleteGender,
+        weight_kg: float,
+        height_cm: float,
+    ) -> AthleteProfile:
+        """Persist the four validated mandatory fields for the owning user."""
+
+        await self._require_user(user_id)
+        profile = await self.get_athlete_profile(user_id=user_id)
+        if profile is None:
+            profile = AthleteProfile(user_id=user_id)
+            self._session.add(profile)
+        profile.birth_year = birth_year
+        profile.gender = gender
+        profile.weight_kg = weight_kg
+        profile.height_cm = height_cm
+        # Retained compatibility columns are not part of the new intake.
+        profile.age = utc_now().year - birth_year
+        profile.primary_sport = profile.primary_sport or PrimarySport.OTHER
+        await self._session.flush()
+        return profile
 
     async def upsert_baseline_preference(
         self,

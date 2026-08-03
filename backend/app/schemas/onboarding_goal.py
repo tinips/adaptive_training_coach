@@ -42,5 +42,6 @@ class GoalExtractor(Protocol):
         action: GoalExtractionAction,
         user_text: str,
         existing_draft: GoalExtractionOutput | None,
+        current_date: str,
     ) -> GoalExtractionWorkflowResult:
         """Extract a patch from the latest answer without writing canonical data."""

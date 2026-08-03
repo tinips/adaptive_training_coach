@@ -2,9 +2,10 @@
 
 Adaptive Endurance Coach is a modular Python application for a Telegram-based
 endurance coach. The currently supported onboarding slice records and confirms
-one athlete goal. It deliberately stops there; availability, injuries,
-baseline selection, feasibility, and plan generation are future onboarding
-steps.
+one athlete goal, then deterministically collects the athlete's birth year,
+competition category / biological sex, weight, and height. Availability,
+injuries, baseline selection, feasibility, and plan generation remain outside
+this onboarding phase.
 
 The interface is English-only. Goal answers may be written naturally in any
 language supported by the configured model. The application does not provide
@@ -21,20 +22,25 @@ The only supported journey is:
 5. A focused LangGraph/LangChain operation extracts a four-field draft.
 6. The bot asks one clarification at a time until the goal is clear.
 7. The user can confirm, add or change information, start again, or cancel.
-8. **No, that's right** writes the canonical goal and moves the session to
-   `GOAL_CONFIRMED`.
-9. The bot shows the terminal saved-goal checkpoint and **Back to welcome**.
+8. **No, that's right** writes the canonical goal and immediately starts the
+   mandatory profile phase.
+9. The bot validates a four-digit birth year from 1940 through 2008.
+10. An inline keyboard records Male, Female, or Other / Unspecified.
+11. The bot validates weight from 40.0 through 200.0 kg.
+12. The bot validates integer height from 120 through 230 cm.
+13. The final height submission atomically upserts the owned athlete profile
+    and changes the user lifecycle to `ONBOARDING_COMPLETED`.
 
-The terminal copy is:
+The first mandatory profile prompt is:
 
 ```text
 Your goal has been saved.
 
-This is the first part of your athlete profile. We'll continue building the rest of your profile step by step.
+What year were you born? Send the four-digit year (1940 to 2008).
 ```
 
-Confirmation does not mark the athlete profile complete, start an import,
-select a baseline, calculate feasibility, or generate a plan.
+Profile completion does not start an import, select a baseline, calculate
+feasibility, or generate a plan.
 
 The durable onboarding states are:
 
@@ -42,6 +48,10 @@ The durable onboarding states are:
 - `SETUP_INTRODUCTION`
 - `GOAL_INTAKE`
 - `GOAL_CONFIRMED`
+- `PROFILE_BIRTH_YEAR_INTAKE`
+- `PROFILE_GENDER_INTAKE`
+- `PROFILE_WEIGHT_INTAKE`
+- `PROFILE_HEIGHT_INTAKE`
 
 Cancellation is stored as an onboarding-session status. Restart returns only
 that user's session to consent.
@@ -67,6 +77,9 @@ compiled, stateless goal-extraction graph with this structured contract:
 application revalidates model output and independently enforces goal readiness.
 `secondary_priority` is optional. An unknown or inapplicable event date is
 valid; an ambiguous date is not converted into an invented exact date.
+Each extraction receives the current local calendar date. A month-and-day date
+without a year is interpreted as the next strictly future occurrence; an
+explicit past year is rejected for clarification rather than silently changed.
 
 During intake, `onboarding_sessions.answers` holds only the relevant temporary
 state: consent, the first raw goal message, goal messages from this step, the
@@ -86,7 +99,10 @@ single canonical writer in `ProfileRepository`, which upserts one
 
 After confirmation, temporary draft and clarification state are removed. The
 original goal text and the relevant goal-message audit trail remain in the
-onboarding session.
+onboarding session. The four mandatory profile answers are validated without a
+model. On final height submission,
+`ProfileRepository.upsert_mandatory_athlete_profile` writes `birth_year`,
+`gender`, `weight_kg`, and `height_cm` for the owning `user_id`.
 
 ## Architecture
 
@@ -262,10 +278,17 @@ fields. Migration `0008_remove_legacy_onboarding`:
 - preserves cancelled status;
 - removes generic parse, summary-return, completion timestamp, onboarding
   import provenance, and return-to-onboarding feedback columns;
-- makes legacy `goal_type` and `goal_priority` nullable for newly confirmed
-  conversational goals;
 - preserves users, canonical goals, historical normalized profiles, workouts,
   import jobs, feedback, baselines, and Strava data.
+
+Migration `0009_mandatory_profile` adds the four deterministic profile states,
+completed lifecycle/status values, and the owned athlete-profile `birth_year`
+and `gender` columns. Existing normalized profiles remain readable.
+
+Migration `0010_remove_legacy_goal_fields` backfills legacy-only goal rows into
+the canonical representation, removes redundant `goal_type`, `event_name`, and
+`goal_priority` columns, and makes `main_goal`, `target_outcome`, and
+`original_description` required.
 
 The migration supports upgrade, downgrade, and re-upgrade in the portable
 SQLite migration tests and is also validated against Compose PostgreSQL.

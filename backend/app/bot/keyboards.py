@@ -24,6 +24,9 @@ LABELS = {
     "goal_pace": "Improve my pace",
     "goal_consistency": "Run consistently",
     "goal_something_else": "Something else",
+    "gender_male": "Male",
+    "gender_female": "Female",
+    "gender_other_unspecified": "Other / Unspecified",
     "cancel": "Cancel",
     "back": "Back",
     "skip": "Skip",
@@ -125,6 +128,30 @@ def goal_confirmation_keyboard() -> InlineKeyboardMarkup:
 
 def goal_saved_keyboard() -> InlineKeyboardMarkup:
     return _rows([[("Back to welcome", "nav:v1:welcome")]])
+
+
+def profile_text_input_keyboard() -> InlineKeyboardMarkup:
+    """Keep cancellation available during mandatory deterministic text intake."""
+
+    return _rows([[(LABELS["cancel"], "ob:v1:cancel")]])
+
+
+def profile_gender_keyboard() -> InlineKeyboardMarkup:
+    """Build the deterministic competitive-category choices."""
+
+    return _rows(
+        [
+            [(LABELS["gender_male"], "ob:v1:profile:gender:MALE")],
+            [(LABELS["gender_female"], "ob:v1:profile:gender:FEMALE")],
+            [
+                (
+                    LABELS["gender_other_unspecified"],
+                    "ob:v1:profile:gender:OTHER_UNSPECIFIED",
+                )
+            ],
+            [(LABELS["cancel"], "ob:v1:cancel")],
+        ]
+    )
 
 
 def goal_date_clarification_keyboard() -> InlineKeyboardMarkup:

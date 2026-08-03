@@ -379,6 +379,14 @@ class CoachBotApplicationService:
                     callback_data.removeprefix("ob:v1:goal:choice:"),
                 ),
             )
+        if callback_data.startswith("ob:v1:profile:gender:"):
+            return await self._render_onboarding(
+                identity,
+                await self._onboarding.choose_gender(
+                    identity,
+                    callback_data.removeprefix("ob:v1:profile:gender:"),
+                ),
+            )
         if callback_data.startswith("wf:v1:"):
             return await self._workout_feedback_callback(
                 identity,
@@ -826,6 +834,42 @@ class CoachBotApplicationService:
                 messages.GOAL_SAVED,
                 keyboards.goal_saved_keyboard(),
             )
+        if result.kind == "profile_birth_year_intake":
+            return TelegramResponse(
+                messages.PROFILE_BIRTH_YEAR_INTAKE,
+                keyboards.profile_text_input_keyboard(),
+            )
+        if result.kind == "profile_gender_intake":
+            return TelegramResponse(
+                messages.PROFILE_GENDER_INTAKE,
+                keyboards.profile_gender_keyboard(),
+            )
+        if result.kind == "profile_weight_intake":
+            return TelegramResponse(
+                messages.PROFILE_WEIGHT_INTAKE,
+                keyboards.profile_text_input_keyboard(),
+            )
+        if result.kind == "profile_height_intake":
+            return TelegramResponse(
+                messages.PROFILE_HEIGHT_INTAKE,
+                keyboards.profile_text_input_keyboard(),
+            )
+        if result.kind == "profile_validation_error":
+            prompts = {
+                OnboardingStep.PROFILE_BIRTH_YEAR_INTAKE: (
+                    messages.PROFILE_BIRTH_YEAR_INTAKE
+                ),
+                OnboardingStep.PROFILE_WEIGHT_INTAKE: messages.PROFILE_WEIGHT_INTAKE,
+                OnboardingStep.PROFILE_HEIGHT_INTAKE: messages.PROFILE_HEIGHT_INTAKE,
+            }
+            prompt = prompts.get(result.current_step, "")
+            return TelegramResponse(
+                f"{messages.validation_error(result.error_code or 'invalid_action')}"
+                f"\n\n{prompt}",
+                keyboards.profile_text_input_keyboard(),
+            )
+        if result.kind == "onboarding_completed":
+            return TelegramResponse(messages.ONBOARDING_COMPLETED)
         if result.kind == "fallback":
             return TelegramResponse(
                 messages.PARSE_FALLBACK,
@@ -919,6 +963,7 @@ class CoachBotApplicationService:
     @staticmethod
     def _strava_allowed(status: object) -> bool:
         return status in {
+            UserStatus.ONBOARDING_COMPLETED,
             UserStatus.PROFILE_COMPLETED,
             UserStatus.BASELINE_PENDING,
             UserStatus.BASELINE_IMPORTING,

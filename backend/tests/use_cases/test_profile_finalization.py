@@ -16,7 +16,6 @@ from app.db.models import (
     AvailabilityRule,
     BaselinePreference,
     CoachPreference,
-    GoalType,
     TrainingGoal,
 )
 from app.domain.enums import (
@@ -25,7 +24,6 @@ from app.domain.enums import (
     CoachTone,
     DayOfWeek,
     DetailLevel,
-    GoalPriority,
     PrimarySport,
     UserStatus,
 )
@@ -70,10 +68,11 @@ async def _historical_profile(
             ),
             TrainingGoal(
                 user_id=user.id,
-                goal_type=GoalType.MARATHON,
-                event_name="Barcelona Marathon",
+                main_goal="Complete the Barcelona Marathon",
                 event_date=date(2027, 3, 14),
-                goal_priority=GoalPriority.FINISH_SAFELY,
+                target_outcome="Finish safely",
+                secondary_priority=None,
+                original_description="Complete the Barcelona Marathon safely",
             ),
             AvailabilityRule(
                 user_id=user.id,
@@ -115,8 +114,8 @@ async def test_historical_normalized_profile_remains_readable_and_owned(
 
     assert profile is not None
     assert profile.primary_sport is PrimarySport.RUNNING
-    assert profile.goal_type is GoalType.MARATHON
-    assert profile.event_name == "Barcelona Marathon"
+    assert profile.main_goal == "Complete the Barcelona Marathon"
+    assert profile.target_outcome == "Finish safely"
     assert await service.get(user_id=other_id) is None
 
 

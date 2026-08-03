@@ -72,11 +72,7 @@ class AccountQueryService:
                 user_id=user_id
             )
             if onboarding is not None:
-                for key in (
-                    "primary_sport",
-                    "goal_type",
-                    "goal_priority",
-                ):
+                for key in ("primary_sport",):
                     description = onboarding.answers.get(f"{key}_other_description")
                     if description:
                         data[f"{key}_other_description"] = description

@@ -1283,3 +1283,107 @@ draft unchanged for `OFF_TOPIC`.
   `secondary_priority=Maintain current muscle`, no missing or ambiguous fields,
   and `COMPLETE`. A separate live update accepted “finish in a decent time” as
   a valid qualitative target outcome.
+
+## 2026-08-03 mandatory athlete-profile amendment
+
+### Decision
+
+The terminal `GOAL_CONFIRMED` product boundary is superseded. Explicit goal
+confirmation now immediately starts a mandatory, deterministic four-step
+profile phase: birth year, competition category / biological sex, weight, and
+height. The phase does not invoke LangGraph or an LLM.
+
+Birth year accepts four digits from 1940 through 2008. Category is selected by
+an inline Male, Female, or Other / Unspecified callback. Weight accepts a
+finite decimal from 40.0 through 200.0 kg, and height accepts an integer from
+120 through 230 cm. Invalid input retains the current checkpoint and renders a
+centralized English error prompt.
+
+The final height submission atomically calls the ownership-scoped
+`ProfileRepository` writer, marks the onboarding session `COMPLETED`, and moves
+the user lifecycle to `ONBOARDING_COMPLETED`. Migration
+`0009_mandatory_profile` adds the state/lifecycle constraints plus canonical
+`birth_year` and `gender` profile columns while preserving historical rows. It
+also advances existing in-progress `GOAL_CONFIRMED` sessions to birth-year
+intake without reopening profiles that already have a completed lifecycle.
+
+### Progress
+
+- [x] Add the four mandatory onboarding states and completed lifecycle/status.
+- [x] Add deterministic parsing, range validation, state transitions, and
+  gender callbacks to `OnboardingService`.
+- [x] Add centralized messages and keyboards and retain thin Telegram handlers.
+- [x] Add an ownership-scoped mandatory athlete-profile upsert and compatible
+  profile rendering.
+- [x] Add portable migration `0009_mandatory_profile` with downgrade support.
+- [x] Replace the terminal-goal scenario with a complete profile journey and
+  add focused invalid-input/no-LLM coverage.
+- [x] Update the README and current product-flow documentation.
+- [x] Run the focused and full host validation suites.
+
+### Validation evidence
+
+- Focused onboarding, rendering, scenario, and migration suites: `28 passed`.
+- Final full host suite: `258 passed in 54.58s`.
+- `mypy app`: no issues in 105 source files.
+- `ruff check .` passed and `ruff format --check .` confirmed 135 formatted
+  files.
+- Empty-database upgrade reached `0009_mandatory_profile`; `alembic check`
+  reported no new upgrade operations.
+- Docker Desktop was not running in this workspace, so live PostgreSQL,
+  Telegram, Strava, webhook, and live-LLM validation is not claimed.
+
+## 2026-08-03 future event-date inference fix
+
+### Decision and progress
+
+- [x] Capture `date.today().isoformat()` once in
+  `OnboardingService._extract_goal` and pass it through the typed extractor
+  boundary into the stateless LangGraph invocation state.
+- [x] Make the extraction node use only that supplied anchor date in its prompt.
+- [x] Require month-and-day inputs without a year to resolve to the next
+  strictly future calendar occurrence.
+- [x] Roll a model-returned nonfuture month/day without an athlete-supplied year
+  to its next future occurrence; reject explicit nonfuture years to deterministic
+  date clarification without changing the supplied year.
+- [x] Add focused prompt, future inference, explicit-past-date, ambiguous-date,
+  and service-context propagation tests.
+
+### Validation evidence
+
+- Focused graph, onboarding, and scenario suites: `17 passed`.
+- Final full host suite: `261 passed in 53.62s`.
+- `ruff check .`, `ruff format --check .`, `mypy app`, and `git diff --check`
+  passed; Ruff confirmed 135 formatted files and mypy checked 105 source files.
+
+## 2026-08-03 canonical training-goal cleanup
+
+### Decision and progress
+
+The active conversational representation supersedes the original categorical
+goal representation. `goal_type`, `event_name`, and `goal_priority` are
+therefore removed from `training_goals`; `event_date` remains because it is
+already shared by both representations. `status` and `original_description`
+remain intentional audit/lifecycle fields rather than duplicate semantics.
+
+- [x] Remove legacy goal fields and their unused Python enums from the runtime
+  model, profile schema, presentation, and compatibility service.
+- [x] Add migration `0010_remove_legacy_goal_fields`.
+- [x] Backfill legacy-only rows into readable canonical `main_goal`,
+  `target_outcome`, and `original_description` values before dropping columns.
+- [x] Make all three required canonical text fields non-null.
+- [x] Preserve downgrade compatibility with neutral legacy classifications.
+- [x] Add migration assertions for removed columns, non-null canonical fields,
+  and legacy-row data preservation.
+
+### Validation evidence
+
+- Focused migration, profile, conversational-goal, and rendering suites:
+  `29 passed`.
+- Final full host suite: `261 passed in 65.43s`.
+- `ruff check .`, `ruff format --check .`, `mypy app`, and `git diff --check`
+  passed; Ruff confirmed 135 formatted files and mypy checked 105 source files.
+- A fresh portable database upgraded to `0010_remove_legacy_goal_fields`;
+  `alembic check` reported no new operations. Direct schema inspection showed
+  only `user_id`, canonical goal fields, lifecycle/audit fields, and common
+  identifiers/timestamps in `training_goals`.

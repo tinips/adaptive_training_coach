@@ -62,8 +62,14 @@ def test_initial_migration_upgrade_and_downgrade(
             row[1]
             for row in connection.execute("PRAGMA table_info('activity_source_links')")
         }
-        training_goal_columns = {
-            row[1] for row in connection.execute("PRAGMA table_info('training_goals')")
+        training_goal_info = {
+            row[1]: row
+            for row in connection.execute("PRAGMA table_info('training_goals')")
+        }
+        training_goal_columns = set(training_goal_info)
+        athlete_profile_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info('athlete_profiles')")
         }
         onboarding_columns = {
             row[1]
@@ -74,7 +80,7 @@ def test_initial_migration_upgrade_and_downgrade(
             for row in connection.execute("PRAGMA table_info('workout_flow_sessions')")
         }
 
-    assert revision == ("0008_remove_legacy_onboarding",)
+    assert revision == ("0010_remove_legacy_goal_fields",)
     assert len(tables - {"alembic_version"}) == 28
     assert {
         "activity_feedback",
@@ -118,6 +124,16 @@ def test_initial_migration_upgrade_and_downgrade(
         "original_description",
         "status",
     }.issubset(training_goal_columns)
+    assert {"goal_type", "event_name", "goal_priority"}.isdisjoint(
+        training_goal_columns
+    )
+    assert all(
+        training_goal_info[column][3] == 1
+        for column in ("main_goal", "target_outcome", "original_description")
+    )
+    assert {"birth_year", "gender", "weight_kg", "height_cm"}.issubset(
+        athlete_profile_columns
+    )
 
     command.downgrade(configuration, "0004_discipline_workout_models")
     with sqlite3.connect(database_path) as connection:
@@ -170,7 +186,7 @@ def test_initial_migration_upgrade_and_downgrade(
                 "SELECT name FROM sqlite_master WHERE type = 'table'",
             )
         }
-    assert reupgraded_revision == ("0008_remove_legacy_onboarding",)
+    assert reupgraded_revision == ("0010_remove_legacy_goal_fields",)
     assert "heart_rate_observations" not in reupgraded_tables
 
     command.downgrade(configuration, "base")
@@ -258,6 +274,14 @@ def test_legacy_sessions_normalize_to_retained_checkpoints(
             (user_ids[3], f"{201:032x}", now, now),
         )
         connection.execute(
+            "INSERT INTO training_goals "
+            "(user_id, goal_type, event_name, event_date, goal_priority, "
+            "id, created_at, updated_at) "
+            "VALUES (?, 'TEN_K', 'Barcelona 10K', '2027-01-17', "
+            "'PERSONAL_BEST', ?, ?, ?)",
+            (user_ids[1], f"{202:032x}", now, now),
+        )
+        connection.execute(
             "INSERT INTO llm_usage "
             "(user_id, onboarding_step, provider_mode, status, created_at, id) "
             "VALUES (?, 'GOAL_TYPE', 'mock', 'SUCCEEDED', ?, ?)",
@@ -280,6 +304,11 @@ def test_legacy_sessions_normalize_to_retained_checkpoints(
             "FROM training_goals WHERE user_id = ?",
             (user_ids[3],),
         ).fetchone()
+        backfilled = connection.execute(
+            "SELECT main_goal, event_date, target_outcome, original_description "
+            "FROM training_goals WHERE user_id = ?",
+            (user_ids[1],),
+        ).fetchone()
 
     decoded = [
         (status, step, json.loads(answers)) for status, step, answers in normalized
@@ -289,7 +318,7 @@ def test_legacy_sessions_normalize_to_retained_checkpoints(
     assert decoded[2][0:2] == ("ACTIVE", "GOAL_INTAKE")
     assert decoded[2][2]["raw_goal_text"] == staged_answers["raw_goal_text"]
     assert decoded[2][2]["_goal_intake_phase"] == "CONFIRMING"
-    assert decoded[3][0:2] == ("ACTIVE", "GOAL_CONFIRMED")
+    assert decoded[3][0:2] == ("ACTIVE", "PROFILE_BIRTH_YEAR_INTAKE")
     assert "goal_draft" not in decoded[3][2]
     assert decoded[4][0:2] == ("CANCELLED", "GOAL_INTAKE")
     assert llm_step == ("GOAL_INTAKE",)
@@ -297,6 +326,12 @@ def test_legacy_sessions_normalize_to_retained_checkpoints(
         "Complete a marathon",
         "Finish safely",
         "I want to complete a marathon safely.",
+    )
+    assert backfilled == (
+        "Barcelona 10K",
+        "2027-01-17",
+        "Achieve a personal best",
+        "Barcelona 10K",
     )
     get_settings.cache_clear()
 
@@ -418,7 +453,7 @@ def test_unified_import_migration_preserves_and_backfills_0002_data(
             (import_job_id,),
         ).fetchone()
 
-    assert revision == ("0008_remove_legacy_onboarding",)
+    assert revision == ("0010_remove_legacy_goal_fields",)
     assert apple_sources == [
         (exact_apple_id, "APPLE_HEALTH", "apple-exact"),
         (summary_apple_id, "APPLE_HEALTH", "apple-summary"),
@@ -821,7 +856,7 @@ def test_discipline_workout_migration_preserves_populated_0003_data(
             "PRAGMA foreign_key_check",
         ).fetchall()
 
-    assert revision_at_head == ("0008_remove_legacy_onboarding",)
+    assert revision_at_head == ("0010_remove_legacy_goal_fields",)
     assert "heart_rate_observations" not in head_tables
     assert len(workout_rows) == len(activities)
     assert {row[0] for row in workout_rows} == {row["id"] for row in activities}

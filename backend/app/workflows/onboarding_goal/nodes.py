@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+import re
+from datetime import date
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import Runnable, RunnableConfig, RunnableLambda
@@ -24,6 +25,7 @@ GoalExtractionNode = Runnable[
     GoalExtractionGraphState,
     GoalExtractionGraphState,
 ]
+_FOUR_DIGIT_YEAR_PATTERN = re.compile(r"(?<![0-9])(?:19|20)[0-9]{2}(?![0-9])")
 
 
 def build_goal_messages(
@@ -31,6 +33,7 @@ def build_goal_messages(
     action: GoalExtractionAction,
     user_text: str,
     existing_draft: GoalExtractionOutput | None,
+    current_date: str,
 ) -> list[BaseMessage]:
     """Send the operation, current draft, and latest answer as separate inputs."""
 
@@ -39,7 +42,6 @@ def build_goal_messages(
         ensure_ascii=False,
         separators=(",", ":"),
     )
-    today = datetime.now(UTC).date().isoformat()
     system_text = (
         "Extract a field patch from the latest athlete onboarding goal answer. "
         "Return exactly one flat JSON object matching the requested schema and no "
@@ -66,7 +68,14 @@ def build_goal_messages(
         "secondary_priority is optional, "
         "must be explicitly stated, and must never be listed as missing. Use an "
         "event_date only for a complete, unambiguous calendar date; never invent a "
-        "day for a month-only or otherwise ambiguous date. A null event_date is "
+        "day for a month-only or otherwise ambiguous date. Training goals are "
+        "inherently future events. If the athlete provides a calendar date "
+        "containing only a month and a day without a year, calculate the correct "
+        "calendar year such that the resulting event_date always falls in the "
+        "FUTURE relative to today's date. If the athlete explicitly supplies a "
+        "year that makes the date past, return event_date as null and mark "
+        "event_date ambiguous instead of changing the explicit year. A null "
+        "event_date is "
         "valid when the user has no date yet or the goal has no event. List only "
         "genuinely missing or ambiguous fields. Use COMPLETE only when main_goal "
         "and target_outcome are known and the date is known, explicitly unknown, "
@@ -75,7 +84,7 @@ def build_goal_messages(
         "field and do not derive goal facts from it. missing_fields, "
         "ambiguous_fields, and message_status must describe the resulting goal after "
         "the patch is applied to the current draft. "
-        f"Today's UTC date is {today}. Operation: {action}. "
+        f"Today's date is: {current_date}. Operation: {action}. "
         f"Current persisted draft: {draft_json}"
     )
     return [
@@ -97,6 +106,7 @@ def make_extract_goal_node(
             action=state["action"],
             user_text=state["user_text"],
             existing_draft=state.get("existing_draft"),
+            current_date=state["current_date"],
         )
         try:
             response = await model.ainvoke_structured(
@@ -139,6 +149,11 @@ def make_extract_goal_node(
                 "prompt_tokens": response.prompt_tokens,
                 "completion_tokens": response.completion_tokens,
             }
+        goal_patch = _normalize_event_date(
+            goal_patch,
+            current_date=state["current_date"],
+            user_text=state["user_text"],
+        )
         return {
             "outcome": "extracted",
             "goal_patch": goal_patch,
@@ -148,3 +163,42 @@ def make_extract_goal_node(
         }
 
     return RunnableLambda(extract_goal, name="extract_goal")
+
+
+def _normalize_event_date(
+    patch: GoalExtractionPatch,
+    *,
+    current_date: str,
+    user_text: str,
+) -> GoalExtractionPatch:
+    """Resolve yearless dates forward and reject explicitly nonfuture dates."""
+
+    if patch.event_date is None:
+        return patch
+    try:
+        anchor = date.fromisoformat(current_date)
+    except ValueError:
+        return patch
+    if patch.event_date > anchor:
+        return patch
+    if _FOUR_DIGIT_YEAR_PATTERN.search(user_text) is None:
+        candidate = patch.event_date
+        next_year = candidate.year + 1
+        while candidate <= anchor:
+            try:
+                candidate = candidate.replace(year=next_year)
+            except ValueError:
+                next_year += 1
+                continue
+            next_year += 1
+        return patch.model_copy(update={"event_date": candidate})
+    ambiguous = list(dict.fromkeys([*patch.ambiguous_fields, "event_date"]))
+    missing = [field for field in patch.missing_fields if field != "event_date"]
+    return patch.model_copy(
+        update={
+            "event_date": None,
+            "missing_fields": missing,
+            "ambiguous_fields": ambiguous,
+            "message_status": "NEEDS_CLARIFICATION",
+        }
+    )

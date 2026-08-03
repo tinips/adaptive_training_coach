@@ -69,6 +69,7 @@ async def test_compiled_goal_graph_requests_and_revalidates_narrow_schema() -> N
             "action": "CREATE_GOAL",
             "user_text": "I want to complete a marathon safely.",
             "existing_draft": None,
+            "current_date": "2026-08-03",
         }
     )
 
@@ -81,6 +82,7 @@ async def test_compiled_goal_graph_requests_and_revalidates_narrow_schema() -> N
     assert "one flat json object" in prompt
     assert "never nest fields under patch" in prompt
     assert "does not need to be numeric" in prompt
+    assert "today's date is: 2026-08-03" in prompt
     assert str(model.messages[0][1].content) == (
         "I want to complete a marathon safely."
     )
@@ -109,6 +111,7 @@ async def test_compiled_goal_graph_rejects_malformed_structured_result() -> None
             "action": "CREATE_GOAL",
             "user_text": "The race is next March.",
             "existing_draft": None,
+            "current_date": "2026-08-03",
         }
     )
 
@@ -145,6 +148,7 @@ async def test_update_prompt_frames_short_reply_with_current_missing_field() -> 
             "action": "UPDATE_EXISTING_GOAL",
             "user_text": "wihtout stopping",
             "existing_draft": current,
+            "current_date": "2026-08-03",
         }
     )
 
@@ -153,3 +157,96 @@ async def test_update_prompt_frames_short_reply_with_current_missing_field() -> 
     assert "short answer to the draft's current missing" in prompt
     assert '"missing_fields":["target_outcome"]' in prompt
     assert str(model.messages[0][1].content) == "wihtout stopping"
+
+
+@pytest.mark.asyncio
+async def test_month_and_day_prompt_requires_the_next_future_calendar_date() -> None:
+    output = GoalExtractionPatch(
+        main_goal=None,
+        event_date="2026-07-11",
+        target_outcome=None,
+        secondary_priority=None,
+        missing_fields=[],
+        ambiguous_fields=[],
+        message_status="COMPLETE",
+    )
+    model = StructuredGoalModel(StructuredModelResponse(output=output))
+    graph = build_goal_extraction_graph(model=model)
+
+    result = await graph.ainvoke(
+        {
+            "user_id": uuid4(),
+            "action": "UPDATE_EXISTING_GOAL",
+            "user_text": "11 July",
+            "existing_draft": None,
+            "current_date": "2026-08-03",
+        }
+    )
+
+    patch = result["goal_patch"]
+    assert patch is not None
+    assert patch.event_date is not None
+    assert patch.event_date.isoformat() == "2027-07-11"
+    prompt = str(model.messages[0][0].content)
+    assert "Today's date is: 2026-08-03" in prompt
+    assert "only a month and a day without a year" in prompt
+    assert "always falls in the FUTURE" in prompt
+
+
+@pytest.mark.asyncio
+async def test_explicit_past_event_date_is_safely_returned_for_clarification() -> None:
+    output = GoalExtractionPatch(
+        main_goal=None,
+        event_date="2025-07-11",
+        target_outcome=None,
+        secondary_priority=None,
+        missing_fields=[],
+        ambiguous_fields=[],
+        message_status="COMPLETE",
+    )
+    model = StructuredGoalModel(StructuredModelResponse(output=output))
+    graph = build_goal_extraction_graph(model=model)
+
+    result = await graph.ainvoke(
+        {
+            "user_id": uuid4(),
+            "action": "UPDATE_EXISTING_GOAL",
+            "user_text": "11 July 2025",
+            "existing_draft": None,
+            "current_date": "2026-08-03",
+        }
+    )
+
+    patch = result["goal_patch"]
+    assert patch is not None
+    assert patch.event_date is None
+    assert patch.ambiguous_fields == ["event_date"]
+    assert patch.message_status == "NEEDS_CLARIFICATION"
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_date_remains_null_without_an_unhandled_error() -> None:
+    output = GoalExtractionPatch(
+        main_goal=None,
+        event_date=None,
+        target_outcome=None,
+        secondary_priority=None,
+        missing_fields=[],
+        ambiguous_fields=["event_date"],
+        message_status="NEEDS_CLARIFICATION",
+    )
+    model = StructuredGoalModel(StructuredModelResponse(output=output))
+    graph = build_goal_extraction_graph(model=model)
+
+    result = await graph.ainvoke(
+        {
+            "user_id": uuid4(),
+            "action": "UPDATE_EXISTING_GOAL",
+            "user_text": "sometime in July",
+            "existing_draft": None,
+            "current_date": "2026-08-03",
+        }
+    )
+
+    assert result["outcome"] == "extracted"
+    assert result["goal_patch"] == output
