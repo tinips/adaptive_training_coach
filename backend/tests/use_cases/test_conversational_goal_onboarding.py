@@ -18,7 +18,11 @@ from sqlalchemy.ext.asyncio import (
 from app.config import Settings
 from app.db.base import Base
 from app.domain.enums import OnboardingStep, TrainingGoalStatus
-from app.integrations.llm.models import GoalExtractionOutput
+from app.integrations.llm.models import (
+    GoalExtractionAction,
+    GoalExtractionOutput,
+    GoalExtractionPatch,
+)
 from app.repositories.onboarding import OnboardingRepository
 from app.repositories.profiles import ProfileRepository
 from app.schemas.common import TelegramIdentity
@@ -41,17 +45,20 @@ async def goal_database() -> AsyncIterator[
 @dataclass
 class QueueGoalExtractor:
     results: list[GoalExtractionWorkflowResult]
-    calls: list[tuple[str, GoalExtractionOutput | None]] = field(default_factory=list)
+    calls: list[tuple[GoalExtractionAction, str, GoalExtractionOutput | None]] = field(
+        default_factory=list
+    )
 
     async def extract(
         self,
         *,
         user_id: UUID,
+        action: GoalExtractionAction,
         user_text: str,
         existing_draft: GoalExtractionOutput | None,
     ) -> GoalExtractionWorkflowResult:
         del user_id
-        self.calls.append((user_text, existing_draft))
+        self.calls.append((action, user_text, existing_draft))
         return self.results.pop(0)
 
 
@@ -84,7 +91,7 @@ def extracted(
 ) -> GoalExtractionWorkflowResult:
     return GoalExtractionWorkflowResult(
         outcome="extracted",
-        goal_draft=GoalExtractionOutput.model_validate(
+        goal_patch=GoalExtractionPatch.model_validate(
             {
                 "main_goal": main_goal,
                 "event_date": event_date,
@@ -155,7 +162,7 @@ async def test_raw_goal_is_retained_and_complete_draft_waits_for_confirmation(
         "ambiguous_fields": [],
         "message_status": "COMPLETE",
     }
-    assert extractor.calls == [(raw, None)]
+    assert extractor.calls == [("CREATE_GOAL", raw, None)]
     async with factory() as session:
         assert (
             await ProfileRepository(session).get_training_goal(user_id=result.user_id)
@@ -251,10 +258,12 @@ async def test_multiple_turns_merge_and_explicitly_unknown_date_is_complete(
         "ambiguous_fields": [],
         "message_status": "COMPLETE",
     }
-    assert extractor.calls[1][1] is not None
-    assert extractor.calls[1][1].main_goal == "Complete a marathon"
-    assert extractor.calls[2][1] is not None
-    assert extractor.calls[2][1].target_outcome == "Finish safely"
+    assert extractor.calls[1][0] == "UPDATE_EXISTING_GOAL"
+    assert extractor.calls[1][2] is not None
+    assert extractor.calls[1][2].main_goal == "Complete a marathon"
+    assert extractor.calls[2][0] == "UPDATE_EXISTING_GOAL"
+    assert extractor.calls[2][2] is not None
+    assert extractor.calls[2][2].target_outcome == "Finish safely"
 
 
 @pytest.mark.asyncio
@@ -330,6 +339,104 @@ async def test_secondary_priority_is_optional_and_addition_updates_existing_draf
     assert updated.answers["goal_draft"]["secondary_priority"] == (
         "Continue practising calisthenics"
     )
+
+
+@pytest.mark.asyncio
+async def test_date_and_secondary_priority_patch_preserves_existing_goal_fields(
+    goal_database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
+) -> None:
+    _, factory = goal_database
+    extractor = QueueGoalExtractor(
+        [
+            extracted(
+                main_goal="Complete my first Ironman 70.3",
+                target_outcome="Finish safely",
+                missing_fields=["event_date"],
+                message_status="NEEDS_CLARIFICATION",
+            ),
+            extracted(
+                main_goal=None,
+                event_date="2027-07-11",
+                target_outcome=None,
+                secondary_priority="Maintain muscle",
+            ),
+        ]
+    )
+    onboarding = service(factory, extractor)
+    athlete = identity(6208)
+    await start_goal(onboarding, athlete)
+    await onboarding.handle_text(
+        athlete,
+        "I want to complete my first Ironman 70.3 and finish safely.",
+    )
+
+    updated = await onboarding.handle_text(
+        athlete,
+        "The event is on 11 July 2027 and I also want to maintain muscle.",
+    )
+
+    assert updated.kind == "goal_confirmation"
+    assert updated.answers["goal_draft"] == {
+        "main_goal": "Complete my first Ironman 70.3",
+        "event_date": "2027-07-11",
+        "target_outcome": "Finish safely",
+        "secondary_priority": "Maintain muscle",
+        "missing_fields": [],
+        "ambiguous_fields": [],
+        "message_status": "COMPLETE",
+    }
+    action, latest_message, current_draft = extractor.calls[1]
+    assert action == "UPDATE_EXISTING_GOAL"
+    assert latest_message.startswith("The event is on 11 July 2027")
+    assert current_draft is not None
+    assert current_draft.main_goal == "Complete my first Ironman 70.3"
+    assert current_draft.target_outcome == "Finish safely"
+
+
+@pytest.mark.asyncio
+async def test_explicit_main_goal_correction_overrides_only_that_field(
+    goal_database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
+) -> None:
+    _, factory = goal_database
+    extractor = QueueGoalExtractor(
+        [
+            extracted(
+                main_goal="Complete a marathon",
+                event_date="2027-09-19",
+                target_outcome="Finish safely",
+                secondary_priority="Maintain strength",
+            ),
+            extracted(
+                main_goal="Complete a half marathon",
+                target_outcome=None,
+            ),
+        ]
+    )
+    onboarding = service(factory, extractor)
+    athlete = identity(6209)
+    await start_goal(onboarding, athlete)
+    await onboarding.handle_text(
+        athlete,
+        "I want to complete a marathon on 19 September 2027, finish safely, "
+        "and maintain strength.",
+    )
+    await onboarding.add_to_goal(athlete)
+
+    corrected = await onboarding.handle_text(
+        athlete,
+        "Correction: my main goal is to complete a half marathon.",
+    )
+
+    assert corrected.kind == "goal_confirmation"
+    assert corrected.answers["goal_draft"] == {
+        "main_goal": "Complete a half marathon",
+        "event_date": "2027-09-19",
+        "target_outcome": "Finish safely",
+        "secondary_priority": "Maintain strength",
+        "missing_fields": [],
+        "ambiguous_fields": [],
+        "message_status": "COMPLETE",
+    }
 
 
 @pytest.mark.asyncio

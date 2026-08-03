@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -27,6 +28,7 @@ from app.services.workout_feedback import WorkoutFeedbackService
 from app.workflows.onboarding_goal.graph import create_goal_extractor
 
 TelegramApplication = Application[Any, Any, Any, Any, Any, Any]
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -153,6 +155,13 @@ def main() -> None:
 
     settings = get_settings()
     configure_logging(settings.log_level)
+    if settings.llm_mode == "live":
+        logger.info(
+            "goal_llm_mode=live model=%s",
+            settings.llm_model,
+        )
+    else:
+        logger.info("goal_llm_mode=mock")
     application = create_application(settings)
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 

@@ -7,7 +7,11 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.integrations.llm.models import GoalExtractionOutput
+from app.integrations.llm.models import (
+    GoalExtractionAction,
+    GoalExtractionOutput,
+    GoalExtractionPatch,
+)
 
 GoalExtractionOutcome = Literal[
     "extracted",
@@ -22,7 +26,7 @@ class GoalExtractionWorkflowResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     outcome: GoalExtractionOutcome
-    goal_draft: GoalExtractionOutput | None = None
+    goal_patch: GoalExtractionPatch | None = None
     error_code: str | None = Field(default=None, max_length=80)
     prompt_tokens: int | None = Field(default=None, ge=0)
     completion_tokens: int | None = Field(default=None, ge=0)
@@ -35,7 +39,8 @@ class GoalExtractor(Protocol):
         self,
         *,
         user_id: UUID,
+        action: GoalExtractionAction,
         user_text: str,
         existing_draft: GoalExtractionOutput | None,
     ) -> GoalExtractionWorkflowResult:
-        """Extract and merge one goal answer without writing canonical data."""
+        """Extract a patch from the latest answer without writing canonical data."""

@@ -41,10 +41,14 @@ type GoalMessageStatus = Literal[
     "NEEDS_CLARIFICATION",
     "OFF_TOPIC",
 ]
+type GoalExtractionAction = Literal[
+    "CREATE_GOAL",
+    "UPDATE_EXISTING_GOAL",
+]
 
 
-class GoalExtractionOutput(BaseModel):
-    """Focused structured draft returned by conversational goal extraction."""
+class _GoalExtractionFields(BaseModel):
+    """Shared validation for the persisted draft and model-returned patch."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -73,7 +77,15 @@ class GoalExtractionOutput(BaseModel):
         return list(dict.fromkeys(value))
 
 
-StructuredOutputSchema = type[GoalExtractionOutput]
+class GoalExtractionOutput(_GoalExtractionFields):
+    """Complete accumulated goal draft persisted by the application."""
+
+
+class GoalExtractionPatch(_GoalExtractionFields):
+    """Field patch returned by the model for only the latest user message."""
+
+
+StructuredOutputSchema = type[GoalExtractionPatch]
 
 
 @dataclass(frozen=True, slots=True)

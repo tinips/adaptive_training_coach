@@ -193,6 +193,14 @@ evaluate goal feasibility.
 
 No unconfirmed data is written to `training_goals`.
 
+The extraction graph is invoked with `CREATE_GOAL` when no draft exists and
+`UPDATE_EXISTING_GOAL` otherwise. The current persisted draft is context, while
+the newest user message is the only answer being extracted. The model returns
+a validated patch for the four goal fields plus completeness metadata; it does
+not return a replacement draft. The onboarding service merges that patch
+deterministically. Null semantic fields preserve prior values, explicit non-null
+fields update them, and `OFF_TOPIC` preserves the whole prior draft.
+
 ### After confirmation
 
 `ProfileRepository.upsert_conversational_training_goal` is the one canonical

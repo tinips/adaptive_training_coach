@@ -18,7 +18,12 @@ from app.domain.enums import (
     OnboardingStep,
     UserStatus,
 )
-from app.integrations.llm.models import GoalExtractionOutput, GoalFieldName
+from app.integrations.llm.models import (
+    GoalExtractionAction,
+    GoalExtractionOutput,
+    GoalExtractionPatch,
+    GoalFieldName,
+)
 from app.repositories.llm_usage import LLMUsageRepository
 from app.repositories.onboarding import OnboardingRepository
 from app.repositories.profiles import ProfileRepository
@@ -395,6 +400,7 @@ class OnboardingService:
 
         parse_run_id = str(uuid.uuid4())
         existing_draft: GoalExtractionOutput | None
+        action: GoalExtractionAction
         async with self._session_factory.begin() as session:
             user, onboarding = await self._locked_state(session, identity)
             self._require_active(onboarding)
@@ -413,6 +419,9 @@ class OnboardingService:
             if self._parse_is_in_flight(onboarding):
                 raise OnboardingApplicationError("parse_in_progress")
             existing_draft = self._goal_draft_from_answers(answers)
+            action = (
+                "UPDATE_EXISTING_GOAL" if existing_draft is not None else "CREATE_GOAL"
+            )
             if self._settings.llm_mode == "live":
                 attempts = await LLMUsageRepository(session).count_since(
                     user_id=user_id,
@@ -451,6 +460,7 @@ class OnboardingService:
         try:
             workflow = await self._goal_extractor.extract(
                 user_id=user_id,
+                action=action,
                 user_text=text,
                 existing_draft=existing_draft,
             )
@@ -470,8 +480,8 @@ class OnboardingService:
             elif workflow.outcome == "extracted":
                 usage_status = (
                     LLMUsageStatus.SUCCEEDED
-                    if workflow.goal_draft is not None
-                    and workflow.goal_draft.message_status == "COMPLETE"
+                    if workflow.goal_patch is not None
+                    and workflow.goal_patch.message_status == "COMPLETE"
                     else LLMUsageStatus.CLARIFICATION
                 )
             await LLMUsageRepository(session).update_outcome(
@@ -484,7 +494,7 @@ class OnboardingService:
             answers = self._answers(onboarding)
             answers.pop(_PARSE_IN_FLIGHT_KEY, None)
             repository = OnboardingRepository(session)
-            if workflow.outcome != "extracted" or workflow.goal_draft is None:
+            if workflow.outcome != "extracted" or workflow.goal_patch is None:
                 onboarding = await repository.save_progress(
                     user_id=user.id,
                     current_step=OnboardingStep.GOAL_INTAKE,
@@ -501,8 +511,8 @@ class OnboardingService:
                     error_code=workflow.error_code,
                 )
             try:
-                extracted = GoalExtractionOutput.model_validate(
-                    workflow.goal_draft.model_dump(mode="json")
+                patch = GoalExtractionPatch.model_validate(
+                    workflow.goal_patch.model_dump(mode="json")
                 )
             except ValidationError:
                 onboarding = await repository.save_progress(
@@ -516,7 +526,7 @@ class OnboardingService:
                     kind="fallback",
                     error_code="malformed_structured_output",
                 )
-            if extracted.message_status == "OFF_TOPIC":
+            if patch.message_status == "OFF_TOPIC":
                 self._remove_last_goal_message(answers)
                 onboarding = await repository.save_progress(
                     user_id=user.id,
@@ -525,10 +535,9 @@ class OnboardingService:
                 )
                 return self._result(user, onboarding, kind="goal_off_topic")
 
-            merged = self._merge_goal_draft(
+            merged = self._merge_goal_patch(
                 existing=existing_draft,
-                extracted=extracted,
-                user_text=text,
+                patch=patch,
             )
             self._stage_goal_draft(answers, merged)
             onboarding = await repository.save_progress(
@@ -645,37 +654,26 @@ class OnboardingService:
             answers.pop(_GOAL_MESSAGES_KEY, None)
             answers.pop(_RAW_GOAL_TEXT_KEY, None)
 
-    @classmethod
-    def _merge_goal_draft(
-        cls,
+    @staticmethod
+    def _merge_goal_patch(
         *,
         existing: GoalExtractionOutput | None,
-        extracted: GoalExtractionOutput,
-        user_text: str,
+        patch: GoalExtractionPatch,
     ) -> GoalExtractionOutput:
-        main_goal = extracted.main_goal or (existing.main_goal if existing else None)
-        target_outcome = extracted.target_outcome or (
+        main_goal = patch.main_goal or (existing.main_goal if existing else None)
+        target_outcome = patch.target_outcome or (
             existing.target_outcome if existing else None
         )
-        secondary_priority = extracted.secondary_priority or (
+        secondary_priority = patch.secondary_priority or (
             existing.secondary_priority if existing else None
         )
-        event_date = extracted.event_date
-        if (
-            event_date is None
-            and existing is not None
-            and existing.event_date is not None
-            and not cls._explicit_no_date(user_text)
-        ):
-            event_date = existing.event_date
+        event_date = patch.event_date or (existing.event_date if existing else None)
 
         missing = [
-            field for field in extracted.missing_fields if field != "secondary_priority"
+            field for field in patch.missing_fields if field != "secondary_priority"
         ]
         ambiguous = [
-            field
-            for field in extracted.ambiguous_fields
-            if field != "secondary_priority"
+            field for field in patch.ambiguous_fields if field != "secondary_priority"
         ]
         if main_goal is not None:
             missing = [field for field in missing if field != "main_goal"]
@@ -691,7 +689,7 @@ class OnboardingService:
             secondary_priority=secondary_priority,
             missing_fields=missing,
             ambiguous_fields=ambiguous,
-            message_status=extracted.message_status,
+            message_status=patch.message_status,
         )
 
     @classmethod
@@ -752,22 +750,6 @@ class OnboardingService:
             "prepare for a race",
             "reach a specific running distance",
         }
-
-    @staticmethod
-    def _explicit_no_date(value: str) -> bool:
-        folded = value.casefold()
-        return any(
-            phrase in folded
-            for phrase in (
-                "not yet",
-                "no date",
-                "don't have a date",
-                "do not have a date",
-                "don't have a race date",
-                "do not have a race date",
-                "not applicable",
-            )
-        )
 
     @classmethod
     def _result(

@@ -17,7 +17,11 @@ from app.config import Settings
 from app.domain.enums import OnboardingStep
 from app.integrations.llm.factory import create_goal_extraction_model
 from app.integrations.llm.mock import FakeLLMScenario
-from app.integrations.llm.models import GoalExtractionOutput, StructuredOnboardingModel
+from app.integrations.llm.models import (
+    GoalExtractionAction,
+    GoalExtractionOutput,
+    StructuredOnboardingModel,
+)
 from app.observability.callbacks import build_langchain_run_config
 from app.observability.noop import NoOpAIWorkflowObserver
 from app.observability.protocol import (
@@ -84,6 +88,7 @@ class LangGraphGoalExtractor:
         self,
         *,
         user_id: UUID,
+        action: GoalExtractionAction,
         user_text: str,
         existing_draft: GoalExtractionOutput | None,
     ) -> GoalExtractionWorkflowResult:
@@ -100,6 +105,7 @@ class LangGraphGoalExtractor:
         await self._observe_started(metadata)
         initial_state: GoalExtractionGraphState = {
             "user_id": user_id,
+            "action": action,
             "user_text": user_text,
             "existing_draft": existing_draft,
         }
@@ -117,7 +123,7 @@ class LangGraphGoalExtractor:
             state = cast(GoalExtractionGraphState, raw_state)
             result = GoalExtractionWorkflowResult(
                 outcome=state.get("outcome", "fallback_required"),
-                goal_draft=state.get("goal_draft"),
+                goal_patch=state.get("goal_patch"),
                 error_code=state.get("error_code"),
                 prompt_tokens=state.get("prompt_tokens"),
                 completion_tokens=state.get("completion_tokens"),

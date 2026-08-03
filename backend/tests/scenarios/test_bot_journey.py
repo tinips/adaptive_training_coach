@@ -16,7 +16,11 @@ from app.bot.service import CoachBotApplicationService
 from app.config import Settings
 from app.db.base import Base
 from app.domain.enums import OnboardingStep, UserStatus
-from app.integrations.llm.models import GoalExtractionOutput
+from app.integrations.llm.models import (
+    GoalExtractionAction,
+    GoalExtractionOutput,
+    GoalExtractionPatch,
+)
 from app.repositories.onboarding import OnboardingRepository
 from app.repositories.profiles import ProfileRepository
 from app.repositories.users import UserRepository
@@ -35,10 +39,11 @@ class QueueGoalExtractor:
         self,
         *,
         user_id: UUID,
+        action: GoalExtractionAction,
         user_text: str,
         existing_draft: GoalExtractionOutput | None,
     ) -> GoalExtractionWorkflowResult:
-        del user_id, user_text, existing_draft
+        del user_id, action, user_text, existing_draft
         return self.results.pop(0)
 
 
@@ -55,7 +60,7 @@ def _extracted(
 ) -> GoalExtractionWorkflowResult:
     return GoalExtractionWorkflowResult(
         outcome="extracted",
-        goal_draft=GoalExtractionOutput(
+        goal_patch=GoalExtractionPatch(
             main_goal=main_goal,
             event_date=None,
             target_outcome=target_outcome,

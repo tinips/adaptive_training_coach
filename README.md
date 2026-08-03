@@ -241,7 +241,16 @@ LLM_MODEL=...
 
 Model calls use structured Pydantic output. Safe usage metadata is written to
 `llm_usage`; raw goal text, prompts, profiles, secrets, and OAuth tokens are not
-logged there.
+logged there. Bot startup emits only `goal_llm_mode=mock` or
+`goal_llm_mode=live model=<model-name>` so the active provider path is visible
+without exposing credentials or goal text.
+
+Goal extraction uses `CREATE_GOAL` for the first message and
+`UPDATE_EXISTING_GOAL` once a persisted draft exists. The graph receives the
+current draft and latest message separately. Its structured model result is a
+field patch; application code preserves existing values for null patch fields,
+applies explicit corrections, and ignores every semantic field when the status
+is `OFF_TOPIC`.
 
 ## Database migration
 

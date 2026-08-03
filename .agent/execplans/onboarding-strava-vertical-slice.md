@@ -1208,3 +1208,78 @@ profiles, baselines, feedback, and Strava data are preserved.
   and live local `/health` and `/ready` returned `ok` and `ready`.
 - No live Telegram chat, live LLM call, Strava authorization, or webhook was
   performed or claimed.
+
+## 2026-08-03 conversational-goal LLM patch amendment
+
+### Decision
+
+Runtime inspection found that provider selection is controlled by `LLM_MODE`.
+The first inspection found an unconfigured local environment resolving to the
+documented `mock` default. The runtime was subsequently configured for `live`
+with `deepseek-v4-flash`; bot startup now logs only that safe mode and model
+name, never credentials or goal text.
+
+Goal extraction now distinguishes `CREATE_GOAL` from
+`UPDATE_EXISTING_GOAL`. The persisted draft and newest user message enter the
+focused graph separately. The structured model schema represents a field patch,
+not a replacement goal. The onboarding service deterministically applies
+non-null patch fields, preserves prior values for null fields, and leaves the
+draft unchanged for `OFF_TOPIC`.
+
+### Progress
+
+- [x] Trace Compose settings and the Telegram handler, onboarding service,
+  goal graph, provider factory, live adapter, and `ainvoke` boundary.
+- [x] Add safe startup provider logging.
+- [x] Replace replacement-style model output with a validated goal field patch.
+- [x] Add explicit create/update operations and deterministic patch merging.
+- [x] Add focused provider-selection, current-draft, date/secondary-priority,
+  explicit-correction, and off-topic preservation coverage.
+- [x] Complete final full validation and record the opt-in live evaluation
+  result.
+- [x] Reproduce the Telegram malformed-output fallback against the live model,
+  inspect only a synthetic response, and correct its JSON-shape instructions.
+- [x] Reproduce a repeated clarification for a short typo-containing answer and
+  teach the update prompt to interpret fragments against the draft's current
+  missing or ambiguous field.
+- [x] Remove an over-strict rule that treated explicitly stated qualitative
+  outcomes such as “in a good time” or “in a decent time” as inherently
+  ambiguous even though target outcomes need not be numeric.
+
+### Validation evidence
+
+- Focused provider, graph, onboarding, and retained Telegram journey tests:
+  `14 passed`.
+- Final host suite after the live-output and qualitative-outcome corrections:
+  `257 passed in 47.12s`.
+- `ruff check .`, `ruff format --check .`, `mypy app`, and
+  `git diff --check` passed; Ruff confirmed 134 files formatted and mypy checked
+  105 source files. Ruff could not update one local cache file because of a
+  Windows permission restriction, but analysis completed successfully.
+- `docker compose config --quiet` and `docker compose up -d --build` passed.
+  Migration exited 0, PostgreSQL and API are healthy, `/health` returned `ok`,
+  `/ready` returned `ready`, and the bot is running. Its safe startup diagnostic
+  is `goal_llm_mode=live model=deepseek-v4-flash`.
+- The first real no-Telegram `CREATE_GOAL` evaluation proved that DeepSeek
+  understood the synthetic Ironman goal but nested semantic fields under a
+  `patch` wrapper, causing Pydantic to reject it as malformed. The prompt now
+  requires the seven schema keys at the top level and prohibits wrapper keys.
+- The deployed-image real-model rerun returned an extracted flat patch:
+  `main_goal=complete an Ironman 70.3`, `event_date=2027-07-11`,
+  `secondary_priority=maintain muscle`, and `NEEDS_CLARIFICATION` with
+  `target_outcome` ambiguous because “a good time” is not specific.
+- A real `UPDATE_EXISTING_GOAL` evaluation returned only the date and secondary
+  priority patch while leaving `main_goal` and `target_outcome` null, proving
+  incremental live behavior through the compiled graph and live `ainvoke`.
+- A deployed-image live evaluation of the exact synthetic fragment
+  “wihtout stopping” against a draft missing target outcome and event date
+  returned `target_outcome=Complete without stopping`, preserved all other
+  fields with null patch values, and left only `event_date` missing. The bot
+  therefore advances to the date clarification rather than repeating the
+  target-outcome question.
+- A final deployed-image live evaluation of the complete typo-containing
+  Ironman message returned `main_goal=Complete an Ironman 70.3`,
+  `event_date=2027-07-11`, `target_outcome=Finish in a good time`,
+  `secondary_priority=Maintain current muscle`, no missing or ambiguous fields,
+  and `COMPLETE`. A separate live update accepted “finish in a decent time” as
+  a valid qualitative target outcome.
