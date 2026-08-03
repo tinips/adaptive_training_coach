@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import Awaitable, Callable
-from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
-from typing import Annotated, Literal, TypedDict, cast
+from typing import Annotated, Any, Literal, TypedDict, cast
 from uuid import UUID
 
 from langchain_core.messages import (
@@ -27,8 +27,12 @@ from langgraph.graph.message import add_messages
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import ToolNode, ToolRuntime, tools_condition
 from langgraph.types import Command
+from psycopg import AsyncConnection
+from psycopg.rows import dict_row
+from psycopg_pool import AsyncConnectionPool
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
+from app.bot import messages as bot_messages
 from app.bot.rendering import TelegramButtonSpec, TelegramResponse
 from app.integrations.llm.models import StructuredOnboardingModel
 from app.schemas.onboarding_goal import OnboardingUpdateHandler
@@ -38,6 +42,48 @@ TelegramInputDispatcher = Callable[
     [TelegramEventType, str], Awaitable[TelegramResponse]
 ]
 TelegramPresentationLoader = Callable[[], Awaitable[TelegramResponse]]
+
+_CHECKPOINT_POOL_MIN_SIZE = 1
+_CHECKPOINT_POOL_MAX_SIZE = 10
+_LLM_CONTEXT_MESSAGE_LIMIT = 3
+_STRICT_CALLBACK_PATTERN = re.compile(r"[A-Za-z0-9:_-]{1,128}")
+_STRICT_NUMBER_PATTERN = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+_FAST_COMMANDS = frozenset(
+    {
+        "/start",
+        "/help",
+        "/profile",
+        "/baseline",
+        "/add_workout",
+        "/strava",
+        "/cancel",
+        "/delete_me",
+    }
+)
+_GENDER_CHOICES = frozenset({"MALE", "FEMALE", "OTHER_UNSPECIFIED"})
+_NUMERIC_PROMPT_HINTS = (
+    "what year were you born",
+    "birth year",
+    "how old are you",
+    "your age",
+    "current weight",
+    "weight in kilograms",
+    "new weight",
+    "height in centimeters",
+    "your height",
+    "new height",
+)
+_GENDER_PROMPT_HINTS = (
+    "competitive category",
+    "biological sex",
+)
+_MANDATORY_NUMERIC_PROMPTS = frozenset(
+    {
+        bot_messages.PROFILE_BIRTH_YEAR_INTAKE.casefold(),
+        bot_messages.PROFILE_WEIGHT_INTAKE.casefold(),
+        bot_messages.PROFILE_HEIGHT_INTAKE.casefold(),
+    }
+)
 
 
 class TelegramButtonPayload(TypedDict):
@@ -56,6 +102,7 @@ class TelegramAgentState(TypedDict, total=False):
     response_button_rows: list[list[TelegramButtonPayload]]
     edit_existing: bool
     clear_agent_thread: bool
+    fast_track: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,6 +230,11 @@ async def update_onboarding_data_from_agent(
         else None
     )
     rows = _serialize_keyboard(presentation) if presentation is not None else []
+    response_text = (
+        bot_messages.onboarding_fields_updated(tuple(updated.updated_fields))
+        if runtime.state.get("fast_track", False)
+        else None
+    )
     content = json.dumps(
         {
             "updated_fields": updated.updated_fields,
@@ -200,6 +252,7 @@ async def update_onboarding_data_from_agent(
                     tool_call_id=runtime.tool_call_id or "update-onboarding-data",
                 )
             ],
+            "response_text": response_text,
             "response_button_rows": rows,
             "edit_existing": False,
             "clear_agent_thread": False,
@@ -244,27 +297,21 @@ def _serialize_keyboard(
 def _system_prompt() -> SystemMessage:
     return SystemMessage(
         content=(
-            "You are the global Adaptive Endurance Coach orchestrator. Every current "
-            "HumanMessage is a Telegram event and must be handled through exactly "
-            "one tool call. Never call both tools for the same HumanMessage. "
-            "The latest HumanMessage has absolute priority over earlier questions "
-            "and topics in the conversation. Any explicit request to change, "
-            "update, correct, replace, or set a supported athlete field MUST call "
-            "update_onboarding_data, even while another onboarding question is "
-            "active and even after onboarding is complete. Never send such a "
-            "request to dispatch_telegram_input. For example, 'change my goal to "
-            "a marathon' means update_onboarding_data(main_goal='marathon'), and "
-            "'actually set my weight to 82 kg' means "
-            "update_onboarding_data(weight_kg=82). "
-            "For ordinary answers, commands, and callback values, call "
-            "dispatch_telegram_input exactly once, preserving both the event type "
-            "and content byte-for-byte. Use update_onboarding_data only when the "
-            "athlete explicitly corrects previously supplied onboarding data. "
-            "Never reject a callback yourself and never invent callback semantics. "
-            "After a tool result, respond naturally and concisely; application "
-            "presentation metadata in the tool result remains authoritative. After "
-            "an onboarding correction, confirm the saved fields and continue with "
-            "the current_prompt from the tool result."
+            "You are the Adaptive Endurance Coach orchestrator. Your sole job is "
+            "to route the latest Telegram event into EXACTLY ONE tool call based "
+            "on user intent.\n\n"
+            "CRITICAL RULES:\n"
+            "1. DATA CORRECTIONS: If the user explicitly wants to change, update, "
+            "correct, or replace an athlete field (goal, weight, age, height, "
+            "event_date), you MUST call 'update_onboarding_data'. This rule "
+            "overrides any active question.\n"
+            "2. ORDINARY INPUTS: For normal answers, buttons clicks, or commands, "
+            "call 'dispatch_telegram_input' preserving the raw content "
+            "byte-for-byte.\n"
+            "3. NO DUPLICATES: Never call both tools for a single message.\n\n"
+            "After a tool executes, confirm the changes briefly and naturally, "
+            "then prompt the user using the 'current_prompt' provided in the "
+            "tool's result."
         )
     )
 
@@ -281,6 +328,198 @@ def _enforce_single_tool_call(response: AIMessage) -> AIMessage:
     )
     selected = update_call or calls[0]
     return response.model_copy(update={"tool_calls": [selected]})
+
+
+def _provider_message_context(
+    messages: list[BaseMessage],
+    *,
+    limit: int = _LLM_CONTEXT_MESSAGE_LIMIT,
+) -> list[BaseMessage]:
+    """Return a bounded provider window without orphaning active tool results."""
+
+    if limit < 1:
+        return []
+    if messages and isinstance(messages[-1], ToolMessage):
+        tool_request_index: int | None = None
+        for index in range(len(messages) - 2, -1, -1):
+            candidate = messages[index]
+            if isinstance(candidate, AIMessage) and candidate.tool_calls:
+                tool_request_index = index
+                break
+        if tool_request_index is not None:
+            active_exchange = messages[tool_request_index:]
+            remaining = max(0, limit - len(active_exchange))
+            preceding = [
+                message
+                for message in messages[:tool_request_index]
+                if not isinstance(message, ToolMessage)
+                and not (isinstance(message, AIMessage) and bool(message.tool_calls))
+            ]
+            prior_context = preceding[-remaining:] if remaining else []
+            return [*prior_context, *active_exchange]
+    plain_messages = [
+        message
+        for message in messages
+        if not isinstance(message, ToolMessage)
+        and not (isinstance(message, AIMessage) and bool(message.tool_calls))
+    ]
+    return plain_messages[-limit:]
+
+
+def _dispatch_tool_call(
+    *,
+    event_type: TelegramEventType,
+    content: str,
+    call_id: str,
+) -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "dispatch_telegram_input",
+                "args": {"event_type": event_type, "content": content},
+                "id": call_id,
+                "type": "tool_call",
+            }
+        ],
+    )
+
+
+def _update_tool_call(
+    *,
+    payload: dict[str, JsonValue],
+    call_id: str,
+) -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "update_onboarding_data",
+                "args": payload,
+                "id": call_id,
+                "type": "tool_call",
+            }
+        ],
+    )
+
+
+def _previous_presentation(messages: list[BaseMessage]) -> str:
+    """Return the last bot presentation without exposing it outside the graph."""
+
+    for message in reversed(messages[:-1]):
+        if isinstance(message, ToolMessage) and isinstance(message.content, str):
+            try:
+                payload = json.loads(message.content)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                response_text = payload.get("response_text")
+                if isinstance(response_text, str) and response_text.strip():
+                    return response_text
+        if isinstance(message, AIMessage) and isinstance(message.content, str):
+            content = message.content.strip()
+            if content:
+                return content
+    return ""
+
+
+def _numeric_update_payload(
+    *,
+    previous: str,
+    content: str,
+) -> dict[str, JsonValue] | None:
+    """Extract one validated field from a deterministic clarification answer."""
+
+    prompt = previous.casefold()
+    value = float(content)
+    if "weight" in prompt and 40 <= value <= 200:
+        return {"weight_kg": value}
+    if "height" in prompt and value.is_integer() and 120 <= value <= 230:
+        return {"height_cm": int(value)}
+    if (
+        ("birth year" in prompt or "year were you born" in prompt)
+        and value.is_integer()
+        and 1940 <= value <= 2008
+    ):
+        return {"birth_year": int(value)}
+    if (
+        ("your age" in prompt or "how old are you" in prompt)
+        and value.is_integer()
+        and 16 <= value <= 100
+    ):
+        return {"age": int(value)}
+    return None
+
+
+def _fast_track_call(state: TelegramAgentState) -> AIMessage | None:
+    """Build a deterministic dispatch call for strict, context-safe inputs."""
+
+    messages = state.get("messages", [])
+    if not messages or not isinstance(messages[-1], HumanMessage):
+        return None
+    current = messages[-1]
+    if not isinstance(current.content, str):
+        return None
+    content = current.content.strip()
+    raw_event_type = current.additional_kwargs.get("telegram_event_type", "text")
+    event_type: TelegramEventType = (
+        "callback" if raw_event_type == "callback" else "text"
+    )
+    call_id = f"fast-dispatch-{len(messages)}"
+    normalized = content.upper().replace(" ", "_")
+
+    if event_type == "callback" and normalized in _GENDER_CHOICES:
+        return _dispatch_tool_call(
+            event_type="callback",
+            content=f"ob:v1:profile:gender:{normalized}",
+            call_id=call_id,
+        )
+    if (
+        event_type == "callback"
+        and len(content.encode("utf-8")) <= 64
+        and _STRICT_CALLBACK_PATTERN.fullmatch(content) is not None
+    ):
+        return _dispatch_tool_call(
+            event_type="callback",
+            content=content,
+            call_id=call_id,
+        )
+    if event_type == "text" and content.casefold() in _FAST_COMMANDS:
+        return _dispatch_tool_call(
+            event_type="text",
+            content=content,
+            call_id=call_id,
+        )
+
+    previous_presentation = _previous_presentation(messages)
+    previous = previous_presentation.casefold()
+    if normalized in _GENDER_CHOICES and any(
+        hint in previous for hint in _GENDER_PROMPT_HINTS
+    ):
+        return _dispatch_tool_call(
+            event_type="callback",
+            content=f"ob:v1:profile:gender:{normalized}",
+            call_id=call_id,
+        )
+    if _STRICT_NUMBER_PATTERN.fullmatch(content) is not None and any(
+        hint in previous for hint in _NUMERIC_PROMPT_HINTS
+    ):
+        if previous.strip() not in _MANDATORY_NUMERIC_PROMPTS:
+            payload = _numeric_update_payload(
+                previous=previous_presentation,
+                content=content,
+            )
+            if payload is not None:
+                return _update_tool_call(
+                    payload=payload,
+                    call_id=f"fast-update-{len(messages)}",
+                )
+        return _dispatch_tool_call(
+            event_type="text",
+            content=content,
+            call_id=call_id,
+        )
+    return None
 
 
 CompiledTelegramGraph = CompiledStateGraph[
@@ -304,14 +543,31 @@ def _build_graph(
             "response_text": None,
             "response_button_rows": [],
             "edit_existing": False,
+            "fast_track": False,
         }
+
+    async def fast_router(state: TelegramAgentState) -> TelegramAgentState:
+        call = _fast_track_call(state)
+        if call is None:
+            return {"fast_track": False}
+        return {"messages": [call], "fast_track": True}
+
+    def route_after_fast_router(
+        state: TelegramAgentState,
+    ) -> Literal["tools", "agent"]:
+        return "tools" if state.get("fast_track", False) else "agent"
+
+    def route_after_tools(
+        state: TelegramAgentState,
+    ) -> Literal["agent", "__end__"]:
+        return "__end__" if state.get("fast_track", False) else "agent"
 
     async def agent(
         state: TelegramAgentState,
         config: RunnableConfig,
     ) -> TelegramAgentState:
         response = await tool_model.ainvoke(
-            [_system_prompt(), *state["messages"]],
+            [_system_prompt(), *_provider_message_context(state["messages"])],
             config=config,
         )
         return {"messages": [_enforce_single_tool_call(response)]}
@@ -323,16 +579,26 @@ def _build_graph(
         TelegramAgentState,
     ] = StateGraph(TelegramAgentState, context_schema=TelegramAgentContext)
     builder.add_node("prepare", RunnableLambda(prepare))
+    builder.add_node("fast_router", RunnableLambda(fast_router))
     builder.add_node("agent", RunnableLambda(agent))
     builder.add_node("tools", ToolNode(tools, handle_tool_errors=False))
     builder.add_edge(START, "prepare")
-    builder.add_edge("prepare", "agent")
+    builder.add_edge("prepare", "fast_router")
+    builder.add_conditional_edges(
+        "fast_router",
+        route_after_fast_router,
+        {"tools": "tools", "agent": "agent"},
+    )
     builder.add_conditional_edges(
         "agent",
         tools_condition,
         {"tools": "tools", "__end__": END},
     )
-    builder.add_edge("tools", "agent")
+    builder.add_conditional_edges(
+        "tools",
+        route_after_tools,
+        {"agent": "agent", "__end__": END},
+    )
     return builder.compile(
         checkpointer=checkpointer,
         name="telegram_global_orchestrator",
@@ -351,8 +617,8 @@ class TelegramAgentWorkspace:
         self._model = model
         self._postgres_dsn = postgres_dsn
         self._graph: CompiledTelegramGraph | None = None
-        self._postgres_context: (
-            AbstractAsyncContextManager[AsyncPostgresSaver] | None
+        self._postgres_pool: (
+            AsyncConnectionPool[AsyncConnection[dict[str, Any]]] | None
         ) = None
         self._checkpointer: BaseCheckpointSaver[str] | None = None
         self._start_lock = asyncio.Lock()
@@ -360,18 +626,41 @@ class TelegramAgentWorkspace:
     async def start(self) -> None:
         """Open and migrate the native checkpointer once per bot process."""
 
+        if self._graph is not None:
+            return
+        await self._start_once()
+
+    async def _start_once(self) -> None:
+        """Serialize the sole initialization without taxing steady-state calls."""
+
         async with self._start_lock:
             if self._graph is not None:
                 return
             if self._postgres_dsn is None:
                 checkpointer: BaseCheckpointSaver[str] = InMemorySaver()
             else:
-                postgres_context = AsyncPostgresSaver.from_conn_string(
-                    self._postgres_dsn
+                postgres_pool: AsyncConnectionPool[AsyncConnection[dict[str, Any]]] = (
+                    AsyncConnectionPool(
+                        conninfo=self._postgres_dsn,
+                        kwargs={
+                            "autocommit": True,
+                            "prepare_threshold": 0,
+                            "row_factory": dict_row,
+                        },
+                        min_size=_CHECKPOINT_POOL_MIN_SIZE,
+                        max_size=_CHECKPOINT_POOL_MAX_SIZE,
+                        open=False,
+                        name="telegram-agent-checkpoints",
+                    )
                 )
-                postgres = await postgres_context.__aenter__()
-                await postgres.setup()
-                self._postgres_context = postgres_context
+                try:
+                    await postgres_pool.open(wait=True)
+                    postgres = AsyncPostgresSaver(postgres_pool)
+                    await postgres.setup()
+                except Exception:
+                    await postgres_pool.close()
+                    raise
+                self._postgres_pool = postgres_pool
                 checkpointer = postgres
             self._checkpointer = checkpointer
             self._graph = _build_graph(model=self._model, checkpointer=checkpointer)
@@ -393,6 +682,7 @@ class TelegramAgentWorkspace:
             {"messages": [message]},
             config={"configurable": {"thread_id": thread_id}},
             context=context,
+            durability="exit",
         )
         state = cast(TelegramAgentState, raw)
         response_text = state.get("response_text") or _last_ai_text(state)
@@ -423,12 +713,12 @@ class TelegramAgentWorkspace:
             await checkpointer.adelete_thread(thread_id)
 
     async def aclose(self) -> None:
-        context = self._postgres_context
-        self._postgres_context = None
+        postgres_pool = self._postgres_pool
+        self._postgres_pool = None
         self._graph = None
         self._checkpointer = None
-        if context is not None:
-            await context.__aexit__(None, None, None)
+        if postgres_pool is not None:
+            await postgres_pool.close()
 
 
 def _last_ai_text(state: TelegramAgentState) -> str:

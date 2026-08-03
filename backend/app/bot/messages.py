@@ -274,11 +274,37 @@ ONBOARDING_MODIFICATION_FALLBACK = (
     "to change."
 )
 
+_ONBOARDING_FIELD_LABELS = {
+    "main_goal": "goal",
+    "target_outcome": "target outcome",
+    "event_date": "event date",
+    "age": "age",
+    "birth_year": "birth year",
+    "gender": "competitive category",
+    "weight_kg": "weight",
+    "height_cm": "height",
+}
+
 
 def onboarding_modification_response(confirmation: str | None) -> str:
     """Safely render the model's concise post-tool confirmation."""
 
     return escape(confirmation or ONBOARDING_MODIFICATION_FALLBACK)
+
+
+def onboarding_fields_updated(field_names: Sequence[str]) -> str:
+    """Confirm a deterministic sparse update without echoing personal values."""
+
+    labels = [
+        _ONBOARDING_FIELD_LABELS[field]
+        for field in field_names
+        if field in _ONBOARDING_FIELD_LABELS
+    ]
+    if not labels:
+        return "Your athlete data has been updated."
+    if len(labels) == 1:
+        return f"Your {labels[0]} has been updated."
+    return f"Your {', '.join(labels[:-1])} and {labels[-1]} have been updated."
 
 
 PROFILE_BIRTH_YEAR_INTAKE = (

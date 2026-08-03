@@ -1605,3 +1605,88 @@ generic dispatch, and includes concrete goal and weight routing examples. A
 read-only replay against the affected persistent history selected only
 `update_onboarding_data(main_goal="marathon")`. Focused graph tests (`11 passed`),
 Ruff, and mypy passed before the bot image was rebuilt and restarted.
+
+## 2026-08-03 global-agent latency audit
+
+The compiled global graph was already process-scoped and initialized from the
+Telegram application's `post_init`, but steady-state `invoke` still entered the
+startup lock. More importantly, `AsyncPostgresSaver.from_conn_string()` owned a
+single persistent connection, serializing concurrent checkpoint work, and the
+default durability wrote checkpoints after intermediate graph nodes.
+
+- [x] Preserve exactly-once compilation and add a lock-free steady-state startup
+  check, retaining the lock only for first initialization.
+- [x] Replace the single checkpointer connection with one process-owned
+  `AsyncConnectionPool` (`min_size=1`, `max_size=10`) configured for autocommit,
+  disabled prepared statements, and dictionary rows.
+- [x] Add a pre-LLM deterministic router for known commands, strict callback
+  payloads, gender values, and contextual numeric birth-year/age/weight/height
+  answers.
+- [x] Route fast-track tool results directly to graph exit instead of returning
+  to the agent node for a second model call.
+- [x] Use `durability="exit"` so each complete Telegram turn writes one final
+  checkpoint instead of persisting every internal node transition.
+- [x] Add regressions that raise immediately if the model is reached by numeric
+  or callback fast paths and assert the workspace compiler runs exactly once.
+
+### Performance evidence
+
+Against the real local PostgreSQL instance, six strict-callback turns with the
+new router but default per-node durability measured a warm median of `78.62 ms`.
+The same graph and pool with exit-only durability measured a warm median of
+`16.77 ms` (`13.58-19.42 ms` for the five warm samples), with zero LLM calls.
+These figures measure graph routing plus PostgreSQL checkpointing and an
+in-process no-op dispatcher; Telegram network latency and business SQL are not
+included.
+
+Final repository validation passed with `270 passed, 3 opt-in live tests
+skipped`; Ruff confirmed 140 formatted files and `mypy app` checked 107 source
+files without errors. After rebuilding and restarting the bot, the production
+image measured a `25.93 ms` warm median and `32.57 ms` warm maximum across five
+strict-callback turns. A repeated startup call retained the same compiled graph
+object, and pool statistics showed the persistent checkpoint connection
+available for reuse.
+
+### Numeric clarification correction
+
+The initial numeric fast path treated all context-matched values as ordinary
+intake dispatches. For a completed athlete, `change my height` produced a
+clarification in the global history, but dispatching the follow-up `170` entered
+the nested stateless modification workflow with no prior question and lost the
+field association. The checkpoint was intact; context was dropped at the
+workflow boundary.
+
+- [x] Distinguish exact mandatory birth-year, weight, and height intake prompts
+  from post-onboarding clarification prompts.
+- [x] Preserve intake dispatch for mandatory onboarding transitions.
+- [x] Convert validated clarification answers directly into sparse update calls
+  such as `update_onboarding_data(height_cm=170)`.
+- [x] Return a centralized deterministic confirmation without echoing personal
+  values or making another model request.
+- [x] Add a two-turn regression that permits one clarification model call and
+  fails if the numeric follow-up reaches the model or generic dispatcher.
+- [x] Replay the affected persisted history read-only and verify the router now
+  selects only the typed height update call.
+- [x] Final validation: `271 passed, 3 opt-in live tests skipped`; Ruff and mypy
+  passed. The rebuilt production bot started successfully, and the deployed
+  image reproduced the typed `height_cm=170` route from the saved history.
+
+## 2026-08-03 bounded provider context
+
+Until the planner supplies structured athlete and training context, the global
+provider receives at most the latest three safe conversation messages. Full
+graph history remains checkpointed for now, but it is no longer sent wholesale
+to DeepSeek. Historical tool requests/results are filtered from ordinary model
+turns. When the agent is responding to a just-completed tool, the current human
+request, assistant tool call, and matching tool result are retained as one valid
+three-message unit so provider message-order requirements are preserved.
+
+- [x] Add a reusable three-message provider context builder.
+- [x] Preserve active tool-call/result adjacency and remove orphaned historical
+  tool messages.
+- [x] Use the bounded window only at the model boundary; deterministic routing
+  and durable checkpoint state remain unchanged.
+- [x] Add regression coverage for long plain history and active tool exchanges.
+- [x] Final validation: `273 passed, 3 opt-in live tests skipped`; Ruff and mypy
+  passed. The deployed image reports a three-message provider window while the
+  saved two-turn height case still routes to `height_cm=170`.

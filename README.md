@@ -129,9 +129,23 @@ The project is a modular monolith with two processes:
 
 Both use the same application-service and repository boundaries. PostgreSQL is
 the source of truth. The global Telegram graph uses native
-`AsyncPostgresSaver` checkpoints keyed by a stable Telegram thread ID; service
-callables remain invocation context and are never serialized. Account deletion
-also removes the corresponding agent thread.
+`AsyncPostgresSaver` checkpoints keyed by a stable Telegram thread ID and backed
+by one process-owned `AsyncConnectionPool`. The graph is compiled once during
+bot startup and reused for every update. Strict callbacks, known commands, and
+contextual numeric profile answers take a deterministic graph branch that skips
+the LLM and writes one final checkpoint at graph exit. Exact mandatory-intake
+prompts dispatch to the onboarding transition service; numeric answers to
+post-onboarding clarification prompts generate typed sparse-update tool calls
+instead, preserving conversational context without another model request.
+Service callables remain invocation context and are never serialized. Account
+deletion also removes the corresponding agent thread.
+
+The PostgreSQL checkpoint currently retains the full graph history, but the
+provider context is bounded to the latest three safe conversation messages.
+Historical tool traffic is omitted, while an active assistant tool request and
+its matching `ToolMessage` are retained together. Future planner context will be
+injected separately as structured athlete data rather than expanding the chat
+window.
 
 ```text
 Telegram events ---- persistent global LangGraph ---- application tools
