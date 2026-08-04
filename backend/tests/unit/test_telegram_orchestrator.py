@@ -18,6 +18,7 @@ from app.workflows.telegram_orchestrator.workspace import (
     TelegramAgentWorkspace,
     _build_graph,
     _provider_message_context,
+    _system_prompt,
 )
 
 
@@ -144,6 +145,26 @@ def test_provider_context_preserves_active_tool_request_and_result() -> None:
     context = _provider_message_context(history)
 
     assert context == [current_request, tool_request, tool_result]
+
+
+def test_telegram_orchestrator_prompt_preserves_correction_routing_contract() -> None:
+    assert str(_system_prompt().content) == (
+        "You are the Adaptive Endurance Coach orchestrator. Your sole job is "
+        "to route the latest Telegram event into EXACTLY ONE tool call based "
+        "on user intent.\n\n"
+        "CRITICAL RULES:\n"
+        "1. DATA CORRECTIONS: If the user explicitly wants to change, update, "
+        "correct, or replace an athlete field (goal, weight, age, height, "
+        "event_date), you MUST call 'update_onboarding_data'. This rule "
+        "overrides any active question.\n"
+        "2. ORDINARY INPUTS: For normal answers, buttons clicks, or commands, "
+        "call 'dispatch_telegram_input' preserving the raw content "
+        "byte-for-byte.\n"
+        "3. NO DUPLICATES: Never call both tools for a single message.\n\n"
+        "After a tool executes, confirm the changes briefly and naturally, "
+        "then prompt the user using the 'current_prompt' provided in the "
+        "tool's result."
+    )
 
 
 @pytest.mark.asyncio
@@ -299,6 +320,40 @@ async def test_numeric_profile_answer_bypasses_the_model() -> None:
 
     assert events == [("text", "/start"), ("text", "73.5")]
     assert response.text == messages.PROFILE_HEIGHT_INTAKE
+    assert model.invocations == 0
+
+
+@pytest.mark.asyncio
+async def test_active_onboarding_routes_goal_text_to_the_dispatcher() -> None:
+    events: list[tuple[str, str]] = []
+    model = ForbiddenInvocationModel()
+
+    async def dispatch(event_type: str, content: str) -> TelegramResponse:
+        events.append((event_type, content))
+        return TelegramResponse("goal intake handled")
+
+    workspace = TelegramAgentWorkspace(model=model)
+    try:
+        response = await workspace.invoke(
+            thread_id="telegram:active-onboarding",
+            message=HumanMessage(
+                content="I want to complete an Ironman 70.3 next July",
+                additional_kwargs={"telegram_event_type": "text"},
+            ),
+            context=TelegramAgentContext(
+                user_id=uuid4(),
+                dispatcher=dispatch,  # type: ignore[arg-type]
+                onboarding_updater=AsyncMock(),
+                onboarding_active=True,
+            ),
+        )
+    finally:
+        await workspace.aclose()
+
+    assert events == [
+        ("text", "I want to complete an Ironman 70.3 next July"),
+    ]
+    assert response.text == "goal intake handled"
     assert model.invocations == 0
 
 

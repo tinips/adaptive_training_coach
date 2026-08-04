@@ -25,8 +25,15 @@ from app.schemas.onboarding_goal import UpdatedOnboardingData
 from app.workflows.onboarding_goal.graph import build_goal_extraction_graph
 from app.workflows.onboarding_goal.nodes import (
     UpdateOnboardingSchema,
+    build_goal_messages,
     build_onboarding_modification_messages,
     update_onboarding_data,
+)
+from app.workflows.prompts.onboarding import (
+    GOAL_EXTRACTION_CONTRACT,
+    GOAL_EXTRACTION_CONTRACT_VERSION,
+    explicit_onboarding_change_tool_policy,
+    future_event_date_policy,
 )
 
 
@@ -103,6 +110,98 @@ def test_update_onboarding_schema_is_sparse_described_and_runtime_hidden() -> No
     }
     assert "required" not in schema
     assert all(properties[field].get("description") for field in properties)
+    assert properties["event_date"]["description"] == (
+        "The athlete's explicit event date as an ISO calendar date in "
+        "YYYY-MM-DD format. Resolve a month and day without a year to the "
+        "next future occurrence relative to today's date."
+    )
+
+
+def test_goal_extraction_prompt_uses_versioned_static_contract() -> None:
+    messages = build_goal_messages(
+        action="UPDATE_EXISTING_GOAL",
+        user_text="without stopping",
+        existing_draft=None,
+        current_date="2026-08-03",
+    )
+
+    assert GOAL_EXTRACTION_CONTRACT_VERSION == "1"
+    assert "Today's date is" not in GOAL_EXTRACTION_CONTRACT
+    assert "Current persisted draft" not in GOAL_EXTRACTION_CONTRACT
+    assert str(messages[0].content) == (
+        f"{GOAL_EXTRACTION_CONTRACT}Today's date is: 2026-08-03. "
+        "Operation: UPDATE_EXISTING_GOAL. Current persisted draft: null"
+    )
+    assert str(messages[1].content) == "without stopping"
+
+
+def test_goal_extraction_contract_keeps_json_fields_and_all_statuses() -> None:
+    for required_fragment in (
+        "Return exactly one flat JSON object matching the requested schema and no "
+        "prose.",
+        "main_goal, event_date, target_outcome, secondary_priority, "
+        "missing_fields, ambiguous_fields, and message_status.",
+        "Use COMPLETE only when main_goal and target_outcome are known",
+        "Use NEEDS_CLARIFICATION otherwise.",
+        "Use OFF_TOPIC when the answer is unrelated:",
+    ):
+        assert required_fragment in GOAL_EXTRACTION_CONTRACT
+
+
+def test_future_event_date_policy_preserves_each_legacy_consumer_wording() -> None:
+    assert future_event_date_policy("goal_extraction") == (
+        "Use an event_date only for a complete, unambiguous calendar date; "
+        "never invent a day for a month-only or otherwise ambiguous date. "
+        "Training goals are inherently future events. If the athlete provides a "
+        "calendar date containing only a month and a day without a year, calculate "
+        "the correct calendar year such that the resulting event_date always falls "
+        "in the FUTURE relative to today's date. If the athlete explicitly supplies "
+        "a year that makes the date past, return event_date as null and mark "
+        "event_date ambiguous instead of changing the explicit year. "
+    )
+    assert future_event_date_policy("onboarding_modification") == (
+        "Training events are future events. For an explicit month and day without "
+        "a year, set event_date to the next occurrence strictly after today and "
+        "send it as YYYY-MM-DD. If a supplied date is ambiguous or explicitly in "
+        "the past, ask for clarification and do not send event_date. "
+    )
+
+
+def test_explicit_onboarding_change_policy_preserves_legacy_tool_wording() -> None:
+    assert explicit_onboarding_change_tool_policy(
+        "telegram_orchestrator",
+        tool_name="update_onboarding_data",
+        supported_fields="goal, weight, age, height, event_date",
+    ) == (
+        "1. DATA CORRECTIONS: If the user explicitly wants to change, update, "
+        "correct, or replace an athlete field (goal, weight, age, height, "
+        "event_date), you MUST call 'update_onboarding_data'. This rule overrides "
+        "any active question.\n"
+    )
+    assert explicit_onboarding_change_tool_policy(
+        "onboarding_modification",
+        tool_name="update_onboarding_data",
+        supported_fields=(
+            "main goal, target outcome, event date, age, birth year, gender, "
+            "weight, and height"
+        ),
+    ) == (
+        "You manage modifications to an athlete's completed onboarding data. The "
+        "supported fields are main goal, target outcome, event date, age, birth "
+        "year, gender, weight, and height. Call update_onboarding_data once with "
+        "every supported value explicitly supplied in the latest request, even when "
+        "fields belong to different records. Do not call the tool for an incomplete "
+        "request such as 'change my goal'; ask a short clarifying question instead. "
+        "A main goal must name a concrete race, distance, discipline, or measurable "
+        "athletic objective. Vague phrases such as 'something fast', 'a race', or "
+        "'get fitter' are not valid main goals; ask for a concrete race or distance. "
+        "Treat the athlete's newest message as authoritative. If they abandon or "
+        "replace a pending request, follow the new request and do not carry "
+        "abandoned values into the tool call. Preserve concrete main-goal wording "
+        "without embellishment: for example, use 'Ironman', '5k race', or "
+        "'Barcelona Marathon' when that is what the athlete asks for. Never infer "
+        "demographic values. "
+    )
 
 
 @pytest.mark.asyncio
@@ -173,6 +272,34 @@ async def test_compiled_goal_graph_rejects_malformed_structured_result() -> None
 
     assert result["outcome"] == "fallback_required"
     assert result["error_code"] == "malformed_structured_output"
+
+
+@pytest.mark.asyncio
+async def test_compiled_goal_graph_preserves_off_topic_structured_result() -> None:
+    output = GoalExtractionPatch(
+        main_goal=None,
+        event_date=None,
+        target_outcome=None,
+        secondary_priority=None,
+        missing_fields=[],
+        ambiguous_fields=[],
+        message_status="OFF_TOPIC",
+    )
+    model = StructuredGoalModel(StructuredModelResponse(output=output))
+    graph = build_goal_extraction_graph(model=model)
+
+    result = await graph.ainvoke(
+        {
+            "user_id": uuid4(),
+            "action": "CREATE_GOAL",
+            "user_text": "What shoes should I buy?",
+            "existing_draft": None,
+            "current_date": "2026-08-03",
+        }
+    )
+
+    assert result["outcome"] == "extracted"
+    assert result["goal_patch"] == output
 
 
 @pytest.mark.asyncio

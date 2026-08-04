@@ -8,6 +8,8 @@ from uuid import UUID
 
 import pytest
 import pytest_asyncio
+from langchain_core.messages import HumanMessage
+from langchain_core.runnables import RunnableLambda
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.bot import messages
@@ -16,6 +18,7 @@ from app.bot.service import CoachBotApplicationService
 from app.config import Settings
 from app.db.base import Base
 from app.domain.enums import AthleteGender, OnboardingStatus, OnboardingStep, UserStatus
+from app.integrations.llm.mock import DeterministicFakeOnboardingModel
 from app.integrations.llm.models import (
     GoalExtractionAction,
     GoalExtractionOutput,
@@ -29,6 +32,7 @@ from app.schemas.onboarding_goal import GoalExtractionWorkflowResult
 from app.services.accounts import AccountQueryService, AccountService
 from app.services.onboarding import OnboardingService
 from app.services.profiles import ProfileService
+from app.workflows.telegram_orchestrator.workspace import TelegramAgentWorkspace
 
 
 @dataclass
@@ -49,8 +53,29 @@ class QueueGoalExtractor:
 
 
 class UnusedStrava:
+    async def revoke_for_deletion(self, *, user_id: UUID) -> bool:
+        del user_id
+        return False
+
     def __getattr__(self, name: str) -> object:
         raise AssertionError(f"Strava must not be used during onboarding: {name}")
+
+
+class TrackingGlobalAgentModel(DeterministicFakeOnboardingModel):
+    """Fail the scenario if active onboarding reaches the global model."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.invocations = 0
+
+    def bind_tools(self, tools):  # type: ignore[no-untyped-def]
+        runnable = super().bind_tools(tools)
+
+        async def respond(messages, config):  # type: ignore[no-untyped-def]
+            self.invocations += 1
+            return await runnable.ainvoke(messages, config=config)
+
+        return RunnableLambda(respond)
 
 
 def _extracted(
@@ -75,7 +100,11 @@ def _extracted(
 
 @pytest_asyncio.fixture
 async def journey() -> AsyncIterator[
-    tuple[CoachBotApplicationService, async_sessionmaker[AsyncSession]]
+    tuple[
+        CoachBotApplicationService,
+        async_sessionmaker[AsyncSession],
+        TrackingGlobalAgentModel,
+    ]
 ]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
@@ -103,6 +132,8 @@ async def journey() -> AsyncIterator[
             llm_mode="mock",
         ),
     )
+    global_model = TrackingGlobalAgentModel()
+    workspace = TelegramAgentWorkspace(model=global_model)
     yield (
         CoachBotApplicationService(
             onboarding=onboarding,
@@ -114,9 +145,12 @@ async def journey() -> AsyncIterator[
             workout_feedback=None,
             strava_enabled=False,
             workout_feedback_enabled=False,
+            agent_workspace=workspace,
         ),
         factory,
+        global_model,
     )
+    await workspace.aclose()
     await engine.dispose()
 
 
@@ -142,9 +176,13 @@ def _buttons(response: TelegramResponse) -> list[tuple[str, str]]:
 
 @pytest.mark.asyncio
 async def test_journey_collects_mandatory_profile_after_goal_confirmation(
-    journey: tuple[CoachBotApplicationService, async_sessionmaker[AsyncSession]],
+    journey: tuple[
+        CoachBotApplicationService,
+        async_sessionmaker[AsyncSession],
+        TrackingGlobalAgentModel,
+    ],
 ) -> None:
-    bot, factory = journey
+    bot, factory, global_model = journey
     athlete = _athlete()
 
     welcome = await bot.start(athlete)
@@ -207,3 +245,65 @@ async def test_journey_collects_mandatory_profile_after_goal_confirmation(
 
     back = await bot.handle_callback(athlete, "nav:v1:welcome")
     assert back.text == messages.WELCOME
+
+    correction = await _agent_input(bot, "change my height to 170")
+    assert correction.text == "Your onboarding data has been updated successfully."
+    assert global_model.invocations == 2
+
+    async with factory() as session:
+        user = await UserRepository(session).get_by_telegram_id(
+            athlete.telegram_user_id
+        )
+        assert user is not None
+        profile = await ProfileRepository(session).get_athlete_profile(user_id=user.id)
+        assert profile is not None
+        assert profile.height_cm == 170.0
+
+
+async def _agent_input(
+    bot: CoachBotApplicationService,
+    content: str,
+    *,
+    event_type: str = "text",
+) -> TelegramResponse:
+    return await bot.handle_agent_input(
+        _athlete(),
+        HumanMessage(
+            content=content,
+            additional_kwargs={"telegram_event_type": event_type},
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_recreated_account_routes_goal_text_to_goal_workflow(
+    journey: tuple[
+        CoachBotApplicationService,
+        async_sessionmaker[AsyncSession],
+        TrackingGlobalAgentModel,
+    ],
+) -> None:
+    bot, _, global_model = journey
+
+    await _agent_input(bot, "/start")
+    deletion_prompt = await _agent_input(bot, "/delete_me")
+    deleted = await _agent_input(
+        bot,
+        "acct:v1:delete:confirm",
+        event_type="callback",
+    )
+    restarted = await _agent_input(bot, "/start")
+    await _agent_input(bot, "nav:v1:consent", event_type="callback")
+    await _agent_input(bot, "ob:v1:consent", event_type="callback")
+    intake = await _agent_input(bot, "ob:v1:profile", event_type="callback")
+    goal = await _agent_input(
+        bot,
+        "I want to complete an Ironman 70.3 next July",
+    )
+
+    assert deletion_prompt.text == messages.DELETE_CONFIRM
+    assert deleted.text == messages.DELETED
+    assert restarted.text == messages.WELCOME
+    assert intake.text == messages.GOAL_INTAKE
+    assert goal.text.startswith("Here\u2019s what I understood:")
+    assert global_model.invocations == 0

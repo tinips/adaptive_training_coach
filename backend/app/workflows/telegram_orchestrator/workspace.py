@@ -26,6 +26,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import ToolNode, ToolRuntime, tools_condition
+from langgraph.runtime import Runtime
 from langgraph.types import Command
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
@@ -36,6 +37,7 @@ from app.bot import messages as bot_messages
 from app.bot.rendering import TelegramButtonSpec, TelegramResponse
 from app.integrations.llm.models import StructuredOnboardingModel
 from app.schemas.onboarding_goal import OnboardingUpdateHandler
+from app.workflows.prompts.onboarding import explicit_onboarding_change_tool_policy
 
 TelegramEventType = Literal["text", "callback"]
 TelegramInputDispatcher = Callable[
@@ -113,6 +115,7 @@ class TelegramAgentContext:
     dispatcher: TelegramInputDispatcher
     onboarding_updater: OnboardingUpdateHandler | None
     presentation_loader: TelegramPresentationLoader | None = None
+    onboarding_active: bool = False
 
 
 class DispatchTelegramInputSchema(BaseModel):
@@ -295,16 +298,18 @@ def _serialize_keyboard(
 
 
 def _system_prompt() -> SystemMessage:
+    data_corrections_policy = explicit_onboarding_change_tool_policy(
+        "telegram_orchestrator",
+        tool_name="update_onboarding_data",
+        supported_fields="goal, weight, age, height, event_date",
+    )
     return SystemMessage(
         content=(
             "You are the Adaptive Endurance Coach orchestrator. Your sole job is "
             "to route the latest Telegram event into EXACTLY ONE tool call based "
             "on user intent.\n\n"
             "CRITICAL RULES:\n"
-            "1. DATA CORRECTIONS: If the user explicitly wants to change, update, "
-            "correct, or replace an athlete field (goal, weight, age, height, "
-            "event_date), you MUST call 'update_onboarding_data'. This rule "
-            "overrides any active question.\n"
+            f"{data_corrections_policy}"
             "2. ORDINARY INPUTS: For normal answers, buttons clicks, or commands, "
             "call 'dispatch_telegram_input' preserving the raw content "
             "byte-for-byte.\n"
@@ -451,7 +456,11 @@ def _numeric_update_payload(
     return None
 
 
-def _fast_track_call(state: TelegramAgentState) -> AIMessage | None:
+def _fast_track_call(
+    state: TelegramAgentState,
+    *,
+    onboarding_active: bool,
+) -> AIMessage | None:
     """Build a deterministic dispatch call for strict, context-safe inputs."""
 
     messages = state.get("messages", [])
@@ -460,13 +469,21 @@ def _fast_track_call(state: TelegramAgentState) -> AIMessage | None:
     current = messages[-1]
     if not isinstance(current.content, str):
         return None
-    content = current.content.strip()
+    raw_content = current.content
+    content = raw_content.strip()
     raw_event_type = current.additional_kwargs.get("telegram_event_type", "text")
     event_type: TelegramEventType = (
         "callback" if raw_event_type == "callback" else "text"
     )
     call_id = f"fast-dispatch-{len(messages)}"
     normalized = content.upper().replace(" ", "_")
+
+    if onboarding_active:
+        return _dispatch_tool_call(
+            event_type=event_type,
+            content=raw_content,
+            call_id=call_id,
+        )
 
     if event_type == "callback" and normalized in _GENDER_CHOICES:
         return _dispatch_tool_call(
@@ -546,8 +563,14 @@ def _build_graph(
             "fast_track": False,
         }
 
-    async def fast_router(state: TelegramAgentState) -> TelegramAgentState:
-        call = _fast_track_call(state)
+    async def fast_router(
+        state: TelegramAgentState,
+        runtime: Runtime[TelegramAgentContext],
+    ) -> TelegramAgentState:
+        call = _fast_track_call(
+            state,
+            onboarding_active=runtime.context.onboarding_active,
+        )
         if call is None:
             return {"fast_track": False}
         return {"messages": [call], "fast_track": True}
@@ -579,7 +602,7 @@ def _build_graph(
         TelegramAgentState,
     ] = StateGraph(TelegramAgentState, context_schema=TelegramAgentContext)
     builder.add_node("prepare", RunnableLambda(prepare))
-    builder.add_node("fast_router", RunnableLambda(fast_router))
+    builder.add_node("fast_router", fast_router)
     builder.add_node("agent", RunnableLambda(agent))
     builder.add_node("tools", ToolNode(tools, handle_tool_errors=False))
     builder.add_edge(START, "prepare")

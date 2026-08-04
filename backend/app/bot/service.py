@@ -143,7 +143,12 @@ class CoachBotApplicationService:
                 event_type,
                 message.content,
             )
-        user_id = await self._account_queries.resolve_user_id(identity)
+        lifecycle = await self._account_queries.lifecycle(identity)
+        user_id = cast(UUID, lifecycle["user_id"]) if lifecycle is not None else None
+        onboarding_active = bool(
+            lifecycle is not None
+            and lifecycle["status"] is UserStatus.ONBOARDING_IN_PROGRESS
+        )
 
         async def dispatch(
             supplied_event_type: TelegramEventType,
@@ -173,6 +178,7 @@ class CoachBotApplicationService:
                 presentation_loader=(
                     load_presentation if user_id is not None else None
                 ),
+                onboarding_active=onboarding_active,
             ),
         )
 

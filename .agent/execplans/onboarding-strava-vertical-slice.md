@@ -1690,3 +1690,53 @@ three-message unit so provider message-order requirements are preserved.
 - [x] Final validation: `273 passed, 3 opt-in live tests skipped`; Ruff and mypy
   passed. The deployed image reports a three-message provider window while the
   saved two-turn height case still routes to `height_cm=170`.
+
+## 2026-08-04 prompt-template modularization
+
+### Progress and validation note
+
+- [x] Extract the static onboarding prompts into versioned reusable templates
+  while preserving the exact provider message content and existing deterministic
+  validation. The static contract, future-date policy, and explicit-change tool
+  policy now live in `app.workflows.prompts.onboarding`; the goal contract is
+  versioned at `1` and documents that wording changes require a version bump and
+  regression-test update.
+- The first focused validation attempt could not start through `pytest.exe`
+  because the Windows application-control policy blocked that executable, and
+  `ruff` was absent from the default Python 3.11 environment. The repository's
+  Python 3.13 launcher provides both tools; subsequent validation uses
+  `py -3.13 -m pytest` and `py -3.13 -m ruff`. The Python 3.13 environment also
+  needed the already declared `langgraph-checkpoint-postgres` and
+  `psycopg[binary,pool]` dependencies installed before it could collect the
+  Telegram workspace tests.
+- [x] Add exact prompt-composition regressions plus graph/use-case coverage for
+  the JSON contract, `COMPLETE`, `NEEDS_CLARIFICATION`, `OFF_TOPIC`, and future,
+  ambiguous, and explicitly past dates.
+- [x] Final validation: `279 passed, 3 opt-in live tests skipped`; Ruff reports
+  141 formatted files and `mypy app` reports no issues in 109 source files.
+
+## 2026-08-04 active-onboarding dispatcher routing correction
+
+The global Telegram agent previously considered an initial goal sentence during
+an active onboarding flow to be an onboarding-data update. For a newly created
+account no training-goal record exists yet, so it invoked the update tool and
+raised `OwnedRecordNotFoundError`. The correct owner of free-text onboarding is
+the compiled onboarding dispatcher, which selects the focused goal-extraction
+workflow and its structured LLM contract.
+
+- [x] Add an explicit `onboarding_active` runtime context derived from the
+  persisted account lifecycle.
+- [x] Route every active-onboarding event through the dispatcher before the
+  global tool-calling LLM; preserve the raw Telegram text byte-for-byte.
+- [x] Keep the completed-profile path unchanged so explicit `change my ...`
+  requests still enter the global agent and call the focused onboarding-update
+  workflow.
+- [x] Add unit and end-to-end journey regressions covering account deletion,
+  recreated-account initial goal submission, and a completed-profile height
+  change.
+- [x] Final validation: `281 passed, 3 opt-in live tests skipped`; `ruff check
+  .`, `ruff format --check .`, and `mypy app` passed.
+- [x] Rebuild and restart the Docker bot with the correction. Docker Desktop
+  could not read the new OneDrive placeholder files directly, so the identical
+  backend source was staged in a temporary local build context; the rebuilt bot
+  started successfully and reports `goal_llm_mode=live model=deepseek-v4-flash`.
