@@ -175,7 +175,7 @@ def _buttons(response: TelegramResponse) -> list[tuple[str, str]]:
 
 
 @pytest.mark.asyncio
-async def test_journey_collects_mandatory_profile_after_goal_confirmation(
+async def test_journey_collects_profile_goal_and_required_context_before_completion(
     journey: tuple[
         CoachBotApplicationService,
         async_sessionmaker[AsyncSession],
@@ -188,21 +188,27 @@ async def test_journey_collects_mandatory_profile_after_goal_confirmation(
     welcome = await bot.start(athlete)
     consent = await bot.handle_callback(athlete, "nav:v1:consent")
     setup = await bot.handle_callback(athlete, "ob:v1:consent")
-    intake = await bot.handle_callback(athlete, "ob:v1:profile")
-    confirmation = await bot.handle_text(
-        athlete,
-        "I want to complete a marathon and finish safely.",
-    )
-    addition = await bot.handle_callback(athlete, "ob:v1:goal:add")
-    updated = await bot.handle_text(athlete, "I also want to maintain strength.")
-    saved = await bot.handle_callback(athlete, "ob:v1:goal:confirm")
+    birth_year = await bot.handle_callback(athlete, "ob:v1:profile")
     gender = await bot.handle_text(athlete, "1990")
     weight = await bot.handle_callback(
         athlete,
         "ob:v1:profile:gender:FEMALE",
     )
     height = await bot.handle_text(athlete, "62.5")
-    completed = await bot.handle_text(athlete, "168")
+    intake = await bot.handle_text(athlete, "168")
+    confirmation = await bot.handle_text(
+        athlete,
+        "I want to complete a marathon and finish safely.",
+    )
+    addition = await bot.handle_callback(athlete, "ob:v1:goal:add")
+    updated = await bot.handle_text(athlete, "I also want to maintain strength.")
+    availability = await bot.handle_callback(athlete, "ob:v1:goal:confirm")
+    equipment = await bot.handle_text(
+        athlete,
+        "Tuesday and Thursday evenings, plus a longer Saturday run.",
+    )
+    limitations = await bot.handle_callback(athlete, "ob:v1:equipment:all")
+    completed = await bot.handle_callback(athlete, "ob:v1:health:none")
     displayed_profile = await bot.profile(athlete)
 
     assert welcome.text == messages.WELCOME
@@ -213,11 +219,14 @@ async def test_journey_collects_mandatory_profile_after_goal_confirmation(
     assert confirmation.text.startswith("Here\u2019s what I understood:")
     assert addition.text == messages.GOAL_ADDITION
     assert "Maintain strength" in updated.text
-    assert saved.text == messages.PROFILE_BIRTH_YEAR_INTAKE
+    assert birth_year.text == messages.PROFILE_BIRTH_YEAR_INTAKE
     assert gender.text == messages.PROFILE_GENDER_INTAKE
     assert ("Female", "ob:v1:profile:gender:FEMALE") in _buttons(gender)
     assert weight.text == messages.PROFILE_WEIGHT_INTAKE
     assert height.text == messages.PROFILE_HEIGHT_INTAKE
+    assert availability.text == messages.AVAILABILITY_INTAKE
+    assert "essential equipment" in equipment.text.casefold()
+    assert limitations.text == messages.HEALTH_LIMITATIONS_INTAKE
     assert completed.text == messages.ONBOARDING_COMPLETED
     assert "Birth year: 1990" in displayed_profile.text
     assert "Category: Female" in displayed_profile.text
@@ -230,7 +239,7 @@ async def test_journey_collects_mandatory_profile_after_goal_confirmation(
         assert user.status is UserStatus.ONBOARDING_COMPLETED
         state = await OnboardingRepository(session).require_for_user(user_id=user.id)
         assert state.status is OnboardingStatus.COMPLETED
-        assert state.current_step is OnboardingStep.PROFILE_HEIGHT_INTAKE
+        assert state.current_step is OnboardingStep.HEALTH_LIMITATIONS_INTAKE
         goal = await ProfileRepository(session).get_training_goal(user_id=user.id)
         assert goal is not None
         assert goal.main_goal == "Complete a marathon"
@@ -242,13 +251,19 @@ async def test_journey_collects_mandatory_profile_after_goal_confirmation(
         assert profile.gender is AthleteGender.FEMALE
         assert profile.weight_kg == 62.5
         assert profile.height_cm == 168.0
+        assert profile.availability_text == (
+            "Tuesday and Thursday evenings, plus a longer Saturday run."
+        )
+        assert profile.equipment_recommendation_text is not None
+        assert profile.equipment_text == "ALL_RECOMMENDED"
+        assert profile.health_limitations_text == "NONE_REPORTED"
 
     back = await bot.handle_callback(athlete, "nav:v1:welcome")
     assert back.text == messages.WELCOME
 
     correction = await _agent_input(bot, "change my height to 170")
-    assert correction.text == "Your onboarding data has been updated successfully."
-    assert global_model.invocations == 2
+    assert "height has been updated" in correction.text.casefold()
+    assert global_model.invocations == 1
 
     async with factory() as session:
         user = await UserRepository(session).get_by_telegram_id(
@@ -295,7 +310,15 @@ async def test_recreated_account_routes_goal_text_to_goal_workflow(
     restarted = await _agent_input(bot, "/start")
     await _agent_input(bot, "nav:v1:consent", event_type="callback")
     await _agent_input(bot, "ob:v1:consent", event_type="callback")
-    intake = await _agent_input(bot, "ob:v1:profile", event_type="callback")
+    birth_year = await _agent_input(bot, "ob:v1:profile", event_type="callback")
+    await _agent_input(bot, "1990")
+    await _agent_input(
+        bot,
+        "ob:v1:profile:gender:FEMALE",
+        event_type="callback",
+    )
+    await _agent_input(bot, "62.5")
+    intake = await _agent_input(bot, "168")
     goal = await _agent_input(
         bot,
         "I want to complete an Ironman 70.3 next July",
@@ -304,6 +327,7 @@ async def test_recreated_account_routes_goal_text_to_goal_workflow(
     assert deletion_prompt.text == messages.DELETE_CONFIRM
     assert deleted.text == messages.DELETED
     assert restarted.text == messages.WELCOME
+    assert birth_year.text == messages.PROFILE_BIRTH_YEAR_INTAKE
     assert intake.text == messages.GOAL_INTAKE
     assert goal.text.startswith("Here\u2019s what I understood:")
     assert global_model.invocations == 0

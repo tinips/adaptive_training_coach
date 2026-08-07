@@ -44,6 +44,16 @@ class ProfileBundle:
     baseline_preference: BaselinePreference | None
 
 
+@dataclass(frozen=True, slots=True)
+class AthleteProfileContext:
+    """Raw contextual text retained alongside an athlete profile."""
+
+    availability_text: str | None
+    equipment_recommendation_text: str | None
+    equipment_text: str | None
+    health_limitations_text: str | None
+
+
 class ProfileRepository:
     """Read historical profiles and persist the one supported goal path."""
 
@@ -71,6 +81,23 @@ class ProfileRepository:
             statement = statement.where(AthleteProfile.id == profile_id)
         result = await self._session.execute(statement)
         return result.scalar_one_or_none()
+
+    async def get_athlete_profile_context(
+        self,
+        *,
+        user_id: uuid.UUID,
+    ) -> AthleteProfileContext | None:
+        """Read only the raw context belonging to the authenticated user."""
+
+        profile = await self.get_athlete_profile(user_id=user_id)
+        if profile is None:
+            return None
+        return AthleteProfileContext(
+            availability_text=profile.availability_text,
+            equipment_recommendation_text=profile.equipment_recommendation_text,
+            equipment_text=profile.equipment_text,
+            health_limitations_text=profile.health_limitations_text,
+        )
 
     async def get_training_goal(
         self,
@@ -168,6 +195,42 @@ class ProfileRepository:
             values[key] = value
         if not values:
             raise ValueError("athlete profile update payload is empty")
+        values["updated_at"] = utc_now()
+
+        profile = await self._session.scalar(
+            update(AthleteProfile)
+            .where(AthleteProfile.user_id == user_id)
+            .values(**values)
+            .returning(AthleteProfile)
+        )
+        if profile is None:
+            raise OwnedRecordNotFoundError("athlete profile not found")
+        await self._session.flush()
+        return profile
+
+    async def update_athlete_profile_context_fields(
+        self,
+        *,
+        user_id: uuid.UUID,
+        payload: Mapping[str, object],
+    ) -> AthleteProfile:
+        """Update only raw textual context on the owning athlete profile."""
+
+        allowed_fields = {
+            "availability_text",
+            "equipment_recommendation_text",
+            "equipment_text",
+            "health_limitations_text",
+        }
+        values: dict[str, object] = {}
+        for key, value in payload.items():
+            if key not in allowed_fields:
+                raise ValueError("unsupported athlete profile context update field")
+            if value is not None and not isinstance(value, str):
+                raise ValueError("athlete profile context values must be text or null")
+            values[key] = value
+        if not values:
+            raise ValueError("athlete profile context update payload is empty")
         values["updated_at"] = utc_now()
 
         profile = await self._session.scalar(

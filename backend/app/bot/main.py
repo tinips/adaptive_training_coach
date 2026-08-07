@@ -27,6 +27,7 @@ from app.services.profiles import ProfileService
 from app.services.strava.orchestrator import StravaCoordinator
 from app.services.training_import import TrainingFileImportService
 from app.services.workout_feedback import WorkoutFeedbackService
+from app.workflows.onboarding_context import create_context_onboarding_workflow
 from app.workflows.onboarding_goal.graph import create_goal_extractor
 from app.workflows.telegram_orchestrator import TelegramAgentWorkspace
 
@@ -75,6 +76,7 @@ def build_runtime(
     runtime_engine = engine or create_engine(runtime_settings)
     session_factory = create_session_factory(runtime_engine)
     goal_extractor = create_goal_extractor(runtime_settings)
+    context_workflow = create_context_onboarding_workflow(runtime_settings)
     agent_workspace = TelegramAgentWorkspace(
         model=create_goal_extraction_model(runtime_settings),
         postgres_dsn=_checkpoint_dsn(runtime_settings.database_url),
@@ -102,6 +104,7 @@ def build_runtime(
             session_factory=session_factory,
             goal_extractor=goal_extractor,
             settings=runtime_settings,
+            context_workflow=context_workflow,
         ),
         profiles=ProfileService(session_factory),
         account_queries=AccountQueryService(session_factory),

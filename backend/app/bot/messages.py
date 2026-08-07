@@ -254,7 +254,7 @@ SETUP_INTRODUCTION = (
     "Ready to build your athlete profile?"
 )
 GOAL_INTAKE = (
-    "Let\u2019s start with your goal.\n\n"
+    "Now let\u2019s talk about your training goal.\n\n"
     "What are you training for, and what would success look like to you?\n\n"
     "Tell me in your own words. You can include a race or challenge, when you "
     "want to do it, the result you are aiming for, and anything important you "
@@ -270,8 +270,8 @@ GOAL_SAVED = (
     "the rest of your profile step by step."
 )
 ONBOARDING_MODIFICATION_FALLBACK = (
-    "Tell me which goal, outcome, birth year, category, age, weight, or height "
-    "to change."
+    "Tell me which goal, outcome, birth year, category, age, weight, height, "
+    "availability, equipment, or training limitation to change."
 )
 
 _ONBOARDING_FIELD_LABELS = {
@@ -283,13 +283,17 @@ _ONBOARDING_FIELD_LABELS = {
     "gender": "competitive category",
     "weight_kg": "weight",
     "height_cm": "height",
+    "availability_text": "availability",
+    "equipment_text": "equipment",
+    "health_limitations_text": "training limitations",
 }
 
 
 def onboarding_modification_response(confirmation: str | None) -> str:
-    """Safely render the model's concise post-tool confirmation."""
+    """Retain a safe fallback for callers that receive model text."""
 
-    return escape(confirmation or ONBOARDING_MODIFICATION_FALLBACK)
+    del confirmation
+    return ONBOARDING_MODIFICATION_FALLBACK
 
 
 def onboarding_fields_updated(field_names: Sequence[str]) -> str:
@@ -303,12 +307,14 @@ def onboarding_fields_updated(field_names: Sequence[str]) -> str:
     if not labels:
         return "Your athlete data has been updated."
     if len(labels) == 1:
+        if labels[0] == "training limitations":
+            return "Your training limitations have been updated."
         return f"Your {labels[0]} has been updated."
     return f"Your {', '.join(labels[:-1])} and {labels[-1]} have been updated."
 
 
 PROFILE_BIRTH_YEAR_INTAKE = (
-    "Your goal has been saved.\n\n"
+    "First, let\u2019s build your athlete profile.\n\n"
     "What year were you born? Send the four-digit year (1940 to 2008)."
 )
 PROFILE_GENDER_INTAKE = (
@@ -320,9 +326,42 @@ PROFILE_WEIGHT_INTAKE = (
 PROFILE_HEIGHT_INTAKE = (
     "What is your height in centimeters? Send a whole number from 120 to 230."
 )
+AVAILABILITY_INTAKE = (
+    "Tell me about your weekly training availability in your own words.\n\n"
+    "Include the days you can train and roughly how much time you have on each day. "
+    "For example: 'I can train Tuesday and Thursday for 45 minutes, and Saturday "
+    "for up to two hours.'"
+)
+EQUIPMENT_DETAILS_INTAKE = (
+    "Tell me what equipment you have available and any limits on using it."
+)
+HEALTH_LIMITATIONS_INTAKE = (
+    "Do you have any current or past injuries, discomfort, or physical limitations "
+    "that should influence training? This is not medical advice."
+)
+CONTEXT_VALIDATION_ERROR = (
+    "Please send a short answer for this part of your athlete profile."
+)
+EQUIPMENT_RECOMMENDATION_RETRY = (
+    "Your availability has been saved, but I could not prepare the equipment "
+    "suggestion just now. Send any message to retry."
+)
+
+
+def equipment_recommendation(recommendation: str | None) -> str:
+    """Render the saved, goal-specific equipment suggestion safely."""
+
+    suggestion = escape(recommendation or "the basic equipment for your goal")
+    return (
+        "Based on your goal, here is the essential equipment to consider:\n\n"
+        f"{suggestion}\n\n"
+        "Do you have all of this equipment?"
+    )
+
+
 ONBOARDING_COMPLETED = (
-    "Your athlete profile is complete. Your birth year, category, weight, and "
-    "height have been saved."
+    "Your athlete profile, training goal, availability, equipment context, and "
+    "training limitations have been saved."
 )
 GOAL_OFF_TOPIC = (
     "We can come back to equipment later. Right now, I\u2019m building your athlete "
@@ -587,16 +626,25 @@ def persisted_profile(profile: Mapping[str, Any]) -> str:
     """Render normalized persisted profile data."""
 
     if "birth_year" in profile and "gender" in profile:
-        return "\n".join(
-            [
-                "Your saved athlete profile:",
-                "",
-                f"Birth year: {_display(profile.get('birth_year'))}",
-                f"Category: {_display(profile.get('gender'))}",
-                f"Weight: {_optional_metric(profile.get('weight_kg'), 'kg')}",
-                f"Height: {_optional_metric(profile.get('height_cm'), 'cm')}",
-            ]
+        lines = [
+            "Your saved athlete profile:",
+            "",
+            f"Birth year: {_display(profile.get('birth_year'))}",
+            f"Category: {_display(profile.get('gender'))}",
+            f"Weight: {_optional_metric(profile.get('weight_kg'), 'kg')}",
+            f"Height: {_optional_metric(profile.get('height_cm'), 'cm')}",
+        ]
+        raw_context = (
+            ("Availability", "availability_text"),
+            ("Equipment recommendation", "equipment_recommendation_text"),
+            ("Equipment", "equipment_text"),
+            ("Training limitations", "health_limitations_text"),
         )
+        for label, key in raw_context:
+            value = profile.get(key)
+            if isinstance(value, str) and value:
+                lines.append(f"{label}: {_display_free_text(value)}")
+        return "\n".join(lines)
 
     lines = [
         "Your saved athlete profile:",

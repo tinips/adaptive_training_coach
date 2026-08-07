@@ -48,6 +48,10 @@ LABELS = {
     "goal_pace": "Improve my pace",
     "goal_consistency": "Run consistently",
     "goal_something_else": "Something else",
+    "equipment_all": "I have all the recommended equipment",
+    "equipment_other": "Other / I have limitations",
+    "health_none": "None",
+    "health_describe": "Describe limitations",
     "gender_male": "Male",
     "gender_female": "Female",
     "gender_other_unspecified": "Other / Unspecified",
@@ -173,6 +177,30 @@ def profile_gender_keyboard() -> InlineKeyboardMarkup:
                     "ob:v1:profile:gender:OTHER_UNSPECIFIED",
                 )
             ],
+            [(LABELS["cancel"], "ob:v1:cancel")],
+        ]
+    )
+
+
+def equipment_intake_keyboard() -> InlineKeyboardMarkup:
+    """Offer deterministic material-response choices after a recommendation."""
+
+    return _rows(
+        [
+            [(LABELS["equipment_all"], "ob:v1:equipment:all")],
+            [(LABELS["equipment_other"], "ob:v1:equipment:other")],
+            [(LABELS["cancel"], "ob:v1:cancel")],
+        ]
+    )
+
+
+def health_limitations_keyboard() -> InlineKeyboardMarkup:
+    """Offer an explicit no-limitations answer without invoking an LLM."""
+
+    return _rows(
+        [
+            [(LABELS["health_none"], "ob:v1:health:none")],
+            [(LABELS["health_describe"], "ob:v1:health:describe")],
             [(LABELS["cancel"], "ob:v1:cancel")],
         ]
     )

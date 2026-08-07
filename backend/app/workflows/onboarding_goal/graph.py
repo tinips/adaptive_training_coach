@@ -87,7 +87,9 @@ def build_goal_extraction_graph(
             "__end__": END,
         },
     )
-    builder.add_edge("tools", "agent")
+    # The update tool returns the safe field-name-only completion state.  A
+    # second model turn would receive the original raw tool-call arguments.
+    builder.add_edge("tools", END)
     return builder.compile(name="onboarding_goal_extraction")
 
 
@@ -256,9 +258,14 @@ class LangGraphGoalExtractor:
                 "provider_error",
             }:
                 outcome = "provider_error"
+            raw_updated_fields = state.get("updated_fields", [])
+            updated_fields = tuple(
+                field for field in raw_updated_fields if isinstance(field, str)
+            )
             result = OnboardingModificationWorkflowResult(
                 outcome=outcome,
                 confirmation=state.get("confirmation") or None,
+                updated_fields=updated_fields,
                 error_code=state.get("error_code"),
             )
         except TimeoutError:

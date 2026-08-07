@@ -218,6 +218,22 @@ client and, when PostgreSQL is running, a real local server smoke test.
 
 ## Remaining external or manual blockers
 
+## Follow-up: profile-first onboarding order
+
+Requested and implemented on 2026-08-07:
+
+- [x] Reordered new onboarding sessions so birth year, category, weight, and
+  height are collected and saved before the conversational training-goal flow.
+- [x] Moved lifecycle completion to explicit training-goal confirmation, so an
+  athlete cannot complete onboarding without both the mandatory profile and a
+  confirmed goal.
+- [x] Updated Telegram copy, product-flow documentation, and focused journey
+  coverage to reflect the new sequence.
+- [x] Ran the focused onboarding suites (13 passed), Ruff, formatting, and
+  mypy under Python 3.13. The complete suite exceeded the two-minute command
+  timeout without emitting a failure report, so it remains to be run in an
+  unrestricted local shell.
+
 The ignored environment supplied a Telegram token. A read-only live Bot API
 initialization (`getMe`) succeeded without printing the token or bot identity;
 polling was not started and no updates were consumed or messages sent. A real
@@ -1740,3 +1756,50 @@ workflow and its structured LLM contract.
   could not read the new OneDrive placeholder files directly, so the identical
   backend source was staged in a temporary local build context; the rebuilt bot
   started successfully and reports `goal_llm_mode=live model=deepseek-v4-flash`.
+
+## 2026-08-07 profile-first raw onboarding context and conversational edits
+
+The supported onboarding order is now basic profile, confirmed goal, weekly
+availability, goal-based equipment recommendation, equipment context, and
+training limitations. Completion occurs only after all three context answers
+are saved.
+
+- [x] Add nullable raw `TEXT` columns to `athlete_profiles` for availability,
+  equipment recommendation, equipment, and health limitations in Alembic
+  revision `0013_add_athlete_profile_context`; extend the persisted onboarding
+  step checks without changing the historical normalized context tables.
+- [x] Add durable availability, recommendation, equipment, equipment-details,
+  and limitations steps plus deterministic `ALL_RECOMMENDED` and
+  `NONE_REPORTED` callback markers.
+- [x] Compile stateless LangGraph workflows for raw-text accept/retry validation
+  and a short goal-based equipment recommendation. Original athlete context is
+  saved literally; recommendation failures retain availability and retry safely.
+- [x] Extend conversational sparse updates for goal/outcome/date, basic profile,
+  availability, equipment, and limitations. A material goal change invalidates
+  equipment context, regenerates the recommendation, and reopens equipment
+  review without changing unmentioned fields.
+- [x] Keep raw health/context out of service errors, LLM-usage records,
+  observer metadata, and global-agent checkpoints: active onboarding bypasses
+  the workspace; successful post-onboarding update exchanges are removed before
+  checkpoint exit; no post-write provider turn is made.
+- [x] Add regression coverage for full and resumed onboarding, markers and free
+  text, literal persistence, no normalized-table writes, recommendation retries,
+  stale callbacks, chat updates, goal-triggered review, checkpoint privacy, and
+  recommendation safety limits.
+- [x] Final validation: `py -3.13 -m pytest -q` reports `306 passed, 3 skipped`;
+  `py -3.13 -m ruff check .`, `py -3.13 -m ruff format --check .`, and
+  `py -3.13 -m mypy app` pass. `docker compose up -d db` and
+  `py -3.13 -m alembic upgrade head` applied revision `0013_add_athlete_profile_context`
+  to the local PostgreSQL database; all four columns were verified as `text`.
+
+## 2026-08-07 permissive raw-context intake
+
+The product decision is that availability, equipment context, and limitations
+are athlete-owned free text. The system must not reject a non-empty answer for
+lack of detail: a sparse answer is still useful, and only limits later
+personalisation.
+
+- [x] Make the compiled raw-context intake graph accept every non-empty message
+  deterministically, without asking an LLM to judge its adequacy.
+- [x] Preserve literal persistence and retain the existing empty-message retry.
+- [x] Update focused graph and onboarding regressions for vague availability.

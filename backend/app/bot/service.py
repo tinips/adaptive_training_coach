@@ -10,6 +10,7 @@ from typing import Protocol, cast
 from uuid import UUID
 
 from langchain_core.messages import HumanMessage
+from telegram import InlineKeyboardMarkup
 
 from app.bot import keyboards, messages
 from app.bot.rendering import TelegramResponse
@@ -149,6 +150,22 @@ class CoachBotApplicationService:
             lifecycle is not None
             and lifecycle["status"] is UserStatus.ONBOARDING_IN_PROGRESS
         )
+
+        if onboarding_active:
+            # Availability, equipment, and limitations can contain private raw
+            # context.  The focused onboarding workflows are stateless, so send
+            # active-onboarding events straight to them instead of first adding
+            # the HumanMessage to the persistent global-agent checkpoint.
+            response = await self._dispatch_agent_event(
+                identity,
+                event_type,
+                message.content,
+            )
+            if response.clear_agent_thread:
+                await workspace.delete_thread(
+                    f"telegram:{identity.telegram_user_id}",
+                )
+            return response
 
         async def dispatch(
             supplied_event_type: TelegramEventType,
@@ -501,6 +518,22 @@ class CoachBotApplicationService:
                     identity,
                     callback_data.removeprefix("ob:v1:profile:gender:"),
                 ),
+            )
+        if callback_data.startswith("ob:v1:equipment:"):
+            choice = callback_data.removeprefix("ob:v1:equipment:")
+            if choice not in {"all", "other"}:
+                raise OnboardingApplicationError("invalid_action")
+            return await self._render_onboarding(
+                identity,
+                await self._onboarding.choose_equipment(identity, choice),
+            )
+        if callback_data.startswith("ob:v1:health:"):
+            choice = callback_data.removeprefix("ob:v1:health:")
+            if choice not in {"none", "describe"}:
+                raise OnboardingApplicationError("invalid_action")
+            return await self._render_onboarding(
+                identity,
+                await self._onboarding.choose_health_limitations(identity, choice),
             )
         if callback_data.startswith("wf:v1:"):
             return await self._workout_feedback_callback(
@@ -964,6 +997,50 @@ class CoachBotApplicationService:
                 messages.PROFILE_HEIGHT_INTAKE,
                 keyboards.profile_text_input_keyboard(),
             )
+        if result.kind == "availability_intake":
+            return TelegramResponse(
+                messages.AVAILABILITY_INTAKE,
+                keyboards.profile_text_input_keyboard(),
+            )
+        if result.kind == "equipment_recommendation":
+            recommendation = result.answers.get("equipment_recommendation_text")
+            if (
+                result.error_code is not None
+                or result.answers.get("_context_retry_error") is not None
+                or not isinstance(recommendation, str)
+            ):
+                return TelegramResponse(
+                    messages.EQUIPMENT_RECOMMENDATION_RETRY,
+                    keyboards.profile_text_input_keyboard(),
+                )
+            return TelegramResponse(
+                messages.equipment_recommendation(recommendation),
+                keyboards.equipment_intake_keyboard(),
+            )
+        if result.kind == "equipment_intake":
+            recommendation = result.answers.get("equipment_recommendation_text")
+            return TelegramResponse(
+                messages.equipment_recommendation(
+                    recommendation if isinstance(recommendation, str) else None
+                ),
+                keyboards.equipment_intake_keyboard(),
+            )
+        if result.kind == "equipment_details_intake":
+            return TelegramResponse(
+                messages.EQUIPMENT_DETAILS_INTAKE,
+                keyboards.profile_text_input_keyboard(),
+            )
+        if result.kind == "health_limitations_intake":
+            return TelegramResponse(
+                messages.HEALTH_LIMITATIONS_INTAKE,
+                keyboards.health_limitations_keyboard(),
+            )
+        if result.kind == "context_validation_error":
+            prompt, context_keyboard = self._context_intake_prompt(result)
+            return TelegramResponse(
+                f"{messages.CONTEXT_VALIDATION_ERROR}\n\n{prompt}",
+                context_keyboard,
+            )
         if result.kind == "profile_validation_error":
             prompts = {
                 OnboardingStep.PROFILE_BIRTH_YEAR_INTAKE: (
@@ -981,9 +1058,11 @@ class CoachBotApplicationService:
         if result.kind == "onboarding_completed":
             return TelegramResponse(messages.ONBOARDING_COMPLETED)
         if result.kind == "onboarding_modification":
-            return TelegramResponse(
-                messages.onboarding_modification_response(result.confirmation)
-            )
+            if result.updated_fields:
+                return TelegramResponse(
+                    messages.onboarding_fields_updated(result.updated_fields)
+                )
+            return TelegramResponse(messages.ONBOARDING_MODIFICATION_FALLBACK)
         if result.kind == "fallback":
             return TelegramResponse(
                 messages.PARSE_FALLBACK,
@@ -1012,6 +1091,41 @@ class CoachBotApplicationService:
                 messages.CANCELLED,
                 keyboards.cancelled_keyboard(),
             )
+        raise AssertionError(f"Unhandled onboarding result kind: {result.kind}")
+
+    @staticmethod
+    def _context_intake_prompt(
+        result: OnboardingServiceResult,
+    ) -> tuple[str, InlineKeyboardMarkup | None]:
+        """Return the prompt and controls for a recoverable context-input error."""
+
+        if result.current_step is OnboardingStep.AVAILABILITY_INTAKE:
+            return (
+                messages.AVAILABILITY_INTAKE,
+                keyboards.profile_text_input_keyboard(),
+            )
+        if result.current_step is OnboardingStep.EQUIPMENT_DETAILS_INTAKE:
+            return (
+                messages.EQUIPMENT_DETAILS_INTAKE,
+                keyboards.profile_text_input_keyboard(),
+            )
+        if result.current_step is OnboardingStep.HEALTH_LIMITATIONS_INTAKE:
+            return (
+                messages.HEALTH_LIMITATIONS_INTAKE,
+                keyboards.health_limitations_keyboard(),
+            )
+        if result.current_step is OnboardingStep.EQUIPMENT_INTAKE:
+            recommendation = result.answers.get("equipment_recommendation_text")
+            return (
+                messages.equipment_recommendation(
+                    recommendation if isinstance(recommendation, str) else None
+                ),
+                keyboards.equipment_intake_keyboard(),
+            )
+        return (
+            messages.CONTEXT_VALIDATION_ERROR,
+            keyboards.profile_text_input_keyboard(),
+        )
 
     @staticmethod
     def _welcome_response() -> TelegramResponse:

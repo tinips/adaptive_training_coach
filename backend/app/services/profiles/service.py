@@ -68,6 +68,12 @@ class ProfileService:
                     gender=athlete.gender,
                     weight_kg=athlete.weight_kg,
                     height_cm=athlete.height_cm,
+                    availability_text=athlete.availability_text,
+                    equipment_recommendation_text=(
+                        athlete.equipment_recommendation_text
+                    ),
+                    equipment_text=athlete.equipment_text,
+                    health_limitations_text=athlete.health_limitations_text,
                 )
             onboarding = await OnboardingRepository(session).get_for_user(
                 user_id=user_id,
@@ -123,6 +129,12 @@ class ProfileService:
                     gender=athlete.gender,
                     weight_kg=athlete.weight_kg,
                     height_cm=athlete.height_cm,
+                    availability_text=athlete.availability_text,
+                    equipment_recommendation_text=(
+                        athlete.equipment_recommendation_text
+                    ),
+                    equipment_text=athlete.equipment_text,
+                    health_limitations_text=athlete.health_limitations_text,
                 )
             onboarding = await OnboardingRepository(session).get_for_user(
                 user_id=user_id,

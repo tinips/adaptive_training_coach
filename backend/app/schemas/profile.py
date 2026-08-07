@@ -24,12 +24,16 @@ from app.domain.enums import (
 
 
 class PersistedMandatoryProfileData(BaseModel):
-    """The mandatory profile collected after conversational goal confirmation."""
+    """The mandatory profile collected before conversational goal intake."""
 
     birth_year: int
     gender: AthleteGender
     weight_kg: float
     height_cm: float
+    availability_text: str | None = None
+    equipment_recommendation_text: str | None = None
+    equipment_text: str | None = None
+    health_limitations_text: str | None = None
 
 
 class PersistedEquipmentAccessData(BaseModel):

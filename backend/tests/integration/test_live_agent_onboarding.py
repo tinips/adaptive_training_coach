@@ -9,7 +9,6 @@ the application's OpenAI-compatible ``LLM_*`` environment variables.
 
 from __future__ import annotations
 
-import json
 import os
 from dataclasses import dataclass
 from datetime import date
@@ -18,7 +17,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import SecretStr
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -228,7 +227,7 @@ async def test_live_chaotic_mind_mid_flight_correction(
     assert final_data.weight_kg == pytest.approx(82.0)
     assert final_data.main_goal == "Ironman"
     assert final_data.target_outcome == _INITIAL_TARGET
-    assert "ironman" in _last_ai_text(turn_three).casefold()
+    assert turn_three["updated_fields"] == ["main_goal"]
 
 
 @pytest.mark.asyncio
@@ -253,7 +252,7 @@ async def test_live_vague_ambiguity_requires_concrete_goal(
     updated = await live_agent_harness.stored_data()
     assert updated.main_goal == "5k race"
     assert updated.weight_kg == pytest.approx(70.0)
-    assert "5k" in _last_ai_text(turn_two).casefold()
+    assert turn_two["updated_fields"] == ["main_goal"]
 
 
 @pytest.mark.asyncio
@@ -281,10 +280,12 @@ async def test_live_all_in_one_cross_table_update(
     assert stored.event_date == expected_event_date
     assert stored.target_outcome == _INITIAL_TARGET
     assert stored.original_description == _INITIAL_DESCRIPTION
-    confirmation = _last_ai_text(turn).casefold()
-    assert "barcelona marathon" in confirmation
-    assert "74" in confirmation
-    assert "35" in confirmation
+    assert turn["updated_fields"] == [
+        "main_goal",
+        "age",
+        "weight_kg",
+        "event_date",
+    ]
 
 
 def _required_test_database_url() -> str:
@@ -331,13 +332,14 @@ def _live_provider_configuration() -> tuple[SecretStr, str | None, str]:
 def _tool_payloads(state: GoalExtractionGraphState) -> list[dict[str, object]]:
     payloads: list[dict[str, object]] = []
     for message in state["messages"]:
-        if not isinstance(message, ToolMessage):
+        if not isinstance(message, AIMessage):
             continue
-        decoded = json.loads(message.content)
-        assert isinstance(decoded, dict)
-        updated_fields = decoded.get("updated_fields")
-        assert isinstance(updated_fields, dict)
-        payloads.append(updated_fields)
+        for call in message.tool_calls:
+            if call["name"] != "update_onboarding_data":
+                continue
+            arguments = call["args"]
+            assert isinstance(arguments, dict)
+            payloads.append(arguments)
     return payloads
 
 

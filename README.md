@@ -1,11 +1,12 @@
 # Adaptive Endurance Coach
 
 Adaptive Endurance Coach is a modular Python application for a Telegram-based
-endurance coach. The currently supported onboarding slice records and confirms
-one athlete goal, then deterministically collects the athlete's birth year,
-competition category / biological sex, weight, and height. Availability,
-injuries, baseline selection, feasibility, and plan generation remain outside
-this onboarding phase.
+endurance coach. The currently supported onboarding slice deterministically
+collects the athlete's birth year, competition category / biological sex,
+weight, and height, then records a confirmed athlete goal, raw weekly
+availability, equipment context, and training limitations. It stores that new
+context as literal profile text; deriving a normalized, updateable profile,
+baseline selection, feasibility, and plan generation remain outside this phase.
 
 The interface is English-only. Goal answers may be written naturally in any
 language supported by the configured model. The application does not provide
@@ -18,23 +19,30 @@ The only supported journey is:
 1. Telegram **Start** opens Welcome, Help, and Privacy & safety.
 2. **Let's go** opens explicit consent.
 3. Consent opens the setup introduction.
-4. **Let's build my profile** opens a free-text goal question.
-5. A focused LangGraph/LangChain operation extracts a four-field draft.
-6. The bot asks one clarification at a time until the goal is clear.
-7. The user can confirm, add or change information, start again, or cancel.
-8. **No, that's right** writes the canonical goal and immediately starts the
-   mandatory profile phase.
-9. The bot validates a four-digit birth year from 1940 through 2008.
-10. An inline keyboard records Male, Female, or Other / Unspecified.
-11. The bot validates weight from 40.0 through 200.0 kg.
-12. The bot validates integer height from 120 through 230 cm.
-13. The final height submission atomically upserts the owned athlete profile
-    and changes the user lifecycle to `ONBOARDING_COMPLETED`.
+4. **Let's build my profile** asks for a four-digit birth year from 1940
+   through 2008.
+5. An inline keyboard records Male, Female, or Other / Unspecified.
+6. The bot validates weight from 40.0 through 200.0 kg.
+7. The bot validates integer height from 120 through 230 cm and saves the
+   owned athlete profile.
+8. A free-text goal question opens after the profile is saved.
+9. A focused LangGraph/LangChain operation extracts a four-field draft.
+10. The bot asks one clarification at a time until the goal is clear.
+11. The user can confirm, add or change information, start again, or cancel.
+12. **No, that's right** writes the canonical goal and asks for weekly
+    availability in free text (days and approximate time).
+13. A focused LangGraph validates the answer, stores it literally, and creates
+    a short goal-based essential-equipment recommendation.
+14. The athlete chooses **I have all the recommended equipment** or **Other /
+    I have limitations**. The latter is followed by a literal free-text answer.
+15. The athlete chooses **None** or **Describe limitations**. A literal answer
+    is required when they describe limitations; only then does onboarding move
+    to `ONBOARDING_COMPLETED`.
 
 The first mandatory profile prompt is:
 
 ```text
-Your goal has been saved.
+First, let\u2019s build your athlete profile.
 
 What year were you born? Send the four-digit year (1940 to 2008).
 ```
@@ -42,13 +50,15 @@ What year were you born? Send the four-digit year (1940 to 2008).
 Profile completion does not start an import, select a baseline, calculate
 feasibility, or generate a plan.
 
-Every Telegram command, text message, and callback enters one global
-tool-calling LangGraph workspace. The handler creates a `HumanMessage` and does
-not inspect callback namespaces, onboarding steps, or numeric formats. The
-agent can dispatch the opaque event to application services or call
-`update_onboarding_data` for an explicit correction. The sparse update tool
-supports `main_goal`, `target_outcome`, `event_date`, `age`, `birth_year`,
-`gender`, `weight_kg`, and `height_cm` while preserving omitted values.
+Commands, callbacks, and completed-profile chat routing use one global
+tool-calling LangGraph workspace. Active onboarding events bypass that workspace
+and go directly to the focused onboarding service, so raw availability,
+equipment, and limitation text is never written to global chat checkpoints. The
+sparse update tool supports `main_goal`, `target_outcome`, `event_date`, `age`,
+`birth_year`, `gender`, `weight_kg`, `height_cm`, `availability_text`,
+`equipment_text`, and `health_limitations_text` while preserving omitted values.
+A goal change regenerates the equipment recommendation and requires equipment
+review again.
 
 The durable onboarding states are:
 
@@ -60,6 +70,11 @@ The durable onboarding states are:
 - `PROFILE_GENDER_INTAKE`
 - `PROFILE_WEIGHT_INTAKE`
 - `PROFILE_HEIGHT_INTAKE`
+- `AVAILABILITY_INTAKE`
+- `EQUIPMENT_RECOMMENDATION`
+- `EQUIPMENT_INTAKE`
+- `EQUIPMENT_DETAILS_INTAKE`
+- `HEALTH_LIMITATIONS_INTAKE`
 
 Cancellation is stored as an onboarding-session status. Restart returns only
 that user's session to consent.
@@ -105,19 +120,31 @@ calls the canonical writer in `ProfileRepository`, which upserts one
 - `original_description`
 - `status=CONFIRMED`
 
-After confirmation, temporary draft and clarification state are removed. The
-original goal text and the relevant goal-message audit trail remain in the
-onboarding session. The global agent interprets the four mandatory profile
-answers; application services deterministically revalidate every value. On
-final height submission,
+After goal confirmation, temporary draft and clarification state are removed.
+The original goal text and the relevant goal-message audit trail remain in the
+onboarding session. The global agent routes the four mandatory profile answers;
+application services deterministically revalidate every value. Before goal
+intake, the final height submission
 `ProfileRepository.upsert_mandatory_athlete_profile` writes `birth_year`,
 `gender`, `weight_kg`, and `height_cm` for the owning `user_id`.
+
+The next three required onboarding responses are retained directly on that
+profile as nullable `TEXT` columns: `availability_text`,
+`equipment_recommendation_text`, `equipment_text`, and
+`health_limitations_text`. Raw availability, equipment, and limitation text is
+validated with a compiled LangGraph but is persisted verbatim. Buttons persist
+the stable markers `ALL_RECOMMENDED` and `NONE_REPORTED`. The legacy normalized
+availability, equipment, and health tables are intentionally not written by
+this flow.
 For a completed athlete, `update_onboarding_data` delegates through
 `OnboardingService`, which validates the sparse payload and routes profile
 fields to `athlete_profiles` and goal fields to `training_goals`. Each
 repository update is constrained by `user_id` and dynamically includes only
 the allowlisted supplied columns, preserving every omitted value and advancing
-`updated_at` only on the affected table.
+`updated_at` only on the affected table. Availability, equipment, and
+limitations updates affect only their matching raw column. A changed goal clears
+the old equipment answer, regenerates the recommendation, and reopens the
+equipment-review checkpoint.
 
 ## Architecture
 
@@ -140,12 +167,14 @@ instead, preserving conversational context without another model request.
 Service callables remain invocation context and are never serialized. Account
 deletion also removes the corresponding agent thread.
 
-The PostgreSQL checkpoint currently retains the full graph history, but the
-provider context is bounded to the latest three safe conversation messages.
-Historical tool traffic is omitted, while an active assistant tool request and
-its matching `ToolMessage` are retained together. Future planner context will be
-injected separately as structured athlete data rather than expanding the chat
-window.
+The PostgreSQL checkpoint retains only safe global-agent history. Active
+onboarding events never enter it, and a successful post-onboarding update
+removes its raw human input and raw tool-call arguments before checkpoint exit.
+The provider context is bounded to the latest three safe conversation messages;
+historical tool traffic is omitted, while an active assistant tool request and
+its matching `ToolMessage` are retained together when a provider turn is still
+needed. Future planner context will be injected separately as structured athlete
+data rather than expanding the chat window.
 
 ```text
 Telegram events ---- persistent global LangGraph ---- application tools
@@ -176,16 +205,16 @@ jobs retain their outcomes and workout provenance, but no longer contain an
 onboarding session ID or onboarding/daily context flag.
 
 The historical normalized profile tables remain because current profile reads
-for existing athletes still depend on them. Removed onboarding code no longer
-writes athlete demographics, availability, equipment, health constraints,
-coach preferences, or baseline preferences.
+for existing athletes still depend on them. The new onboarding writes only the
+basic demographics, canonical goal, and four raw context columns; it does not
+write normalized availability, equipment, health-constraint, coach-preference,
+or baseline-preference records.
 
 ## Intentional non-goals
 
 This slice does not implement:
 
-- the rest of athlete-profile onboarding;
-- availability or injury collection;
+- derived normalization of availability, equipment, or injury context;
 - baseline selection during onboarding;
 - goal feasibility or safety assessment;
 - roadmap, weekly plan, or adaptive replanning;
@@ -310,6 +339,11 @@ fields. Migration `0008_remove_legacy_onboarding`:
   import provenance, and return-to-onboarding feedback columns;
 - preserves users, canonical goals, historical normalized profiles, workouts,
   import jobs, feedback, baselines, and Strava data.
+
+Migration `0013_add_athlete_profile_context` adds the four nullable raw-context
+`TEXT` columns to `athlete_profiles` and extends the persisted onboarding-step
+checks for the availability, recommendation, equipment, and limitations
+checkpoints.
 
 Migration `0009_mandatory_profile` adds the four deterministic profile states,
 completed lifecycle/status values, and the owned athlete-profile `birth_year`

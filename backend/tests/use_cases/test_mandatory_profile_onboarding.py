@@ -60,7 +60,7 @@ def _identity() -> TelegramIdentity:
 
 
 @pytest.mark.asyncio
-async def test_profile_inputs_validate_deterministically_and_complete_atomically(
+async def test_profile_inputs_validate_deterministically_and_then_begin_goal_intake(
     profile_database: async_sessionmaker[AsyncSession],
 ) -> None:
     identity = _identity()
@@ -114,10 +114,11 @@ async def test_profile_inputs_validate_deterministically_and_complete_atomically
         assert invalid_height.kind == "profile_validation_error"
         assert invalid_height.current_step is OnboardingStep.PROFILE_HEIGHT_INTAKE
 
-    completed = await service.handle_text(identity, "178")
-    assert completed.kind == "onboarding_completed"
-    assert completed.user_status is UserStatus.ONBOARDING_COMPLETED
-    assert completed.onboarding_status is OnboardingStatus.COMPLETED
+    goal_intake = await service.handle_text(identity, "178")
+    assert goal_intake.kind == "goal_intake"
+    assert goal_intake.current_step is OnboardingStep.GOAL_INTAKE
+    assert goal_intake.user_status is UserStatus.ONBOARDING_IN_PROGRESS
+    assert goal_intake.onboarding_status is OnboardingStatus.ACTIVE
     assert extractor.calls == 0
 
     async with profile_database() as session:
@@ -131,5 +132,6 @@ async def test_profile_inputs_validate_deterministically_and_complete_atomically
         assert profile.gender is AthleteGender.OTHER_UNSPECIFIED
         assert profile.weight_kg == 72.5
         assert profile.height_cm == 178.0
-        assert persisted_user.status is UserStatus.ONBOARDING_COMPLETED
-        assert onboarding.status is OnboardingStatus.COMPLETED
+        assert persisted_user.status is UserStatus.ONBOARDING_IN_PROGRESS
+        assert onboarding.status is OnboardingStatus.ACTIVE
+        assert onboarding.current_step is OnboardingStep.GOAL_INTAKE

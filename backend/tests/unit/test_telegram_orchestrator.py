@@ -16,6 +16,7 @@ from app.schemas.onboarding_goal import UpdatedOnboardingData
 from app.workflows.telegram_orchestrator.workspace import (
     TelegramAgentContext,
     TelegramAgentWorkspace,
+    UpdateOnboardingAgentSchema,
     _build_graph,
     _provider_message_context,
     _system_prompt,
@@ -25,12 +26,20 @@ from app.workflows.telegram_orchestrator.workspace import (
 class ParallelCorrectionModel(DeterministicFakeOnboardingModel):
     """Reproduce providers that request correction and dispatch together."""
 
+    def __init__(self) -> None:
+        super().__init__()
+        self.invocations = 0
+
     def bind_tools(self, tools):  # type: ignore[no-untyped-def]
         del tools
 
         async def respond(messages):  # type: ignore[no-untyped-def]
-            if isinstance(messages[-1], ToolMessage):
-                return AIMessage(content="Your birth year has been updated.")
+            del messages
+            self.invocations += 1
+            if self.invocations > 1:
+                raise AssertionError(
+                    "a tool result must not trigger a second model turn"
+                )
             return AIMessage(
                 content="",
                 tool_calls=[
@@ -49,6 +58,39 @@ class ParallelCorrectionModel(DeterministicFakeOnboardingModel):
                         "id": "parallel-dispatch",
                         "type": "tool_call",
                     },
+                ],
+            )
+
+        return RunnableLambda(respond)
+
+
+class PrivateUpdateModel(DeterministicFakeOnboardingModel):
+    """Emit one sensitive update and fail if a follow-up provider turn occurs."""
+
+    def __init__(self, private_value: str) -> None:
+        super().__init__()
+        self.private_value = private_value
+        self.invocations = 0
+
+    def bind_tools(self, tools):  # type: ignore[no-untyped-def]
+        del tools
+
+        async def respond(messages):  # type: ignore[no-untyped-def]
+            del messages
+            self.invocations += 1
+            if self.invocations > 1:
+                raise AssertionError(
+                    "the private update must not get a second model turn"
+                )
+            return AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "update_onboarding_data",
+                        "args": {"health_limitations_text": self.private_value},
+                        "id": "private-health-update",
+                        "type": "tool_call",
+                    }
                 ],
             )
 
@@ -148,23 +190,41 @@ def test_provider_context_preserves_active_tool_request_and_result() -> None:
 
 
 def test_telegram_orchestrator_prompt_preserves_correction_routing_contract() -> None:
-    assert str(_system_prompt().content) == (
-        "You are the Adaptive Endurance Coach orchestrator. Your sole job is "
-        "to route the latest Telegram event into EXACTLY ONE tool call based "
-        "on user intent.\n\n"
-        "CRITICAL RULES:\n"
-        "1. DATA CORRECTIONS: If the user explicitly wants to change, update, "
-        "correct, or replace an athlete field (goal, weight, age, height, "
-        "event_date), you MUST call 'update_onboarding_data'. This rule "
-        "overrides any active question.\n"
-        "2. ORDINARY INPUTS: For normal answers, buttons clicks, or commands, "
-        "call 'dispatch_telegram_input' preserving the raw content "
-        "byte-for-byte.\n"
-        "3. NO DUPLICATES: Never call both tools for a single message.\n\n"
-        "After a tool executes, confirm the changes briefly and naturally, "
-        "then prompt the user using the 'current_prompt' provided in the "
-        "tool's result."
+    prompt = str(_system_prompt().content)
+
+    assert "route the latest Telegram event into EXACTLY ONE tool call" in prompt
+    assert (
+        "goal, target outcome, event date, age, birth year, category, weight, "
+        "height, availability, equipment, and training limitations"
+    ) in prompt
+    assert (
+        "Availability, equipment, and training limitations can each be updated "
+        "independently." in prompt
     )
+    assert "send only the relevant value from the latest user message" in prompt
+    assert "equipment_text='ALL_RECOMMENDED'" in prompt
+    assert "health_limitations_text='NONE_REPORTED'" in prompt
+    assert (
+        "Never quote, restate, summarise, or otherwise expose health_limitations_text"
+        in prompt
+    )
+    assert "Never call both tools for a single message." in prompt
+
+
+def test_global_update_schema_preserves_raw_context_values() -> None:
+    availability = "Mon, Wed, Fri: 45 min"
+    equipment = "I have a treadmill but no dumbbells"
+    limitations = "Avoid hard downhill runs"
+
+    validated = UpdateOnboardingAgentSchema(
+        availability_text=availability,
+        equipment_text=equipment,
+        health_limitations_text=limitations,
+    )
+
+    assert validated.availability_text == availability
+    assert validated.equipment_text == equipment
+    assert validated.health_limitations_text == limitations
 
 
 @pytest.mark.asyncio
@@ -256,7 +316,8 @@ async def test_workspace_prefers_correction_when_model_requests_two_tools() -> N
     updater = AsyncMock(
         return_value=UpdatedOnboardingData(updated_fields={"birth_year": 2003})
     )
-    workspace = TelegramAgentWorkspace(model=ParallelCorrectionModel())
+    model = ParallelCorrectionModel()
+    workspace = TelegramAgentWorkspace(model=model)
     try:
         response = await workspace.invoke(
             thread_id="telegram:parallel-correction",
@@ -279,6 +340,56 @@ async def test_workspace_prefers_correction_when_model_requests_two_tools() -> N
     )
     dispatcher.assert_not_awaited()
     assert "updated" in response.text.casefold()
+    assert model.invocations == 1
+
+
+@pytest.mark.asyncio
+async def test_workspace_scrubs_successful_private_update_from_checkpoints() -> None:
+    user_id = uuid4()
+    raw_message = "Please update my limitations; this is private."
+    private_value = "Avoid impact while my calf settles."
+    model = PrivateUpdateModel(private_value)
+    updater = AsyncMock(
+        return_value=UpdatedOnboardingData(
+            updated_fields={"health_limitations_text": private_value}
+        )
+    )
+    workspace = TelegramAgentWorkspace(model=model)
+    thread_id = "telegram:private-update"
+    try:
+        response = await workspace.invoke(
+            thread_id=thread_id,
+            message=HumanMessage(
+                content=raw_message,
+                additional_kwargs={"telegram_event_type": "text"},
+            ),
+            context=TelegramAgentContext(
+                user_id=user_id,
+                dispatcher=AsyncMock(),
+                onboarding_updater=updater,
+            ),
+        )
+        checkpointer = workspace._checkpointer
+        assert checkpointer is not None
+        checkpoints = [
+            checkpoint
+            async for checkpoint in checkpointer.alist(
+                {"configurable": {"thread_id": thread_id}}
+            )
+        ]
+    finally:
+        await workspace.aclose()
+
+    updater.assert_awaited_once_with(
+        user_id=user_id,
+        payload={"health_limitations_text": private_value},
+    )
+    assert response.text == "Your training limitations have been updated."
+    assert model.invocations == 1
+    assert checkpoints
+    checkpoint_text = "\n".join(repr(item.checkpoint) for item in checkpoints)
+    assert raw_message not in checkpoint_text
+    assert private_value not in checkpoint_text
 
 
 @pytest.mark.asyncio

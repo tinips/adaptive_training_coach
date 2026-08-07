@@ -14,6 +14,7 @@ from langchain_core.messages import (
     AIMessage,
     BaseMessage,
     HumanMessage,
+    RemoveMessage,
     SystemMessage,
     ToolMessage,
 )
@@ -166,6 +167,39 @@ class UpdateOnboardingAgentSchema(BaseModel):
     gender: Literal["MALE", "FEMALE", "OTHER_UNSPECIFIED"] | None = None
     weight_kg: float | None = Field(default=None, ge=40, le=200)
     height_cm: int | None = Field(default=None, ge=120, le=230)
+    availability_text: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=4096,
+        description=(
+            "The athlete's training availability exactly as they stated it, "
+            "including days and available time. Preserve the supplied wording "
+            "without summarising, translating, or normalising it."
+        ),
+    )
+    equipment_text: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=4096,
+        description=(
+            "The athlete's available equipment or equipment limitation exactly "
+            "as stated. Use ALL_RECOMMENDED only when the athlete explicitly "
+            "states that they have all recommended equipment; otherwise preserve "
+            "their supplied wording without rewriting it."
+        ),
+    )
+    health_limitations_text: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=4096,
+        description=(
+            "The athlete's injuries or training limitations exactly as stated. "
+            "Use NONE_REPORTED only when the athlete explicitly states that "
+            "there are none; otherwise preserve their supplied wording without "
+            "rewriting it. This is sensitive text and must never be repeated in "
+            "the assistant response."
+        ),
+    )
     runtime: Annotated[
         ToolRuntime[TelegramAgentContext, TelegramAgentState] | None,
         InjectedToolArg,
@@ -233,14 +267,23 @@ async def update_onboarding_data_from_agent(
         else None
     )
     rows = _serialize_keyboard(presentation) if presentation is not None else []
+    confirmation = bot_messages.onboarding_fields_updated(
+        tuple(updated.updated_fields),
+    )
+    # The presentation is authoritative after a mutation.  In particular, a
+    # changed goal immediately reopens equipment review; do not depend on a
+    # subsequent model turn to repeat that prompt or preserve health privacy.
     response_text = (
-        bot_messages.onboarding_fields_updated(tuple(updated.updated_fields))
-        if runtime.state.get("fast_track", False)
-        else None
+        f"{confirmation}\n\n{presentation.text}"
+        if presentation is not None
+        else confirmation
     )
     content = json.dumps(
         {
-            "updated_fields": updated.updated_fields,
+            # Values are intentionally omitted from graph state and the next
+            # provider turn.  They can contain raw health or availability text;
+            # only the persisted service owns those values.
+            "updated_fields": list(updated.updated_fields),
             "current_prompt": presentation.text if presentation is not None else None,
         },
         ensure_ascii=False,
@@ -301,7 +344,10 @@ def _system_prompt() -> SystemMessage:
     data_corrections_policy = explicit_onboarding_change_tool_policy(
         "telegram_orchestrator",
         tool_name="update_onboarding_data",
-        supported_fields="goal, weight, age, height, event_date",
+        supported_fields=(
+            "goal, target outcome, event date, age, birth year, category, "
+            "weight, height, availability, equipment, and training limitations"
+        ),
     )
     return SystemMessage(
         content=(
@@ -310,13 +356,26 @@ def _system_prompt() -> SystemMessage:
             "on user intent.\n\n"
             "CRITICAL RULES:\n"
             f"{data_corrections_policy}"
-            "2. ORDINARY INPUTS: For normal answers, buttons clicks, or commands, "
+            "2. RAW CONTEXT UPDATES: Availability, equipment, and training "
+            "limitations can each be updated independently. For one of those "
+            "fields, send only the relevant value from the latest user message "
+            "to 'update_onboarding_data' byte-for-byte: never summarise, "
+            "translate, infer, or alter it. Use equipment_text='ALL_RECOMMENDED' "
+            "only when the athlete explicitly says they have all recommended "
+            "equipment. Use health_limitations_text='NONE_REPORTED' only when "
+            "the athlete explicitly says they have no injuries or training "
+            "limitations. Do not update any other field unless the athlete "
+            "explicitly requested it.\n"
+            "3. SENSITIVE HEALTH CONTENT: Never quote, restate, summarise, or "
+            "otherwise expose health_limitations_text in a response. After it is "
+            "saved, refer only to 'training limitations'.\n"
+            "4. ORDINARY INPUTS: For normal answers, buttons clicks, or commands, "
             "call 'dispatch_telegram_input' preserving the raw content "
             "byte-for-byte.\n"
-            "3. NO DUPLICATES: Never call both tools for a single message.\n\n"
+            "5. NO DUPLICATES: Never call both tools for a single message.\n\n"
             "After a tool executes, confirm the changes briefly and naturally, "
-            "then prompt the user using the 'current_prompt' provided in the "
-            "tool's result."
+            "without exposing health text, then prompt the user using the "
+            "'current_prompt' provided in the tool's result."
         )
     )
 
@@ -369,6 +428,63 @@ def _provider_message_context(
         and not (isinstance(message, AIMessage) and bool(message.tool_calls))
     ]
     return plain_messages[-limit:]
+
+
+def _remove_persisted_update_exchange(
+    state: TelegramAgentState,
+) -> TelegramAgentState:
+    """Remove raw update input and arguments before the durable checkpoint exit.
+
+    The global workspace needs raw text for its first routing turn, but a
+    successful ownership-scoped update has no need to retain that message or its
+    AI tool-call arguments in chat history. This matters especially for health
+    limitations, whose literal value belongs only in the profile field.
+    """
+
+    messages = state.get("messages", [])
+    latest_tool_index = next(
+        (
+            index
+            for index in range(len(messages) - 1, -1, -1)
+            if isinstance(messages[index], ToolMessage)
+            and messages[index].name == "update_onboarding_data"
+        ),
+        None,
+    )
+    if latest_tool_index is None:
+        return {}
+
+    latest_tool = messages[latest_tool_index]
+    if not isinstance(latest_tool, ToolMessage):
+        return {}
+    remove_ids = [latest_tool.id]
+    tool_call_id = latest_tool.tool_call_id
+    tool_call_index: int | None = None
+    for index in range(latest_tool_index - 1, -1, -1):
+        candidate = messages[index]
+        if not isinstance(candidate, AIMessage):
+            continue
+        if any(
+            call.get("id") == tool_call_id
+            and call.get("name") == "update_onboarding_data"
+            for call in candidate.tool_calls
+        ):
+            remove_ids.append(candidate.id)
+            tool_call_index = index
+            break
+    if tool_call_index is not None:
+        for index in range(tool_call_index - 1, -1, -1):
+            candidate = messages[index]
+            if isinstance(candidate, HumanMessage):
+                remove_ids.append(candidate.id)
+                break
+    return {
+        "messages": [
+            RemoveMessage(id=message_id)
+            for message_id in remove_ids
+            if isinstance(message_id, str) and message_id
+        ]
+    }
 
 
 def _dispatch_tool_call(
@@ -580,11 +696,6 @@ def _build_graph(
     ) -> Literal["tools", "agent"]:
         return "tools" if state.get("fast_track", False) else "agent"
 
-    def route_after_tools(
-        state: TelegramAgentState,
-    ) -> Literal["agent", "__end__"]:
-        return "__end__" if state.get("fast_track", False) else "agent"
-
     async def agent(
         state: TelegramAgentState,
         config: RunnableConfig,
@@ -605,6 +716,10 @@ def _build_graph(
     builder.add_node("fast_router", fast_router)
     builder.add_node("agent", RunnableLambda(agent))
     builder.add_node("tools", ToolNode(tools, handle_tool_errors=False))
+    builder.add_node(
+        "remove_persisted_update_exchange",
+        RunnableLambda(_remove_persisted_update_exchange),
+    )
     builder.add_edge(START, "prepare")
     builder.add_edge("prepare", "fast_router")
     builder.add_conditional_edges(
@@ -617,11 +732,11 @@ def _build_graph(
         tools_condition,
         {"tools": "tools", "__end__": END},
     )
-    builder.add_conditional_edges(
-        "tools",
-        route_after_tools,
-        {"agent": "agent", "__end__": END},
-    )
+    # Both tools construct the complete deterministic Telegram response.  Do
+    # not make a second provider call after a write: the prior tool-call message
+    # may contain raw context values, including sensitive limitations.
+    builder.add_edge("tools", "remove_persisted_update_exchange")
+    builder.add_edge("remove_persisted_update_exchange", END)
     return builder.compile(
         checkpointer=checkpointer,
         name="telegram_global_orchestrator",

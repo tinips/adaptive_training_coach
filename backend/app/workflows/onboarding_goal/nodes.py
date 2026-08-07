@@ -104,8 +104,39 @@ class UpdateOnboardingSchema(BaseModel):
         pattern=r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
         description=future_event_date_policy("schema_description"),
     )
-
-    # TODO: Add future restrictions, limitations, and schedules here
+    availability_text: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=4096,
+        description=(
+            "The athlete's training availability exactly as they stated it, "
+            "including days and available time. Preserve the supplied wording "
+            "without summarising, translating, or normalising it."
+        ),
+    )
+    equipment_text: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=4096,
+        description=(
+            "The athlete's available equipment or equipment limitation exactly "
+            "as stated. Use ALL_RECOMMENDED only when the athlete explicitly "
+            "states that they have all recommended equipment; otherwise preserve "
+            "their supplied wording without rewriting it."
+        ),
+    )
+    health_limitations_text: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=4096,
+        description=(
+            "The athlete's injuries or training limitations exactly as stated. "
+            "Use NONE_REPORTED only when the athlete explicitly states that "
+            "there are none; otherwise preserve their supplied wording without "
+            "rewriting it. This is sensitive text and must never be repeated in "
+            "the assistant response."
+        ),
+    )
 
     runtime: Annotated[
         ToolRuntime[None, GoalExtractionGraphState] | None,
@@ -141,7 +172,9 @@ async def update_onboarding_data(
     )
     content = json.dumps(
         {
-            "updated_fields": updated.updated_fields,
+            # Do not place raw free-text profile values into graph state or feed
+            # them back to the model after the ownership-scoped write succeeds.
+            "updated_fields": list(updated.updated_fields),
             "updated": True,
         },
         ensure_ascii=False,
@@ -157,6 +190,11 @@ async def update_onboarding_data(
                 )
             ],
             "onboarding_updated": True,
+            "updated_fields": list(updated.updated_fields),
+            # The tool already owns the durable write.  End the graph instead
+            # of asking the model for a follow-up confirmation that could echo
+            # sensitive context from the original request.
+            "outcome": "onboarding_modified",
         }
     )
 
@@ -273,7 +311,7 @@ def build_onboarding_modification_messages(user_text: str) -> list[BaseMessage]:
         tool_name="update_onboarding_data",
         supported_fields=(
             "main goal, target outcome, event date, age, birth year, gender, "
-            "weight, and height"
+            "weight, height, availability, equipment, and training limitations"
         ),
     )
     return [
@@ -282,6 +320,20 @@ def build_onboarding_modification_messages(user_text: str) -> list[BaseMessage]:
                 f"{change_policy}Today's date is: "
                 f"{current_date}. "
                 f"{future_event_date_policy('onboarding_modification')}"
+                "Availability, equipment, and training limitations can each be "
+                "updated independently. For availability_text, equipment_text, or "
+                "health_limitations_text, copy only the relevant user-supplied "
+                "value from the latest request byte-for-byte. Never summarise, "
+                "translate, infer, trim, or otherwise rewrite it. Use "
+                "equipment_text='ALL_RECOMMENDED' only if the athlete explicitly "
+                "states that they have all recommended equipment. Use "
+                "health_limitations_text='NONE_REPORTED' only if the athlete "
+                "explicitly states that they have no injuries or training "
+                "limitations. Do not change related profile or goal fields unless "
+                "they are explicitly supplied in the same request. Treat health "
+                "limitations as sensitive: after a successful tool call, never "
+                "quote, restate, summarise, or otherwise expose their content; "
+                "confirm only that training limitations were updated. "
                 "Never claim an update before the tool "
                 "succeeds. After the tool result, reply with one concise, friendly "
                 "confirmation that states only the fields actually saved. If no "

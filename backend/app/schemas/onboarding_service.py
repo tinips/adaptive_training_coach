@@ -30,6 +30,12 @@ OnboardingResultKind = Literal[
     "profile_gender_intake",
     "profile_weight_intake",
     "profile_height_intake",
+    "availability_intake",
+    "equipment_recommendation",
+    "equipment_intake",
+    "equipment_details_intake",
+    "health_limitations_intake",
+    "context_validation_error",
     "profile_validation_error",
     "onboarding_completed",
     "cancelled",
@@ -49,4 +55,5 @@ class OnboardingServiceResult(BaseModel):
     answers: dict[str, JsonValue]
     error_code: str | None = None
     confirmation: str | None = Field(default=None, max_length=1000)
+    updated_fields: tuple[str, ...] = ()
     created: bool = False

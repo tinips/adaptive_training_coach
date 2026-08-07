@@ -94,6 +94,9 @@ def test_update_onboarding_schema_is_sparse_described_and_runtime_hidden() -> No
         "weight_kg": None,
         "height_cm": None,
         "event_date": None,
+        "availability_text": None,
+        "equipment_text": None,
+        "health_limitations_text": None,
     }
 
     schema = update_onboarding_data.tool_call_schema.model_json_schema()
@@ -107,6 +110,9 @@ def test_update_onboarding_schema_is_sparse_described_and_runtime_hidden() -> No
         "weight_kg",
         "height_cm",
         "event_date",
+        "availability_text",
+        "equipment_text",
+        "health_limitations_text",
     }
     assert "required" not in schema
     assert all(properties[field].get("description") for field in properties)
@@ -115,6 +121,22 @@ def test_update_onboarding_schema_is_sparse_described_and_runtime_hidden() -> No
         "YYYY-MM-DD format. Resolve a month and day without a year to the "
         "next future occurrence relative to today's date."
     )
+
+
+def test_update_onboarding_schema_preserves_raw_context_values() -> None:
+    availability = "Tuesday & Thursday: 45 min; Sunday: 2 h"
+    equipment = "Road bike only — no indoor trainer"
+    limitations = "Mild knee discomfort after downhill running"
+
+    validated = UpdateOnboardingSchema(
+        availability_text=availability,
+        equipment_text=equipment,
+        health_limitations_text=limitations,
+    )
+
+    assert validated.availability_text == availability
+    assert validated.equipment_text == equipment
+    assert validated.health_limitations_text == limitations
 
 
 def test_goal_extraction_prompt_uses_versioned_static_contract() -> None:
@@ -202,6 +224,25 @@ def test_explicit_onboarding_change_policy_preserves_legacy_tool_wording() -> No
         "'Barcelona Marathon' when that is what the athlete asks for. Never infer "
         "demographic values. "
     )
+
+
+def test_onboarding_modification_prompt_supports_private_raw_context_updates() -> None:
+    prompt = str(
+        build_onboarding_modification_messages("My knee is sore after hills.")[
+            0
+        ].content
+    )
+
+    assert (
+        "Availability, equipment, and training limitations can each be updated "
+        "independently."
+    ) in prompt
+    assert "copy only the relevant user-supplied value" in prompt
+    assert "equipment_text='ALL_RECOMMENDED'" in prompt
+    assert "health_limitations_text='NONE_REPORTED'" in prompt
+    assert (
+        "never quote, restate, summarise, or otherwise expose their content"
+    ) in prompt
 
 
 @pytest.mark.asyncio
@@ -464,12 +505,6 @@ async def test_onboarding_modification_calls_tool_updates_state_and_confirms() -
                     }
                 ],
             ),
-            AIMessage(
-                content=(
-                    "Done — your goal is now to finish an Ironman 70.3 "
-                    "in a decent time."
-                )
-            ),
         ],
     )
     graph = build_goal_extraction_graph(model=model)
@@ -497,6 +532,4 @@ async def test_onboarding_modification_calls_tool_updates_state_and_confirms() -
     )
     assert result["onboarding_updated"] is True
     assert result["outcome"] == "onboarding_modified"
-    assert result["confirmation"] == (
-        "Done — your goal is now to finish an Ironman 70.3 in a decent time."
-    )
+    assert result["updated_fields"] == ["main_goal", "target_outcome"]

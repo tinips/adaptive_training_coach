@@ -55,6 +55,7 @@ class OnboardingModificationWorkflowResult(BaseModel):
         "provider_error",
     ]
     confirmation: str | None = Field(default=None, max_length=1000)
+    updated_fields: tuple[str, ...] = ()
     error_code: str | None = Field(default=None, max_length=80)
 
 

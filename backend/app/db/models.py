@@ -348,7 +348,7 @@ class OnboardingSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
 
 class AthleteProfile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
-    """Normalized athlete demographics and primary discipline."""
+    """Athlete demographics, primary discipline, and raw onboarding context."""
 
     __tablename__ = "athlete_profiles"
     __table_args__ = (
@@ -385,6 +385,13 @@ class AthleteProfile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         persisted_enum(PrimarySport, name="primary_sport", length=24),
         nullable=False,
     )
+    availability_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    equipment_recommendation_text: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+    equipment_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    health_limitations_text: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     user: Mapped[User] = relationship(
         back_populates="athlete_profile",

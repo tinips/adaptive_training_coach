@@ -87,7 +87,10 @@ class GoalExtractionPatch(_GoalExtractionFields):
     """Field patch returned by the model for only the latest user message."""
 
 
-StructuredOutputSchema = type[GoalExtractionPatch]
+# The same provider boundary is shared by focused onboarding graphs.  Each
+# graph owns its response schema and revalidates the returned object before it
+# crosses its application boundary.
+StructuredOutputSchema = type[BaseModel]
 
 
 @dataclass(frozen=True, slots=True)

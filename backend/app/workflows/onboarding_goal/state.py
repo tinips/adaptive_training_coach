@@ -37,6 +37,7 @@ class GoalExtractionGraphState(TypedDict, total=False):
     messages: Annotated[list[BaseMessage], add_messages]
     onboarding_updater: OnboardingUpdateHandler
     onboarding_updated: bool
+    updated_fields: list[str]
     confirmation: str
     outcome: GoalWorkflowOutcome
     error_code: str | None

@@ -67,10 +67,11 @@ def test_initial_migration_upgrade_and_downgrade(
             for row in connection.execute("PRAGMA table_info('training_goals')")
         }
         training_goal_columns = set(training_goal_info)
-        athlete_profile_columns = {
-            row[1]
+        athlete_profile_info = {
+            row[1]: row
             for row in connection.execute("PRAGMA table_info('athlete_profiles')")
         }
+        athlete_profile_columns = set(athlete_profile_info)
         onboarding_columns = {
             row[1]
             for row in connection.execute("PRAGMA table_info('onboarding_sessions')")
@@ -80,7 +81,7 @@ def test_initial_migration_upgrade_and_downgrade(
             for row in connection.execute("PRAGMA table_info('workout_flow_sessions')")
         }
 
-    assert revision == ("0012_remove_fitness_level",)
+    assert revision == ("0013_add_athlete_profile_context",)
     assert len(tables - {"alembic_version"}) == 28
     assert {
         "activity_feedback",
@@ -137,6 +138,18 @@ def test_initial_migration_upgrade_and_downgrade(
         "weight_kg",
         "height_cm",
     }.issubset(athlete_profile_columns)
+    raw_context_columns = {
+        "availability_text",
+        "equipment_recommendation_text",
+        "equipment_text",
+        "health_limitations_text",
+    }
+    assert raw_context_columns.issubset(athlete_profile_columns)
+    assert all(
+        athlete_profile_info[column][2].upper() == "TEXT"
+        and athlete_profile_info[column][3] == 0
+        for column in raw_context_columns
+    )
     assert "fitness_level" not in athlete_profile_columns
 
     command.downgrade(configuration, "0004_discipline_workout_models")
@@ -190,7 +203,7 @@ def test_initial_migration_upgrade_and_downgrade(
                 "SELECT name FROM sqlite_master WHERE type = 'table'",
             )
         }
-    assert reupgraded_revision == ("0012_remove_fitness_level",)
+    assert reupgraded_revision == ("0013_add_athlete_profile_context",)
     assert "heart_rate_observations" not in reupgraded_tables
 
     command.downgrade(configuration, "base")
@@ -202,6 +215,61 @@ def test_initial_migration_upgrade_and_downgrade(
             )
         }
     assert remaining == {"alembic_version"}
+    get_settings.cache_clear()
+
+
+def test_context_migration_keeps_existing_profiles_and_defaults_raw_fields_to_null(
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    database_path = tmp_path / "profile-context-migration.db"
+    database_url = f"sqlite+aiosqlite:///{database_path.as_posix()}"
+    monkeypatch.setenv("DATABASE_URL", database_url)  # type: ignore[attr-defined]
+    monkeypatch.setenv("TELEGRAM_BOT_USERNAME", "")  # type: ignore[attr-defined]
+    get_settings.cache_clear()
+    configuration = Config(str(BACKEND_ROOT / "alembic.ini"))
+    command.upgrade(configuration, "0012_remove_fitness_level")
+
+    user_id = "f1000000000000000000000000000000"
+    profile_id = "f2000000000000000000000000000000"
+    now = "2026-08-07 08:00:00+00:00"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "INSERT INTO users "
+            "(telegram_user_id, language_code, status, id, created_at, updated_at) "
+            "VALUES (777001, 'en', 'ONBOARDING_COMPLETED', ?, ?, ?)",
+            (user_id, now, now),
+        )
+        connection.execute(
+            "INSERT INTO athlete_profiles "
+            "(user_id, age, birth_year, gender, height_cm, weight_kg, "
+            "primary_sport, id, created_at, updated_at) "
+            "VALUES (?, 36, 1990, 'FEMALE', 168.0, 62.5, 'RUNNING', ?, ?, ?)",
+            (user_id, profile_id, now, now),
+        )
+        connection.commit()
+
+    command.upgrade(configuration, "head")
+    with sqlite3.connect(database_path) as connection:
+        profile = connection.execute(
+            "SELECT age, birth_year, gender, height_cm, weight_kg, primary_sport, "
+            "availability_text, equipment_recommendation_text, equipment_text, "
+            "health_limitations_text FROM athlete_profiles WHERE id = ?",
+            (profile_id,),
+        ).fetchone()
+
+    assert profile == (
+        36,
+        1990,
+        "FEMALE",
+        168.0,
+        62.5,
+        "RUNNING",
+        None,
+        None,
+        None,
+        None,
+    )
     get_settings.cache_clear()
 
 
@@ -457,7 +525,7 @@ def test_unified_import_migration_preserves_and_backfills_0002_data(
             (import_job_id,),
         ).fetchone()
 
-    assert revision == ("0012_remove_fitness_level",)
+    assert revision == ("0013_add_athlete_profile_context",)
     assert apple_sources == [
         (exact_apple_id, "APPLE_HEALTH", "apple-exact"),
         (summary_apple_id, "APPLE_HEALTH", "apple-summary"),
@@ -860,7 +928,7 @@ def test_discipline_workout_migration_preserves_populated_0003_data(
             "PRAGMA foreign_key_check",
         ).fetchall()
 
-    assert revision_at_head == ("0012_remove_fitness_level",)
+    assert revision_at_head == ("0013_add_athlete_profile_context",)
     assert "heart_rate_observations" not in head_tables
     assert len(workout_rows) == len(activities)
     assert {row[0] for row in workout_rows} == {row["id"] for row in activities}

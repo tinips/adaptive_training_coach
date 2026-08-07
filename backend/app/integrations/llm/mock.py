@@ -74,18 +74,33 @@ class DeterministicFakeOnboardingModel:
                 return StructuredModelResponse(
                     output={"confidence": "not-a-number"},
                 )
-            goal_output = schema.model_validate(
-                _fake_goal_output(
-                    value,
-                    needs_clarification=scenario
-                    in {
-                        FakeLLMScenario.CLARIFICATION,
-                        FakeLLMScenario.LOW_CONFIDENCE,
-                    },
+            needs_clarification = scenario in {
+                FakeLLMScenario.CLARIFICATION,
+                FakeLLMScenario.LOW_CONFIDENCE,
+            }
+            if _is_free_text_validation_schema(schema):
+                output = schema.model_validate(
+                    {"accepted": not needs_clarification},
                 )
-            )
+            elif _is_equipment_recommendation_schema(schema):
+                if needs_clarification:
+                    return StructuredModelResponse(
+                        output={"recommendation": ""},
+                        prompt_tokens=8,
+                        completion_tokens=12,
+                    )
+                output = schema.model_validate(
+                    {"recommendation": _fake_equipment_recommendation(messages)},
+                )
+            else:
+                output = schema.model_validate(
+                    _fake_goal_output(
+                        value,
+                        needs_clarification=needs_clarification,
+                    )
+                )
             return StructuredModelResponse(
-                output=goal_output,
+                output=output,
                 prompt_tokens=8,
                 completion_tokens=12,
             )
@@ -202,6 +217,41 @@ def _fake_goal_output(
     }
 
 
+def _is_free_text_validation_schema(schema: StructuredOutputSchema) -> bool:
+    """Recognize the isolated validator without importing workflow modules."""
+
+    return set(schema.model_fields) == {"accepted"}
+
+
+def _is_equipment_recommendation_schema(schema: StructuredOutputSchema) -> bool:
+    """Recognize the isolated recommender without importing workflow modules."""
+
+    return set(schema.model_fields) == {"recommendation"}
+
+
+def _fake_equipment_recommendation(messages: list[BaseMessage]) -> str:
+    """Produce a stable, conservative mock recommendation from prompt context."""
+
+    context = " ".join(
+        message.content for message in messages if isinstance(message.content, str)
+    ).casefold()
+    if "triathlon" in context:
+        return (
+            "A roadworthy bike and helmet, swim goggles, running shoes, and a "
+            "basic repair kit."
+        )
+    if "cycl" in context or "bike" in context:
+        return (
+            "A roadworthy bicycle, helmet, front and rear lights, and a basic "
+            "repair kit."
+        )
+    if "swim" in context:
+        return "Swimwear, goggles, a swim cap, and a small towel or pool bag."
+    return (
+        "Comfortable running shoes, breathable training clothing, and a water bottle."
+    )
+
+
 def _fake_onboarding_update(user_text: str) -> dict[str, object]:
     folded = user_text.casefold()
     if "ironman 70.3" in folded and "decent time" in folded:
@@ -231,4 +281,37 @@ def _fake_onboarding_update(user_text: str) -> dict[str, object]:
         payload["birth_year"] = int(birth_year.group(1))
     if height is not None:
         payload["height_cm"] = int(height.group(1))
+    availability = _literal_value_after_label(user_text, "availability")
+    if availability is not None:
+        payload["availability_text"] = availability
+    if "all the recommended equipment" in folded:
+        payload["equipment_text"] = "ALL_RECOMMENDED"
+    else:
+        equipment = _literal_value_after_label(user_text, "equipment")
+        if equipment is not None:
+            payload["equipment_text"] = equipment
+    if re.search(
+        r"\b(?:no|none)\b[^.\n]*(?:injur|limitation|restriction)",
+        folded,
+    ):
+        payload["health_limitations_text"] = "NONE_REPORTED"
+    else:
+        limitations = _literal_value_after_label(user_text, "limitations")
+        if limitations is None:
+            limitations = _literal_value_after_label(user_text, "injuries")
+        if limitations is None:
+            limitations = _literal_value_after_label(user_text, "injury")
+        if limitations is not None:
+            payload["health_limitations_text"] = limitations
     return payload
+
+
+def _literal_value_after_label(user_text: str, label: str) -> str | None:
+    """Return the unmodified tail after an explicit conversational field label."""
+
+    match = re.search(rf"\b{re.escape(label)}\b", user_text, flags=re.IGNORECASE)
+    if match is None:
+        return None
+    value = user_text[match.end() :]
+    value = re.sub(r"^\s*(?:is|to|are|:|=)\s*", "", value, flags=re.IGNORECASE)
+    return value if value.strip() else None
