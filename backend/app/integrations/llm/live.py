@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -97,13 +98,15 @@ class OpenAICompatibleOnboardingModel:
         if not isinstance(result, Mapping):
             return StructuredModelResponse(output=result, malformed=True)
 
-        parsed = result.get("parsed")
-        parsing_error = result.get("parsing_error")
         raw = result.get("raw")
+        parsed, malformed = _recover_structured_json(
+            parsed=result.get("parsed"),
+            raw=raw,
+        )
         prompt_tokens, completion_tokens = _token_usage(raw)
         return StructuredModelResponse(
             output=parsed,
-            malformed=parsing_error is not None or parsed is None,
+            malformed=malformed,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
         )
@@ -142,3 +145,24 @@ def _token_usage(raw: object) -> tuple[int | None, int | None]:
         prompt if isinstance(prompt, int) else None,
         completion if isinstance(completion, int) else None,
     )
+
+
+def _recover_structured_json(
+    *,
+    parsed: object,
+    raw: object,
+) -> tuple[object | None, bool]:
+    """Recover valid JSON when a provider leaves LangChain's ``parsed`` empty.
+
+    The application graph still validates the recovered object against its
+    Pydantic schema. No raw provider content is persisted or logged here.
+    """
+
+    if parsed is not None:
+        return parsed, False
+    if not isinstance(raw, AIMessage) or not isinstance(raw.content, str):
+        return None, True
+    try:
+        return json.loads(raw.content), False
+    except (TypeError, ValueError):
+        return None, True

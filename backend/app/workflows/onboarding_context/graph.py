@@ -28,6 +28,7 @@ from app.observability.protocol import (
 )
 from app.schemas.onboarding_context import (
     ContextOnboardingWorkflow,
+    EquipmentInterpretationWorkflowResult,
     EquipmentRecommendationGoalContext,
     EquipmentRecommendationWorkflowResult,
     FreeTextValidationWorkflowResult,
@@ -239,6 +240,30 @@ class LangGraphContextOnboardingWorkflow(ContextOnboardingWorkflow):
             started_clock=started_clock,
         )
         return result
+
+    async def interpret_equipment(
+        self, *, goal_context: EquipmentRecommendationGoalContext
+    ) -> EquipmentInterpretationWorkflowResult:
+        try:
+            state = cast(
+                EquipmentRecommendationGraphState,
+                await self._equipment_recommendation_graph.ainvoke(
+                    {"goal_context": goal_context}
+                ),
+            )
+            raw = state.get("interpretation")
+            if state.get("outcome") == "recommended" and isinstance(raw, dict):
+                return EquipmentInterpretationWorkflowResult(
+                    outcome="accepted", interpretation=raw
+                )
+            return EquipmentInterpretationWorkflowResult(
+                outcome="provider_error",
+                error_code=state.get("error_code") or "provider_failure",
+            )
+        except Exception:
+            return EquipmentInterpretationWorkflowResult(
+                outcome="provider_error", error_code="workflow_failure"
+            )
 
     def _build_metadata(
         self,

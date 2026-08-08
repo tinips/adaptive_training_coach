@@ -28,6 +28,7 @@ class Settings(BaseSettings):
 
     telegram_bot_token: SecretStr | None = None
     telegram_bot_username: str | None = None
+    dev_telegram_user_ids: set[int] = Field(default_factory=set)
     database_url: str = (
         "postgresql+asyncpg://coach:coach@localhost:55432/adaptive_coach"
     )
@@ -93,6 +94,15 @@ class Settings(BaseSettings):
         ):
             raise ValueError("TELEGRAM_BOT_USERNAME is not a valid Telegram username")
         return normalized
+
+    @field_validator("dev_telegram_user_ids", mode="before")
+    @classmethod
+    def parse_dev_telegram_user_ids(cls, value: object) -> object:
+        if isinstance(value, str):
+            return {int(item.strip()) for item in value.split(",") if item.strip()}
+        if isinstance(value, int):
+            return {value}
+        return value
 
     @field_validator("apple_health_import_temp_dir", mode="before")
     @classmethod

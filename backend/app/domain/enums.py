@@ -247,6 +247,55 @@ class TrainingGoalStatus(StrEnum):
     CONFIRMED = "CONFIRMED"
 
 
+class EquipmentResourceCategory(StrEnum):
+    EQUIPMENT = "EQUIPMENT"
+    FACILITY_ACCESS = "FACILITY_ACCESS"
+    TRAINING_RESOURCE = "TRAINING_RESOURCE"
+
+
+class EquipmentPriority(StrEnum):
+    ESSENTIAL = "Essential"
+    RECOMMENDED = "Recommended"
+    OPTIONAL = "Optional"
+
+
+class EquipmentTrainingStage(StrEnum):
+    START = "START"
+    BASE = "BASE"
+    BUILD = "BUILD"
+    RACE_SPECIFIC = "RACE_SPECIFIC"
+    RACE = "RACE"
+
+
+class EquipmentSubstitutionQuality(StrEnum):
+    FULL = "FULL"
+    PARTIAL = "PARTIAL"
+    FITNESS_ONLY = "FITNESS_ONLY"
+    NONE = "NONE"
+
+
+class AthleteEquipmentStatus(StrEnum):
+    AVAILABLE = "AVAILABLE"
+    UNAVAILABLE = "UNAVAILABLE"
+
+
+class ProfileSettingsStep(StrEnum):
+    """Persisted, deterministic post-onboarding profile edit states."""
+
+    MENU = "MENU"
+    GOAL_MAIN = "GOAL_MAIN"
+    GOAL_OUTCOME = "GOAL_OUTCOME"
+    GOAL_DATE = "GOAL_DATE"
+    AVAILABILITY = "AVAILABILITY"
+    EQUIPMENT = "EQUIPMENT"
+    HEALTH = "HEALTH"
+    PERSONAL_MENU = "PERSONAL_MENU"
+    PERSONAL_BIRTH_YEAR = "PERSONAL_BIRTH_YEAR"
+    PERSONAL_GENDER = "PERSONAL_GENDER"
+    PERSONAL_WEIGHT = "PERSONAL_WEIGHT"
+    PERSONAL_HEIGHT = "PERSONAL_HEIGHT"
+
+
 class CoachTone(StrEnum):
     DIRECT_DEMANDING = "DIRECT_DEMANDING"
     ANALYTICAL_DETAILED = "ANALYTICAL_DETAILED"

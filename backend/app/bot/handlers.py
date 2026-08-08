@@ -77,6 +77,12 @@ async def delete_handler(
     await _agent_delegate(update, context, "/delete_me")
 
 
+async def dev_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if message is not None and message.text is not None:
+        await _agent_delegate(update, context, message.text)
+
+
 async def callback_handler(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,

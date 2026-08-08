@@ -14,6 +14,7 @@ from telegram import InlineKeyboardMarkup
 
 from app.bot import keyboards, messages
 from app.bot.rendering import TelegramResponse
+from app.config import get_settings
 from app.domain.enums import (
     AppleHealthImportStatus,
     BaselineSource,
@@ -26,6 +27,7 @@ from app.domain.enums import (
 )
 from app.schemas.common import TelegramIdentity
 from app.schemas.onboarding_service import OnboardingServiceResult
+from app.schemas.profile_settings import ProfileSettingsResult
 from app.schemas.training_import import TelegramDocumentUpload
 from app.services.accounts import AccountQueryService, AccountService
 from app.services.onboarding import OnboardingApplicationError, OnboardingService
@@ -137,6 +139,12 @@ class CoachBotApplicationService:
         )
         if not isinstance(message.content, str) or not message.content.strip():
             return TelegramResponse(messages.GENERIC_ERROR)
+        if self._is_development_command(event_type, message.content):
+            # These commands must bypass the global agent even for an already
+            # completed account, so they always prepare the requested state.
+            return await self._dispatch_agent_event(
+                identity, event_type, message.content
+            )
         workspace = self._agent_workspace
         if workspace is None:
             return await self._dispatch_agent_event(
@@ -167,6 +175,26 @@ class CoachBotApplicationService:
                 )
             return response
 
+        if (
+            lifecycle is not None
+            and lifecycle["status"] is UserStatus.ONBOARDING_COMPLETED
+        ):
+            # Completed-athlete profile edits are deliberately never inferred by
+            # the global agent.  Text is only accepted in an explicit mini-flow.
+            if event_type == "text" and not message.content.startswith("/"):
+                result = await self._onboarding.submit_profile_settings_text(
+                    identity, message.content
+                )
+                if result is None:
+                    return TelegramResponse(
+                        messages.PROFILE_SETTINGS_UNPROMPTED,
+                        keyboards.completed_onboarding_keyboard(),
+                    )
+                return self._render_profile_settings(result)
+            return await self._dispatch_agent_event(
+                identity, event_type, message.content
+            )
+
         async def dispatch(
             supplied_event_type: TelegramEventType,
             content: str,
@@ -189,7 +217,7 @@ class CoachBotApplicationService:
                 dispatcher=dispatch,
                 onboarding_updater=(
                     self._onboarding.update_onboarding_data
-                    if user_id is not None
+                    if user_id is not None and onboarding_active
                     else None
                 ),
                 presentation_loader=(
@@ -209,6 +237,30 @@ class CoachBotApplicationService:
 
         if event_type == "callback":
             return await self.handle_callback(identity, content)
+        if self._is_development_command(event_type, content):
+            settings = get_settings()
+            if (
+                settings.environment != "development"
+                or identity.telegram_user_id not in settings.dev_telegram_user_ids
+            ):
+                return TelegramResponse(messages.NOT_FOUND)
+            try:
+                if content.casefold() == "/dev_reset":
+                    result = await self._onboarding.reset_development_onboarding(
+                        identity
+                    )
+                else:
+                    parts = content.split(maxsplit=1)
+                    step = parts[1].casefold() if len(parts) == 2 else ""
+                    result = await self._onboarding.seed_development_step(
+                        identity, step
+                    )
+            except OnboardingApplicationError:
+                return TelegramResponse(
+                    "Development step unavailable. Use availability, equipment, "
+                    "limitations, or completed."
+                )
+            return await self._render_onboarding(identity, result)
         command_routes: dict[
             str,
             Callable[[TelegramIdentity], Awaitable[TelegramResponse]],
@@ -227,6 +279,13 @@ class CoachBotApplicationService:
             return await command(identity)
         return await self.handle_text(identity, content)
 
+    @staticmethod
+    def _is_development_command(event_type: TelegramEventType, content: str) -> bool:
+        if event_type != "text":
+            return False
+        command = content.split(maxsplit=1)[0].casefold()
+        return command in {"/dev_step", "/dev_reset"}
+
     async def _help(self, identity: TelegramIdentity) -> TelegramResponse:
         del identity
         return TelegramResponse(messages.HELP)
@@ -241,6 +300,20 @@ class CoachBotApplicationService:
         text: str,
     ) -> TelegramResponse:
         try:
+            lifecycle = await self._account_queries.lifecycle(identity)
+            if (
+                lifecycle is not None
+                and lifecycle["status"] is UserStatus.ONBOARDING_COMPLETED
+            ):
+                settings_result = await self._onboarding.submit_profile_settings_text(
+                    identity, text
+                )
+                if settings_result is None:
+                    return TelegramResponse(
+                        messages.PROFILE_SETTINGS_UNPROMPTED,
+                        keyboards.completed_onboarding_keyboard(),
+                    )
+                return self._render_profile_settings(settings_result)
             if self._workout_feedback_enabled and self._workout_feedback is not None:
                 feedback = await self._workout_feedback.snapshot(identity)
                 if feedback is not None:
@@ -473,6 +546,16 @@ class CoachBotApplicationService:
         identity: TelegramIdentity,
         callback_data: str,
     ) -> TelegramResponse:
+        if callback_data == "ps:v1:open":
+            return self._render_profile_settings(
+                await self._onboarding.open_profile_settings(identity)
+            )
+        if callback_data.startswith("ps:v1:"):
+            return self._render_profile_settings(
+                await self._onboarding.choose_profile_settings(
+                    identity, callback_data.removeprefix("ps:v1:")
+                )
+            )
         if callback_data.startswith("nav:v1:"):
             return await self._navigation(
                 identity,
@@ -521,7 +604,17 @@ class CoachBotApplicationService:
             )
         if callback_data.startswith("ob:v1:equipment:"):
             choice = callback_data.removeprefix("ob:v1:equipment:")
-            if choice not in {"all", "other"}:
+            if choice == "review":
+                return await self._render_onboarding(
+                    identity,
+                    await self._onboarding.review_equipment_settings(identity),
+                )
+            if choice == "skip":
+                return await self._render_onboarding(
+                    identity,
+                    await self._onboarding.skip_equipment_details(identity),
+                )
+            if not choice or len(choice) > 40:
                 raise OnboardingApplicationError("invalid_action")
             return await self._render_onboarding(
                 identity,
@@ -924,6 +1017,94 @@ class CoachBotApplicationService:
             prefix=prefix,
         )
 
+    @staticmethod
+    def _render_profile_settings(result: ProfileSettingsResult) -> TelegramResponse:
+        """Render persisted ps:v1 state without inspecting or echoing raw text."""
+
+        if result.step.value == "MENU":
+            if result.saved_field == "__closed__":
+                return TelegramResponse(
+                    messages.ONBOARDING_COMPLETED,
+                    keyboards.completed_onboarding_keyboard(),
+                )
+            prefix = (
+                messages.PROFILE_SAVED.format(field=result.saved_field) + "\n\n"
+                if result.saved_field
+                else ""
+            )
+            return TelegramResponse(
+                prefix + messages.PROFILE_SETTINGS_MENU,
+                keyboards.profile_settings_keyboard(),
+            )
+        prompts = {
+            "GOAL_MAIN": (
+                messages.PROFILE_GOAL_MAIN,
+                keyboards.profile_text_input_keyboard(),
+            ),
+            "GOAL_OUTCOME": (
+                messages.PROFILE_GOAL_OUTCOME,
+                keyboards.profile_text_input_keyboard(),
+            ),
+            "GOAL_DATE": (
+                messages.PROFILE_GOAL_DATE,
+                keyboards.profile_goal_date_keyboard(),
+            ),
+            "AVAILABILITY": (
+                messages.PROFILE_AVAILABILITY,
+                keyboards.profile_text_input_keyboard(),
+            ),
+            "HEALTH": (messages.PROFILE_HEALTH, keyboards.profile_health_keyboard()),
+            "PERSONAL_MENU": (
+                messages.PROFILE_PERSONAL,
+                keyboards.profile_personal_keyboard(),
+            ),
+            "PERSONAL_BIRTH_YEAR": (
+                messages.PROFILE_BIRTH_YEAR,
+                keyboards.profile_text_input_keyboard(),
+            ),
+            "PERSONAL_GENDER": (
+                messages.PROFILE_CATEGORY,
+                keyboards.profile_settings_gender_keyboard(),
+            ),
+            "PERSONAL_WEIGHT": (
+                messages.PROFILE_WEIGHT,
+                keyboards.profile_text_input_keyboard(),
+            ),
+            "PERSONAL_HEIGHT": (
+                messages.PROFILE_HEIGHT,
+                keyboards.profile_text_input_keyboard(),
+            ),
+        }
+        if result.step.value == "EQUIPMENT":
+            raw_resources = result.pending.get("resources", {})
+            resources = (
+                {
+                    key: value
+                    for key, value in raw_resources.items()
+                    if isinstance(key, str) and isinstance(value, str)
+                }
+                if isinstance(raw_resources, dict)
+                else {}
+            )
+            raw_selected = result.pending.get("selected", [])
+            selected = (
+                {value for value in raw_selected if isinstance(value, str)}
+                if isinstance(raw_selected, list)
+                else set()
+            )
+            recommendation = result.pending.get("recommendation")
+            return TelegramResponse(
+                messages.equipment_recommendation(
+                    recommendation if isinstance(recommendation, str) else None
+                ),
+                keyboards.profile_equipment_keyboard(resources, selected),
+            )
+        prompt, keyboard = prompts.get(
+            result.step.value,
+            (messages.PROFILE_SETTINGS_MENU, keyboards.profile_settings_keyboard()),
+        )
+        return TelegramResponse(prompt, keyboard)
+
     async def _render_onboarding(
         self,
         identity: TelegramIdentity,
@@ -1019,16 +1200,32 @@ class CoachBotApplicationService:
             )
         if result.kind == "equipment_intake":
             recommendation = result.answers.get("equipment_recommendation_text")
+            raw_labels = result.answers.get("equipment_resource_labels")
+            resources = (
+                {
+                    key: value
+                    for key, value in raw_labels.items()
+                    if isinstance(key, str) and isinstance(value, str)
+                }
+                if isinstance(raw_labels, dict)
+                else None
+            )
+            raw_selected = result.answers.get("equipment_selection", [])
+            selected = (
+                {value for value in raw_selected if isinstance(value, str)}
+                if isinstance(raw_selected, list)
+                else set()
+            )
             return TelegramResponse(
                 messages.equipment_recommendation(
                     recommendation if isinstance(recommendation, str) else None
                 ),
-                keyboards.equipment_intake_keyboard(),
+                keyboards.equipment_intake_keyboard(resources, selected),
             )
         if result.kind == "equipment_details_intake":
             return TelegramResponse(
                 messages.EQUIPMENT_DETAILS_INTAKE,
-                keyboards.profile_text_input_keyboard(),
+                keyboards.equipment_details_keyboard(),
             )
         if result.kind == "health_limitations_intake":
             return TelegramResponse(
@@ -1056,7 +1253,10 @@ class CoachBotApplicationService:
                 keyboards.profile_text_input_keyboard(),
             )
         if result.kind == "onboarding_completed":
-            return TelegramResponse(messages.ONBOARDING_COMPLETED)
+            return TelegramResponse(
+                messages.ONBOARDING_COMPLETED,
+                keyboards.completed_onboarding_keyboard(),
+            )
         if result.kind == "onboarding_modification":
             if result.updated_fields:
                 return TelegramResponse(
@@ -1116,11 +1316,27 @@ class CoachBotApplicationService:
             )
         if result.current_step is OnboardingStep.EQUIPMENT_INTAKE:
             recommendation = result.answers.get("equipment_recommendation_text")
+            raw_labels = result.answers.get("equipment_resource_labels")
+            resources = (
+                {
+                    key: value
+                    for key, value in raw_labels.items()
+                    if isinstance(key, str) and isinstance(value, str)
+                }
+                if isinstance(raw_labels, dict)
+                else None
+            )
+            raw_selected = result.answers.get("equipment_selection", [])
+            selected = (
+                {value for value in raw_selected if isinstance(value, str)}
+                if isinstance(raw_selected, list)
+                else set()
+            )
             return (
                 messages.equipment_recommendation(
                     recommendation if isinstance(recommendation, str) else None
                 ),
-                keyboards.equipment_intake_keyboard(),
+                keyboards.equipment_intake_keyboard(resources, selected),
             )
         return (
             messages.CONTEXT_VALIDATION_ERROR,

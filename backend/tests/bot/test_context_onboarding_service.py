@@ -11,7 +11,9 @@ import pytest
 from langchain_core.messages import HumanMessage
 
 from app.bot import keyboards, messages
+from app.bot import service as bot_service_module
 from app.bot.service import CoachBotApplicationService
+from app.config import Settings
 from app.domain.enums import OnboardingStatus, OnboardingStep, UserStatus
 from app.schemas.common import TelegramIdentity
 from app.schemas.onboarding_service import OnboardingResultKind, OnboardingServiceResult
@@ -105,6 +107,36 @@ async def test_health_callback_uses_only_deterministic_onboarding_method() -> No
 
 
 @pytest.mark.asyncio
+async def test_development_step_bypasses_global_agent_for_completed_accounts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity = _identity()
+    onboarding = SimpleNamespace(
+        seed_development_step=AsyncMock(
+            return_value=_result(
+                "availability_intake", OnboardingStep.AVAILABILITY_INTAKE
+            )
+        )
+    )
+    workspace = SimpleNamespace(invoke=AsyncMock())
+    monkeypatch.setattr(
+        bot_service_module,
+        "get_settings",
+        lambda: Settings(
+            environment="development", dev_telegram_user_ids={identity.telegram_user_id}
+        ),
+    )
+
+    response = await _facade(onboarding, agent_workspace=workspace).handle_agent_input(
+        identity, HumanMessage(content="/dev_step availability")
+    )
+
+    onboarding.seed_development_step.assert_awaited_once_with(identity, "availability")
+    workspace.invoke.assert_not_awaited()
+    assert response.text == messages.AVAILABILITY_INTAKE
+
+
+@pytest.mark.asyncio
 async def test_context_steps_render_the_correct_prompt_and_controls() -> None:
     facade = _facade(SimpleNamespace())
     identity = _identity()
@@ -118,7 +150,13 @@ async def test_context_steps_render_the_correct_prompt_and_controls() -> None:
         _result(
             "equipment_recommendation",
             OnboardingStep.EQUIPMENT_INTAKE,
-            answers={"equipment_recommendation_text": "Running shoes and a watch."},
+            answers={
+                "equipment_recommendation_text": (
+                    "Equipment      Importance  When needed\n"
+                    "-------------  ----------  ---------------------\n"
+                    "Running shoes  Essential   Start now — every run"
+                )
+            },
         ),
     )
     details = await facade._render_onboarding(
@@ -137,11 +175,15 @@ async def test_context_steps_render_the_correct_prompt_and_controls() -> None:
     )
 
     assert availability.text == messages.AVAILABILITY_INTAKE
+    assert "swim at a pool" in availability.text
+    assert "ride for up to two hours" in availability.text
     assert availability.keyboard == keyboards.profile_text_input_keyboard()
-    assert "Running shoes and a watch." in equipment.text
+    assert "<pre>" in equipment.text
+    assert "Equipment      Importance  When needed" in equipment.text
+    assert "Running shoes  Essential   Start now" in equipment.text
     assert equipment.keyboard == keyboards.equipment_intake_keyboard()
     assert details.text == messages.EQUIPMENT_DETAILS_INTAKE
-    assert details.keyboard == keyboards.profile_text_input_keyboard()
+    assert details.keyboard == keyboards.equipment_details_keyboard()
     assert health.text == messages.HEALTH_LIMITATIONS_INTAKE
     assert health.keyboard == keyboards.health_limitations_keyboard()
 

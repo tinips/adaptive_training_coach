@@ -18,6 +18,7 @@ from app.bot.handlers import (
     callback_handler,
     cancel_handler,
     delete_handler,
+    dev_handler,
     document_handler,
     global_error_handler,
     help_handler,
@@ -26,10 +27,12 @@ from app.bot.handlers import (
     strava_handler,
     text_handler,
 )
+from app.config import Settings, get_settings
 
 
 def register_handlers(
     application: Application[Any, Any, Any, Any, Any, Any],
+    settings: Settings | None = None,
 ) -> None:
     """Register command, callback, text, and safe error handlers."""
 
@@ -41,6 +44,10 @@ def register_handlers(
     application.add_handler(CommandHandler("strava", strava_handler))
     application.add_handler(CommandHandler("cancel", cancel_handler))
     application.add_handler(CommandHandler("delete_me", delete_handler))
+    runtime_settings = settings or get_settings()
+    if runtime_settings.environment == "development":
+        application.add_handler(CommandHandler("dev_step", dev_handler))
+        application.add_handler(CommandHandler("dev_reset", dev_handler))
     application.add_handler(CallbackQueryHandler(callback_handler))
     application.add_handler(MessageHandler(filters.Document.ALL, document_handler))
     application.add_handler(

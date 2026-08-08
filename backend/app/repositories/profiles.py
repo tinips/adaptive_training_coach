@@ -273,6 +273,17 @@ class ProfileRepository:
         await self._session.flush()
         return goal
 
+    async def increment_equipment_context_revision(
+        self, *, user_id: uuid.UUID
+    ) -> TrainingGoal:
+        """Create a new logical equipment-review identity for a changed goal."""
+        goal = await self.get_training_goal(user_id=user_id)
+        if goal is None:
+            raise OwnedRecordNotFoundError("training goal not found")
+        goal.equipment_context_revision += 1
+        await self._session.flush()
+        return goal
+
     async def upsert_mandatory_athlete_profile(
         self,
         *,

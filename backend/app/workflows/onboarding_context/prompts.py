@@ -25,10 +25,16 @@ _CONTEXT_STEP_INSTRUCTIONS: Final[dict[str, str]] = {
 }
 
 EQUIPMENT_RECOMMENDATION_CONTRACT: Final = (
-    "Recommend only a short, practical list of essential equipment appropriate to "
-    "the confirmed athlete goal. Return only the requested structured response. "
-    "Write concise English plain text, at most five short items or sentences. Do "
-    "not generate a training plan, infer injuries, provide medical advice, mention "
+    "Act as a practical physical coach selecting equipment for the athlete's "
+    "confirmed training goal. Return valid JSON matching the requested schema, with "
+    'exactly this top-level shape: {"items":[{"equipment_name":"...",'
+    '"importance":"Essential","when_needed":"Start now — first sessions"}]}. '
+    "Use a practical list of equipment items. The when_needed field must start with "
+    "exactly one of: Start now, Base training, Race-specific prep, Advanced prep, "
+    "or Race day; follow it with an em dash and a short reason. "
+    "For each item, choose exactly one importance value: Essential, Recommended, or "
+    "Optional. Recommend equipment only; do not "
+    "generate a training plan, infer injuries, provide medical advice, mention "
     "brands, or claim to know what the athlete already owns. If the goal is broad, "
     "give a conservative general-training recommendation."
 )

@@ -37,6 +37,7 @@ class EquipmentRecommendationGraphState(TypedDict, total=False):
     goal_context: EquipmentRecommendationGoalContext
     outcome: EquipmentRecommendationGraphOutcome
     recommendation: str | None
+    interpretation: dict[str, list[str]] | None
     error_code: str | None
     prompt_tokens: int | None
     completion_tokens: int | None

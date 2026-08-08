@@ -328,12 +328,15 @@ PROFILE_HEIGHT_INTAKE = (
 )
 AVAILABILITY_INTAKE = (
     "Tell me about your weekly training availability in your own words.\n\n"
-    "Include the days you can train and roughly how much time you have on each day. "
-    "For example: 'I can train Tuesday and Thursday for 45 minutes, and Saturday "
-    "for up to two hours.'"
+    "Include the days you can train, roughly how much time you have, and any places "
+    "or facilities you can use if relevant. For example: "
+    "'I can ride for up to two hours on the weekend.' "
+    "I can swim at a pool on Wednesday and Friday, and I can cycle only on weekends."
 )
 EQUIPMENT_DETAILS_INTAKE = (
-    "Tell me what equipment you have available and any limits on using it."
+    "Anything else about your equipment or access we should know?\n\n"
+    "Example: 'I have an MTB, can use a gym bike, and can only access the pool "
+    "on weekends.'"
 )
 HEALTH_LIMITATIONS_INTAKE = (
     "Do you have any current or past injuries, discomfort, or physical limitations "
@@ -353,16 +356,30 @@ def equipment_recommendation(recommendation: str | None) -> str:
 
     suggestion = escape(recommendation or "the basic equipment for your goal")
     return (
-        "Based on your goal, here is the essential equipment to consider:\n\n"
-        f"{suggestion}\n\n"
-        "Do you have all of this equipment?"
+        "Based on your goal, here is the essential equipment to consider, plus "
+        "useful extras:\n\n"
+        f"<pre>{suggestion}</pre>\n\n"
+        "Which of these can you currently use? "
+        "Select every item that is available to you."
     )
 
 
 ONBOARDING_COMPLETED = (
-    "Your athlete profile, training goal, availability, equipment context, and "
-    "training limitations have been saved."
+    "Your onboarding is complete. You can change your profile settings at any time."
 )
+PROFILE_SETTINGS_MENU = "Choose a profile setting to change."
+PROFILE_SETTINGS_UNPROMPTED = "Use Change profile to choose what you want to update."
+PROFILE_GOAL_MAIN = "What is your training goal?"
+PROFILE_GOAL_OUTCOME = "What would success or the outcome look like?"
+PROFILE_GOAL_DATE = "When is the event? Send YYYY-MM-DD, or choose Not yet."
+PROFILE_AVAILABILITY = "Describe your weekly training availability."
+PROFILE_HEALTH = "Choose None, or describe limitations in a message."
+PROFILE_PERSONAL = "Choose the personal detail to change."
+PROFILE_BIRTH_YEAR = "Send your birth year."
+PROFILE_WEIGHT = "Send your weight in kilograms."
+PROFILE_HEIGHT = "Send your height in centimeters."
+PROFILE_CATEGORY = "Choose your category."
+PROFILE_SAVED = "Saved: {field}."
 GOAL_OFF_TOPIC = (
     "We can come back to equipment later. Right now, I\u2019m building your athlete "
     "profile.\n\n"

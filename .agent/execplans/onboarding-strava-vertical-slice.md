@@ -1803,3 +1803,88 @@ personalisation.
   deterministically, without asking an LLM to judge its adequacy.
 - [x] Preserve literal persistence and retain the existing empty-message retry.
 - [x] Update focused graph and onboarding regressions for vague availability.
+
+## 2026-08-07 structured equipment recommendation table
+
+- [x] Change the goal-based material recommendation to structured coach-selected
+  equipment rows with `Essential`, `Recommended`, or `Optional` importance.
+- [x] Validate one to five short, unique items and reject plan or medical content.
+- [x] Render and persist a stable two-column monospaced Telegram table; retain
+  the existing retry-after-provider-failure behavior without a new migration.
+
+## 2026-08-07 DeepSeek JSON-mode compatibility
+
+- [x] State the valid-JSON requirement explicitly in the equipment prompt so
+  DeepSeek accepts its `json_object` response format.
+- [x] Remove the product limit of five equipment rows; only reject a rendered
+  table that would exceed Telegram's message-size capacity.
+- [x] Recover valid provider JSON when DeepSeek leaves LangChain's parsed value
+  empty; schema validation remains the workflow boundary and raw output is not
+  logged or persisted.
+- [x] Remove the per-item name-length limit after confirming it rejected a valid
+  DeepSeek material item; the rendered Telegram-table limit remains enforced.
+- [x] Align the workflow-result recommendation length with the Telegram-safe
+  table limit, replacing the historical 700-character text-list limit.
+
+## 2026-08-07 equipment timing column
+
+- [x] Add a required `when_needed` field to every recommended equipment item.
+- [x] Require one named training stage plus a concise reason and render it as
+  the third `When needed` Telegram-table column.
+
+## 2026-08-07 development onboarding shortcuts
+
+- [x] Add the development-only `DEV_TELEGRAM_USER_IDS` allowlist and parse its
+  comma-separated environment value as Telegram user IDs.
+- [x] Register `/dev_step` and `/dev_reset` only when the runtime environment
+  is `development`; production and test applications do not expose them.
+- [x] Route these commands around the global-agent workspace so they reliably
+  prepare a requested state even for a completed account. Unauthorized callers
+  receive the ordinary not-found response.
+- [x] Implement isolated synthetic states for `availability`, `equipment`,
+  `limitations`, and `completed`, scoped to the requesting user and without
+  changing activities or external integrations. `/dev_reset` returns only that
+  user to consent without deleting profile data.
+- [x] Add router, facade, and service regression coverage for command
+  registration, bypassing the global agent, every seeded step, reset, and user
+  isolation. `219` bot/unit, `2` scenario, `77` API/use-case, `13`
+  repository/workout-persistence, and `5` migration integration tests pass;
+  Ruff, format, and mypy pass. The rebuilt Docker bot was exercised with the
+  configured development account: `/dev_step equipment` rendered the material
+  review and `/dev_reset` rendered the consent prompt.
+
+## 2026-08-07 availability examples
+
+- [x] Extend the free-text availability prompt with one neutral example that
+  includes time, days, running, pool access, and cycling.
+- [x] Do not classify the goal or interpret the answer: any non-empty response
+  remains accepted and is saved literally as `availability_text`.
+
+## 2026-08-08 deterministic equipment knowledge
+
+- [x] Add goal-scoped deterministic equipment reference tables, seeded starter
+  data, stage windows, substitutions, and status persistence in revision
+  `0014_equipment_knowledge`.
+- [x] Replace the onboarding recommendation call with the database-backed
+  recommendation renderer and interactive resource-status selection.
+- [x] Add a structured free-text equipment interpretation branch to the
+  compiled context workflow; raw answers remain durable if it fails.
+- [ ] Expand deterministic recommendation regression coverage for each seeded
+  event and stage window.
+
+## 2026-08-08 deterministic post-onboarding profile settings
+
+- [x] Add the user-owned `profile_settings_sessions` checkpoint in revision
+  `0015_profile_settings_session`; it is independent of onboarding lifecycle
+  completion and records only the active mini-flow and transient answers.
+- [x] Replace the completed equipment-only entry point with `Change profile`
+  and stable `ps:v1:` callbacks for goal, availability, equipment, health, and
+  personal details.
+- [x] Persist goal, availability, health, and personal-detail edits through
+  focused deterministic paths; literal free text is accepted only after an
+  athlete chooses its corresponding setting and no settings callback invokes
+  an LLM.
+- [x] Route completed-athlete free text to the selected settings mini-flow or
+  back to `Change profile`; do not call the global onboarding-update path.
+- [x] Preserve the completed lifecycle while equipment editing preloads and
+  replaces goal-revision-scoped availability statuses.

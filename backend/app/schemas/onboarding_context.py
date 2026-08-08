@@ -38,6 +38,8 @@ class EquipmentRecommendationGoalContext(BaseModel):
     target_outcome: str | None = Field(default=None, max_length=500)
     event_date: date | None = None
     secondary_priority: str | None = Field(default=None, max_length=500)
+    equipment_text: str | None = Field(default=None, max_length=4096)
+    recommendation_text: str | None = Field(default=None, max_length=3500)
 
     @field_validator(
         "main_goal",
@@ -74,10 +76,19 @@ class EquipmentRecommendationWorkflowResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     outcome: EquipmentRecommendationOutcome
-    recommendation: str | None = Field(default=None, max_length=700)
+    recommendation: str | None = Field(default=None, max_length=3_500)
     error_code: str | None = Field(default=None, max_length=80)
     prompt_tokens: int | None = Field(default=None, ge=0)
     completion_tokens: int | None = Field(default=None, ge=0)
+
+
+class EquipmentInterpretationWorkflowResult(BaseModel):
+    """Structured, non-recommendation interpretation of athlete wording."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    outcome: FreeTextValidationOutcome
+    interpretation: dict[str, list[str]] | None = None
+    error_code: str | None = Field(default=None, max_length=80)
 
 
 class ContextOnboardingWorkflow(Protocol):
@@ -110,3 +121,8 @@ class ContextOnboardingWorkflow(Protocol):
         secondary_priority: str | None,
     ) -> EquipmentRecommendationWorkflowResult:
         """Return a short equipment suggestion for confirmed goal fields."""
+
+    async def interpret_equipment(
+        self, *, goal_context: EquipmentRecommendationGoalContext
+    ) -> EquipmentInterpretationWorkflowResult:
+        """Interpret raw equipment wording against a deterministic recommendation."""

@@ -39,6 +39,7 @@ from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin, utc_now
 from app.domain.enums import (
     ActivitySource,
     AppleHealthImportStatus,
+    AthleteEquipmentStatus,
     AthleteGender,
     BaselinePreferenceStatus,
     BaselineSource,
@@ -50,6 +51,10 @@ from app.domain.enums import (
     DetailLevel,
     Discipline,
     DiscomfortSeverity,
+    EquipmentPriority,
+    EquipmentResourceCategory,
+    EquipmentSubstitutionQuality,
+    EquipmentTrainingStage,
     HikingType,
     LevelLabel,
     LLMUsageStatus,
@@ -57,6 +62,7 @@ from app.domain.enums import (
     OnboardingStatus,
     OnboardingStep,
     PrimarySport,
+    ProfileSettingsStep,
     RunningType,
     StrengthType,
     SwimmingEnvironment,
@@ -186,6 +192,13 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
 
     onboarding_session: Mapped[OnboardingSession | None] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="raise",
+        uselist=False,
+    )
+    profile_settings_session: Mapped[ProfileSettingsSession | None] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
         passive_deletes=True,
@@ -347,6 +360,31 @@ class OnboardingSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
 
 
+class ProfileSettingsSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Small durable checkpoint for a completed athlete's settings mini-flow."""
+
+    __tablename__ = "profile_settings_sessions"
+    __table_args__ = (
+        UniqueConstraint("user_id", name="uq_profile_settings_sessions_user_id"),
+    )
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    current_step: Mapped[ProfileSettingsStep] = mapped_column(
+        persisted_enum(ProfileSettingsStep, name="profile_settings_step", length=32),
+        default=ProfileSettingsStep.MENU,
+        server_default=ProfileSettingsStep.MENU.value,
+        nullable=False,
+    )
+    pending_answers: Mapped[dict[str, object]] = mapped_column(
+        json_document(), default=dict, nullable=False
+    )
+    user: Mapped[User] = relationship(
+        back_populates="profile_settings_session", lazy="raise"
+    )
+
+
 class AthleteProfile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     """Athlete demographics, primary discipline, and raw onboarding context."""
 
@@ -428,10 +466,179 @@ class TrainingGoal(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         server_default=TrainingGoalStatus.CONFIRMED.value,
         nullable=False,
     )
+    equipment_context_revision: Mapped[int] = mapped_column(
+        Integer, default=1, server_default="1", nullable=False
+    )
 
     user: Mapped[User] = relationship(
         back_populates="training_goal",
         lazy="raise",
+    )
+
+
+class EquipmentResource(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Stable reference catalog for equipment and access resources."""
+
+    __tablename__ = "equipment_resources"
+    __table_args__ = (UniqueConstraint("code", name="uq_equipment_resources_code"),)
+    code: Mapped[str] = mapped_column(String(64), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    category: Mapped[EquipmentResourceCategory] = mapped_column(
+        persisted_enum(
+            EquipmentResourceCategory, name="equipment_resource_category", length=24
+        ),
+        nullable=False,
+    )
+
+
+class EquipmentGoalType(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Database-held deterministic matcher for a supported goal/event."""
+
+    __tablename__ = "equipment_goal_types"
+    __table_args__ = (UniqueConstraint("code", name="uq_equipment_goal_types_code"),)
+    code: Mapped[str] = mapped_column(String(64), nullable=False)
+    match_terms: Mapped[list[str]] = mapped_column(json_document(), nullable=False)
+    match_priority: Mapped[int] = mapped_column(
+        SmallInteger, default=100, nullable=False
+    )
+
+
+class EquipmentStageWindow(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "equipment_stage_windows"
+    __table_args__ = (
+        UniqueConstraint(
+            "goal_type_id", "stage", name="uq_equipment_stage_windows_goal_stage"
+        ),
+    )
+    goal_type_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("equipment_goal_types.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    stage: Mapped[EquipmentTrainingStage] = mapped_column(
+        persisted_enum(
+            EquipmentTrainingStage, name="equipment_training_stage", length=24
+        ),
+        nullable=False,
+    )
+    minimum_days_until_event: Mapped[int] = mapped_column(Integer, nullable=False)
+    maximum_days_until_event: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class EquipmentResourceRequirement(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "equipment_resource_requirements"
+    __table_args__ = (
+        UniqueConstraint(
+            "goal_type_id", "resource_id", name="uq_equipment_requirement_goal_resource"
+        ),
+    )
+    goal_type_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("equipment_goal_types.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    resource_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("equipment_resources.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    priority: Mapped[EquipmentPriority] = mapped_column(
+        persisted_enum(EquipmentPriority, name="equipment_priority", length=16),
+        nullable=False,
+    )
+    required_stage: Mapped[EquipmentTrainingStage] = mapped_column(
+        persisted_enum(
+            EquipmentTrainingStage, name="equipment_requirement_stage", length=24
+        ),
+        nullable=False,
+    )
+    condition_text: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    display_order: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+
+
+class EquipmentResourceSubstitution(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "equipment_resource_substitutions"
+    __table_args__ = (
+        UniqueConstraint(
+            "required_resource_id",
+            "substitute_resource_id",
+            name="uq_equipment_substitution_pair",
+        ),
+    )
+    required_resource_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("equipment_resources.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    substitute_resource_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("equipment_resources.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    quality: Mapped[EquipmentSubstitutionQuality] = mapped_column(
+        persisted_enum(
+            EquipmentSubstitutionQuality,
+            name="equipment_substitution_quality",
+            length=24,
+        ),
+        nullable=False,
+    )
+
+
+class AthleteGoalEquipmentStatus(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "athlete_goal_equipment_statuses"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "training_goal_id",
+            "goal_revision",
+            "resource_id",
+            name="uq_athlete_goal_equipment_status",
+        ),
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    training_goal_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("training_goals.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    goal_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    resource_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("equipment_resources.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    status: Mapped[AthleteEquipmentStatus] = mapped_column(
+        persisted_enum(
+            AthleteEquipmentStatus, name="athlete_equipment_status", length=16
+        ),
+        nullable=False,
+    )
+
+
+class AthleteGoalEquipmentInterpretation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "athlete_goal_equipment_interpretations"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "training_goal_id",
+            "goal_revision",
+            name="uq_athlete_goal_equipment_interpretation",
+        ),
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    training_goal_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("training_goals.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    goal_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    interpretation: Mapped[dict[str, object]] = mapped_column(
+        json_document(), nullable=False
     )
 
 

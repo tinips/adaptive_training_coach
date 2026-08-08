@@ -14,12 +14,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings
 from app.db.base import utc_now
-from app.db.models import OnboardingSession, User
+from app.db.models import OnboardingSession, ProfileSettingsSession, TrainingGoal, User
 from app.domain.enums import (
     AthleteGender,
     LLMUsageStatus,
     OnboardingStatus,
     OnboardingStep,
+    ProfileSettingsStep,
     UserStatus,
 )
 from app.integrations.llm.models import (
@@ -28,15 +29,16 @@ from app.integrations.llm.models import (
     GoalExtractionPatch,
     GoalFieldName,
 )
+from app.repositories.equipment import EquipmentRepository
 from app.repositories.llm_usage import LLMUsageRepository
 from app.repositories.onboarding import OnboardingRepository
+from app.repositories.profile_settings import ProfileSettingsRepository
 from app.repositories.profiles import ProfileRepository
 from app.repositories.users import UserRepository
 from app.schemas.common import TelegramIdentity
 from app.schemas.onboarding_context import (
     ContextOnboardingWorkflow,
     EquipmentRecommendationGoalContext,
-    EquipmentRecommendationWorkflowResult,
     FreeTextValidationWorkflowResult,
 )
 from app.schemas.onboarding_goal import (
@@ -45,6 +47,8 @@ from app.schemas.onboarding_goal import (
     UpdatedOnboardingData,
 )
 from app.schemas.onboarding_service import OnboardingResultKind, OnboardingServiceResult
+from app.schemas.profile_settings import ProfileSettingsResult
+from app.services.equipment.service import EquipmentRecommendationService
 from app.workflows.onboarding_context.graph import create_context_onboarding_workflow
 
 _PARSE_IN_FLIGHT_KEY = "_parse_in_flight"
@@ -64,6 +68,10 @@ _GENDER_KEY = "gender"
 _WEIGHT_KG_KEY = "weight_kg"
 _HEIGHT_CM_KEY = "height_cm"
 _EQUIPMENT_RECOMMENDATION_KEY = "equipment_recommendation_text"
+_EQUIPMENT_RESOURCES_KEY = "equipment_resource_ids"
+_EQUIPMENT_SELECTION_KEY = "equipment_selection"
+_EQUIPMENT_RESOURCE_LABELS_KEY = "equipment_resource_labels"
+_EQUIPMENT_SETTINGS_REVIEW_KEY = "equipment_settings_review"
 _CONTEXT_RETRY_ERROR_KEY = "_context_retry_error"
 _INTEGER_PATTERN = re.compile(r"[0-9]+")
 _WEIGHT_PATTERN = re.compile(r"[0-9]+(?:\.[0-9]+)?")
@@ -82,7 +90,6 @@ _ONBOARDING_UPDATE_FIELDS = (
 _FREE_TEXT_CONTEXT_STEPS = frozenset(
     {
         OnboardingStep.AVAILABILITY_INTAKE,
-        OnboardingStep.EQUIPMENT_DETAILS_INTAKE,
         OnboardingStep.HEALTH_LIMITATIONS_INTAKE,
     }
 )
@@ -150,6 +157,91 @@ class OnboardingService:
             if current.status is not OnboardingStatus.CANCELLED:
                 raise OnboardingApplicationError("restart_not_allowed")
             onboarding = await OnboardingRepository(session).restart(user_id=user.id)
+            return self._result(user, onboarding)
+
+    async def seed_development_step(
+        self, identity: TelegramIdentity, step_name: str
+    ) -> OnboardingServiceResult:
+        """Prepare deterministic synthetic onboarding state for a dev user."""
+        await self.start(identity)
+        steps = {
+            "availability": OnboardingStep.AVAILABILITY_INTAKE,
+            "equipment": OnboardingStep.EQUIPMENT_RECOMMENDATION,
+            "limitations": OnboardingStep.HEALTH_LIMITATIONS_INTAKE,
+            "completed": OnboardingStep.HEALTH_LIMITATIONS_INTAKE,
+        }
+        step = steps.get(step_name)
+        if step is None:
+            raise OnboardingApplicationError("invalid_development_step")
+        async with self._session_factory.begin() as session:
+            user, onboarding = await self._locked_state(session, identity)
+            profiles = ProfileRepository(session)
+            await profiles.upsert_mandatory_athlete_profile(
+                user_id=user.id,
+                birth_year=1990,
+                gender=AthleteGender.OTHER_UNSPECIFIED,
+                weight_kg=70.0,
+                height_cm=175.0,
+            )
+            await profiles.upsert_conversational_training_goal(
+                user_id=user.id,
+                main_goal="Complete an Ironman 70.3",
+                event_date=None,
+                target_outcome="Finish comfortably",
+                secondary_priority=None,
+                original_description="Development test goal",
+            )
+            recommendation = (
+                "Equipment       Importance  When needed\n"
+                "Running shoes   Essential   Start now - every run"
+            )
+            context: dict[str, str | None] = {
+                "availability_text": None,
+                "equipment_recommendation_text": None,
+                "equipment_text": None,
+                "health_limitations_text": None,
+            }
+            if step_name in {"equipment", "limitations", "completed"}:
+                context["availability_text"] = "Weekdays one hour; weekends two hours."
+                context["equipment_recommendation_text"] = recommendation
+            if step_name in {"limitations", "completed"}:
+                context["equipment_text"] = "ALL_RECOMMENDED"
+            if step_name == "completed":
+                context["health_limitations_text"] = "NONE_REPORTED"
+            await profiles.update_athlete_profile_context_fields(
+                user_id=user.id, payload=context
+            )
+            onboarding.status = (
+                OnboardingStatus.COMPLETED
+                if step_name == "completed"
+                else OnboardingStatus.ACTIVE
+            )
+            onboarding.current_step = step
+            onboarding.answers = {
+                "consent": True,
+            }
+            if context["equipment_recommendation_text"] is not None:
+                onboarding.answers[_EQUIPMENT_RECOMMENDATION_KEY] = recommendation
+            user.status = (
+                UserStatus.ONBOARDING_COMPLETED
+                if step_name == "completed"
+                else UserStatus.ONBOARDING_IN_PROGRESS
+            )
+            await session.flush()
+            return self._result(user, onboarding)
+
+    async def reset_development_onboarding(
+        self, identity: TelegramIdentity
+    ) -> OnboardingServiceResult:
+        """Return a development user to the first onboarding prompt only."""
+        await self.start(identity)
+        async with self._session_factory.begin() as session:
+            user, onboarding = await self._locked_state(session, identity)
+            onboarding.status = OnboardingStatus.ACTIVE
+            onboarding.current_step = OnboardingStep.CONSENT
+            onboarding.answers = {}
+            user.status = UserStatus.ONBOARDING_IN_PROGRESS
+            await session.flush()
             return self._result(user, onboarding)
 
     async def confirm_consent(
@@ -348,22 +440,63 @@ class OnboardingService:
     ) -> OnboardingServiceResult:
         """Handle deterministic equipment callbacks without calling an LLM."""
 
-        if choice not in {"all", "other"}:
-            raise OnboardingApplicationError("invalid_action")
         async with self._session_factory.begin() as session:
             user, onboarding = await self._locked_state(session, identity)
             self._require_active(onboarding)
             if onboarding.current_step is not OnboardingStep.EQUIPMENT_INTAKE:
                 raise OnboardingApplicationError("stale_action")
             answers = self._answers(onboarding)
-            if choice == "all":
-                await ProfileRepository(session).update_athlete_profile_context_fields(
-                    user_id=user.id,
-                    payload={"equipment_text": "ALL_RECOMMENDED"},
+            raw_resources = answers.get(_EQUIPMENT_RESOURCES_KEY, [])
+            if not isinstance(raw_resources, list):
+                raw_resources = []
+            resource_ids = {
+                str(value) for value in raw_resources if isinstance(value, str)
+            }
+            raw_selected = answers.get(_EQUIPMENT_SELECTION_KEY, [])
+            if not isinstance(raw_selected, list):
+                raw_selected = []
+            selected = {str(value) for value in raw_selected if isinstance(value, str)}
+            if choice == "done":
+                if not resource_ids:
+                    raise OnboardingApplicationError("stale_action")
+                goal = await ProfileRepository(session).get_training_goal(
+                    user_id=user.id
                 )
+                if goal is None:
+                    raise OnboardingApplicationError("stale_action")
+                from app.domain.enums import AthleteEquipmentStatus
+
+                statuses = {
+                    uuid.UUID(resource_id): (
+                        AthleteEquipmentStatus.AVAILABLE
+                        if resource_id in selected
+                        else AthleteEquipmentStatus.UNAVAILABLE
+                    )
+                    for resource_id in resource_ids
+                }
+                await EquipmentRepository(session).replace_statuses(
+                    user_id=user.id,
+                    training_goal_id=goal.id,
+                    goal_revision=goal.equipment_context_revision,
+                    statuses=statuses,
+                )
+                if answers.pop(_EQUIPMENT_SETTINGS_REVIEW_KEY, False) is True:
+                    return await self._complete_context_onboarding(
+                        session=session,
+                        user=user,
+                        onboarding=onboarding,
+                        answers=answers,
+                    )
                 current_step = OnboardingStep.HEALTH_LIMITATIONS_INTAKE
+            elif choice in resource_ids:
+                if choice in selected:
+                    selected.remove(choice)
+                else:
+                    selected.add(choice)
+                answers[_EQUIPMENT_SELECTION_KEY] = cast(JsonValue, sorted(selected))
+                current_step = OnboardingStep.EQUIPMENT_INTAKE
             else:
-                current_step = OnboardingStep.EQUIPMENT_DETAILS_INTAKE
+                raise OnboardingApplicationError("invalid_action")
             onboarding = await OnboardingRepository(session).save_progress(
                 user_id=user.id,
                 current_step=current_step,
@@ -400,6 +533,422 @@ class OnboardingService:
                 onboarding=onboarding,
                 answers=answers,
             )
+
+    async def skip_equipment_details(
+        self, identity: TelegramIdentity
+    ) -> OnboardingServiceResult:
+        """Skip optional clarification without changing the raw equipment text."""
+
+        async with self._session_factory.begin() as session:
+            user, onboarding = await self._locked_state(session, identity)
+            self._require_active(onboarding)
+            if onboarding.current_step is not OnboardingStep.EQUIPMENT_DETAILS_INTAKE:
+                raise OnboardingApplicationError("stale_action")
+            onboarding = await OnboardingRepository(session).save_progress(
+                user_id=user.id,
+                current_step=OnboardingStep.HEALTH_LIMITATIONS_INTAKE,
+                answers=cast(dict[str, object], self._answers(onboarding)),
+            )
+            return self._result(user, onboarding)
+
+    async def review_equipment_settings(
+        self, identity: TelegramIdentity
+    ) -> OnboardingServiceResult:
+        """Reopen deterministic equipment choices after onboarding completion."""
+
+        async with self._session_factory.begin() as session:
+            user, onboarding = await self._locked_state(session, identity)
+            if onboarding.status is not OnboardingStatus.COMPLETED:
+                raise OnboardingApplicationError("stale_action")
+            onboarding.status = OnboardingStatus.ACTIVE
+            user.status = UserStatus.ONBOARDING_IN_PROGRESS
+            answers = self._answers(onboarding)
+            answers[_EQUIPMENT_SETTINGS_REVIEW_KEY] = True
+            answers.pop(_EQUIPMENT_SELECTION_KEY, None)
+            await OnboardingRepository(session).save_progress(
+                user_id=user.id,
+                current_step=OnboardingStep.EQUIPMENT_RECOMMENDATION,
+                answers=cast(dict[str, object], answers),
+            )
+        return await self._recommend_equipment(user_id=user.id)
+
+    async def profile_settings_snapshot(
+        self, identity: TelegramIdentity
+    ) -> ProfileSettingsResult | None:
+        """Return active completed-profile edit state without using an LLM."""
+
+        async with self._session_factory() as session:
+            user = await self._require_user(session, identity)
+            state = await ProfileSettingsRepository(session).get(user_id=user.id)
+            if state is None or state.current_step is ProfileSettingsStep.MENU:
+                return None
+            return ProfileSettingsResult(
+                step=state.current_step,
+                pending=cast(dict[str, JsonValue], state.pending_answers),
+            )
+
+    async def open_profile_settings(
+        self, identity: TelegramIdentity
+    ) -> ProfileSettingsResult:
+        async with self._session_factory.begin() as session:
+            user, onboarding = await self._locked_state(session, identity)
+            if onboarding.status is not OnboardingStatus.COMPLETED:
+                raise OnboardingApplicationError("stale_action")
+            state = await ProfileSettingsRepository(session).save(
+                user_id=user.id, step=ProfileSettingsStep.MENU, pending={}
+            )
+            return ProfileSettingsResult(step=state.current_step)
+
+    async def choose_profile_settings(
+        self, identity: TelegramIdentity, action: str
+    ) -> ProfileSettingsResult:
+        """Apply a stable ps:v1 callback. It never calls a model."""
+
+        async with self._session_factory.begin() as session:
+            user, onboarding = await self._locked_state(session, identity)
+            if onboarding.status is not OnboardingStatus.COMPLETED:
+                raise OnboardingApplicationError("stale_action")
+            settings_repo = ProfileSettingsRepository(session)
+            state = await settings_repo.get_or_create(user_id=user.id)
+            step = state.current_step
+            pending = dict(state.pending_answers)
+            target = {
+                "section:goal": ProfileSettingsStep.GOAL_MAIN,
+                "section:availability": ProfileSettingsStep.AVAILABILITY,
+                "section:health": ProfileSettingsStep.HEALTH,
+                "section:personal": ProfileSettingsStep.PERSONAL_MENU,
+                "personal:birth_year": ProfileSettingsStep.PERSONAL_BIRTH_YEAR,
+                "personal:weight": ProfileSettingsStep.PERSONAL_WEIGHT,
+                "personal:height": ProfileSettingsStep.PERSONAL_HEIGHT,
+            }.get(action)
+            if action == "done":
+                state = await settings_repo.save(
+                    user_id=user.id, step=ProfileSettingsStep.MENU, pending={}
+                )
+                return ProfileSettingsResult(
+                    step=state.current_step, saved_field="__closed__"
+                )
+            if action == "back":
+                state = await settings_repo.save(
+                    user_id=user.id, step=ProfileSettingsStep.MENU, pending={}
+                )
+                return ProfileSettingsResult(
+                    step=state.current_step, saved_field="__closed__"
+                )
+            if target is not None:
+                state = await settings_repo.save(
+                    user_id=user.id,
+                    step=target,
+                    pending={} if target is ProfileSettingsStep.GOAL_MAIN else pending,
+                )
+                return ProfileSettingsResult(step=state.current_step)
+            if action == "personal:gender":
+                if step is not ProfileSettingsStep.PERSONAL_MENU:
+                    raise OnboardingApplicationError("stale_action")
+                state = await settings_repo.save(
+                    user_id=user.id,
+                    step=ProfileSettingsStep.PERSONAL_GENDER,
+                    pending=pending,
+                )
+                return ProfileSettingsResult(step=state.current_step)
+            if action.startswith("personal:gender:"):
+                if step is not ProfileSettingsStep.PERSONAL_GENDER:
+                    raise OnboardingApplicationError("stale_action")
+                try:
+                    gender = AthleteGender(action.rsplit(":", 1)[1])
+                except ValueError as exc:
+                    raise OnboardingApplicationError("invalid_action") from exc
+                await ProfileRepository(session).update_athlete_profile_fields(
+                    user_id=user.id, payload={"gender": gender}
+                )
+                state = await settings_repo.save(
+                    user_id=user.id, step=ProfileSettingsStep.PERSONAL_MENU, pending={}
+                )
+                return ProfileSettingsResult(
+                    step=state.current_step, saved_field="Category"
+                )
+            if action == "health:none":
+                if step is not ProfileSettingsStep.HEALTH:
+                    raise OnboardingApplicationError("stale_action")
+                await ProfileRepository(session).update_athlete_profile_context_fields(
+                    user_id=user.id,
+                    payload={"health_limitations_text": "NONE_REPORTED"},
+                )
+                state = await settings_repo.save(
+                    user_id=user.id, step=ProfileSettingsStep.MENU, pending={}
+                )
+                return ProfileSettingsResult(
+                    step=state.current_step, saved_field="Health limitations"
+                )
+            if action == "health:describe":
+                if step is not ProfileSettingsStep.HEALTH:
+                    raise OnboardingApplicationError("stale_action")
+                return ProfileSettingsResult(
+                    step=step, pending=cast(dict[str, JsonValue], pending)
+                )
+            if action == "section:equipment":
+                return await self._open_profile_equipment(
+                    session, user.id, settings_repo
+                )
+            if action.startswith("equipment:"):
+                return await self._choose_profile_equipment(
+                    session,
+                    user.id,
+                    settings_repo,
+                    state,
+                    action.removeprefix("equipment:"),
+                )
+            if action == "goal:no-date":
+                if step is not ProfileSettingsStep.GOAL_DATE:
+                    raise OnboardingApplicationError("stale_action")
+                return await self._save_profile_goal(
+                    session, user.id, settings_repo, pending, None
+                )
+            raise OnboardingApplicationError("invalid_action")
+
+    async def submit_profile_settings_text(
+        self, identity: TelegramIdentity, text: str
+    ) -> ProfileSettingsResult | None:
+        """Persist text only when the athlete selected the matching mini-flow."""
+
+        async with self._session_factory.begin() as session:
+            user, onboarding = await self._locked_state(session, identity)
+            if onboarding.status is not OnboardingStatus.COMPLETED:
+                return None
+            repo = ProfileSettingsRepository(session)
+            state = await repo.get_or_create(user_id=user.id)
+            step, pending = state.current_step, dict(state.pending_answers)
+            if step is ProfileSettingsStep.MENU:
+                return None
+            if step is ProfileSettingsStep.GOAL_MAIN:
+                if not text or len(text) > 500:
+                    raise OnboardingApplicationError("invalid_goal")
+                pending["main_goal"] = text
+                state = await repo.save(
+                    user_id=user.id,
+                    step=ProfileSettingsStep.GOAL_OUTCOME,
+                    pending=pending,
+                )
+                return ProfileSettingsResult(
+                    step=state.current_step, pending=cast(dict[str, JsonValue], pending)
+                )
+            if step is ProfileSettingsStep.GOAL_OUTCOME:
+                if not text or len(text) > 500:
+                    raise OnboardingApplicationError("invalid_goal")
+                pending["target_outcome"] = text
+                state = await repo.save(
+                    user_id=user.id, step=ProfileSettingsStep.GOAL_DATE, pending=pending
+                )
+                return ProfileSettingsResult(
+                    step=state.current_step, pending=cast(dict[str, JsonValue], pending)
+                )
+            if step is ProfileSettingsStep.GOAL_DATE:
+                try:
+                    event_date = date.fromisoformat(text)
+                except ValueError as exc:
+                    raise OnboardingApplicationError("invalid_event_date") from exc
+                return await self._save_profile_goal(
+                    session, user.id, repo, pending, event_date
+                )
+            if step is ProfileSettingsStep.AVAILABILITY:
+                await ProfileRepository(session).update_athlete_profile_context_fields(
+                    user_id=user.id, payload={"availability_text": text}
+                )
+                state = await repo.save(
+                    user_id=user.id, step=ProfileSettingsStep.MENU, pending={}
+                )
+                return ProfileSettingsResult(
+                    step=state.current_step, saved_field="Availability"
+                )
+            if step is ProfileSettingsStep.HEALTH:
+                await ProfileRepository(session).update_athlete_profile_context_fields(
+                    user_id=user.id, payload={"health_limitations_text": text}
+                )
+                state = await repo.save(
+                    user_id=user.id, step=ProfileSettingsStep.MENU, pending={}
+                )
+                return ProfileSettingsResult(
+                    step=state.current_step, saved_field="Health limitations"
+                )
+            numeric = {
+                ProfileSettingsStep.PERSONAL_BIRTH_YEAR: (
+                    "birth_year",
+                    1940,
+                    utc_now().year - 16,
+                    "Birth year",
+                ),
+                ProfileSettingsStep.PERSONAL_WEIGHT: ("weight_kg", 35, 250, "Weight"),
+                ProfileSettingsStep.PERSONAL_HEIGHT: ("height_cm", 120, 230, "Height"),
+            }.get(step)
+            if numeric is not None:
+                field, minimum, maximum, label = numeric
+                value = (
+                    self._parse_weight(text)
+                    if field == "weight_kg"
+                    else self._parse_integer(text, minimum=minimum, maximum=maximum)
+                )
+                if value is None:
+                    raise OnboardingApplicationError("invalid_action")
+                payload: dict[str, object] = {field: value}
+                if field == "birth_year":
+                    payload["age"] = utc_now().year - int(value)
+                await ProfileRepository(session).update_athlete_profile_fields(
+                    user_id=user.id, payload=payload
+                )
+                state = await repo.save(
+                    user_id=user.id, step=ProfileSettingsStep.PERSONAL_MENU, pending={}
+                )
+                return ProfileSettingsResult(step=state.current_step, saved_field=label)
+            raise OnboardingApplicationError("stale_action")
+
+    async def _save_profile_goal(
+        self,
+        session: AsyncSession,
+        user_id: uuid.UUID,
+        repo: ProfileSettingsRepository,
+        pending: dict[str, object],
+        event_date: date | None,
+    ) -> ProfileSettingsResult:
+        main_goal, outcome = pending.get("main_goal"), pending.get("target_outcome")
+        if not isinstance(main_goal, str) or not isinstance(outcome, str):
+            raise OnboardingApplicationError("stale_action")
+        profiles = ProfileRepository(session)
+        previous = await profiles.get_training_goal(user_id=user_id)
+        if previous is None:
+            raise OnboardingApplicationError("stale_action")
+        changed = (
+            previous.main_goal,
+            previous.target_outcome,
+            previous.event_date,
+        ) != (main_goal, outcome, event_date)
+        await profiles.update_training_goal_fields(
+            user_id=user_id,
+            payload={
+                "main_goal": main_goal,
+                "target_outcome": outcome,
+                "event_date": event_date,
+            },
+        )
+        if changed:
+            goal = await profiles.increment_equipment_context_revision(user_id=user_id)
+            await profiles.update_athlete_profile_context_fields(
+                user_id=user_id, payload={"equipment_recommendation_text": None}
+            )
+            return await self._open_profile_equipment(
+                session, user_id, repo, goal=goal, saved_field="Goal"
+            )
+        state = await repo.save(
+            user_id=user_id, step=ProfileSettingsStep.MENU, pending={}
+        )
+        return ProfileSettingsResult(step=state.current_step, saved_field="Goal")
+
+    async def _open_profile_equipment(
+        self,
+        session: AsyncSession,
+        user_id: uuid.UUID,
+        repo: ProfileSettingsRepository,
+        goal: TrainingGoal | None = None,
+        saved_field: str | None = None,
+    ) -> ProfileSettingsResult:
+        goal = goal or await ProfileRepository(session).get_training_goal(
+            user_id=user_id
+        )
+        if goal is None:
+            raise OnboardingApplicationError("stale_action")
+        recommendation = await EquipmentRecommendationService().recommend(
+            repository=EquipmentRepository(session),
+            main_goal=goal.main_goal,
+            target_outcome=goal.target_outcome,
+            event_date=goal.event_date,
+            today=utc_now().date(),
+        )
+        if recommendation is None:
+            state = await repo.save(
+                user_id=user_id, step=ProfileSettingsStep.MENU, pending={}
+            )
+            return ProfileSettingsResult(
+                step=state.current_step, saved_field=saved_field or "Equipment & access"
+            )
+        statuses = await EquipmentRepository(session).statuses(
+            user_id=user_id,
+            training_goal_id=goal.id,
+            goal_revision=goal.equipment_context_revision,
+        )
+        selected = [
+            str(row.resource_id) for row in statuses if row.status.value == "AVAILABLE"
+        ]
+        pending: dict[str, object] = {
+            "recommendation": recommendation.text,
+            "resources": {
+                str(item.resource_id): item.name for item in recommendation.resources
+            },
+            "selected": selected,
+        }
+        await ProfileRepository(session).update_athlete_profile_context_fields(
+            user_id=user_id,
+            payload={"equipment_recommendation_text": recommendation.text},
+        )
+        state = await repo.save(
+            user_id=user_id, step=ProfileSettingsStep.EQUIPMENT, pending=pending
+        )
+        return ProfileSettingsResult(
+            step=state.current_step,
+            pending=cast(dict[str, JsonValue], pending),
+            saved_field=saved_field,
+        )
+
+    async def _choose_profile_equipment(
+        self,
+        session: AsyncSession,
+        user_id: uuid.UUID,
+        repo: ProfileSettingsRepository,
+        state: ProfileSettingsSession,
+        choice: str,
+    ) -> ProfileSettingsResult:
+        if state.current_step is not ProfileSettingsStep.EQUIPMENT:
+            raise OnboardingApplicationError("stale_action")
+        pending = dict(state.pending_answers)
+        resources = pending.get("resources")
+        if not isinstance(resources, dict):
+            raise OnboardingApplicationError("stale_action")
+        ids = set(resources)
+        raw_selected = pending.get("selected", [])
+        if not isinstance(raw_selected, list):
+            raise OnboardingApplicationError("stale_action")
+        selected = {value for value in raw_selected if isinstance(value, str)}
+        if choice == "done":
+            goal = await ProfileRepository(session).get_training_goal(user_id=user_id)
+            if goal is None:
+                raise OnboardingApplicationError("stale_action")
+            from app.domain.enums import AthleteEquipmentStatus
+
+            await EquipmentRepository(session).replace_statuses(
+                user_id=user_id,
+                training_goal_id=goal.id,
+                goal_revision=goal.equipment_context_revision,
+                statuses={
+                    uuid.UUID(value): AthleteEquipmentStatus.AVAILABLE
+                    if value in selected
+                    else AthleteEquipmentStatus.UNAVAILABLE
+                    for value in ids
+                },
+            )
+            saved = await repo.save(
+                user_id=user_id, step=ProfileSettingsStep.MENU, pending={}
+            )
+            return ProfileSettingsResult(
+                step=saved.current_step, saved_field="Equipment & access"
+            )
+        if choice not in ids:
+            raise OnboardingApplicationError("invalid_action")
+        selected.symmetric_difference_update({choice})
+        pending["selected"] = sorted(selected)
+        saved = await repo.save(
+            user_id=user_id, step=ProfileSettingsStep.EQUIPMENT, pending=pending
+        )
+        return ProfileSettingsResult(
+            step=saved.current_step, pending=cast(dict[str, JsonValue], pending)
+        )
 
     async def choose_goal_clarification(
         self,
@@ -533,10 +1082,9 @@ class OnboardingService:
             # interrupted recommendation.  No callback is involved here.
             return await self._recommend_equipment(user_id=user.id)
         if onboarding.status is OnboardingStatus.COMPLETED:
-            return await self._modify_onboarding_data(
-                user_id=user.id,
-                text=text,
-            )
+            # Completed-profile changes must enter the explicit ps:v1 mini-flow;
+            # never infer or persist an update from an unprompted message.
+            raise OnboardingApplicationError("profile_settings_required")
         raise OnboardingApplicationError("invalid_action")
 
     async def update_onboarding_data(
@@ -636,6 +1184,8 @@ class OnboardingService:
                     user_id=user_id,
                     payload=repository_goal_payload,
                 )
+                if refresh_equipment_recommendation:
+                    await profiles.increment_equipment_context_revision(user_id=user_id)
             if refresh_equipment_recommendation:
                 if onboarding is None:
                     onboarding, _ = await onboarding_repository.get_or_create(
@@ -648,7 +1198,8 @@ class OnboardingService:
                     user_id=user_id,
                     payload={
                         "equipment_recommendation_text": None,
-                        "equipment_text": None,
+                        # Raw athlete wording can still describe real access and
+                        # deliberately survives a materially changed goal.
                     },
                 )
                 onboarding.status = OnboardingStatus.ACTIVE
@@ -855,10 +1406,10 @@ class OnboardingService:
                     weight_kg=float(staged_weight_kg),
                     height_cm=float(height_cm),
                 )
-                has_confirmed_goal = (
-                    await ProfileRepository(session).get_training_goal(user_id=user.id)
-                    is not None
+                goal = await ProfileRepository(session).get_training_goal(
+                    user_id=user.id
                 )
+                has_confirmed_goal = goal is not None
                 if not has_confirmed_goal:
                     answers[_GOAL_PHASE_KEY] = _GOAL_PHASE_COLLECTING
                 onboarding = await OnboardingRepository(session).save_progress(
@@ -973,7 +1524,7 @@ class OnboardingService:
         *,
         user_id: uuid.UUID,
     ) -> OnboardingServiceResult:
-        """Generate and persist a short recommendation after availability is safe."""
+        """Generate and persist deterministic equipment knowledge after availability."""
 
         async with self._session_factory.begin() as session:
             user = await UserRepository(session).require_by_id(user_id=user_id)
@@ -984,27 +1535,13 @@ class OnboardingService:
             if onboarding.current_step is not OnboardingStep.EQUIPMENT_RECOMMENDATION:
                 raise OnboardingApplicationError("stale_action")
             goal = await ProfileRepository(session).get_training_goal(user_id=user.id)
-            goal_context = self._equipment_goal_context(goal)
-            if goal_context.main_goal is None:
+            if goal is None:
                 return self._result(
                     user,
                     onboarding,
                     kind="equipment_recommendation",
                     error_code="missing_goal_context",
                 )
-
-        try:
-            recommendation_result = await self._context_workflow.recommend_equipment(
-                main_goal=goal_context.main_goal,
-                target_outcome=goal_context.target_outcome,
-                event_date=goal_context.event_date,
-                secondary_priority=goal_context.secondary_priority,
-            )
-        except Exception:
-            recommendation_result = EquipmentRecommendationWorkflowResult(
-                outcome="provider_error",
-                error_code="workflow_failure",
-            )
 
         async with self._session_factory.begin() as session:
             user = await UserRepository(session).require_by_id(user_id=user_id)
@@ -1015,33 +1552,44 @@ class OnboardingService:
             if onboarding.current_step is not OnboardingStep.EQUIPMENT_RECOMMENDATION:
                 raise OnboardingApplicationError("stale_action")
             answers = self._answers(onboarding)
-            if (
-                recommendation_result.outcome != "recommended"
-                or not recommendation_result.recommendation
-            ):
-                answers.pop(_EQUIPMENT_RECOMMENDATION_KEY, None)
-                answers[_CONTEXT_RETRY_ERROR_KEY] = cast(
-                    JsonValue,
-                    recommendation_result.error_code or "recommendation_unavailable",
+            goal = await ProfileRepository(session).get_training_goal(user_id=user.id)
+            if goal is None:
+                raise OnboardingApplicationError("stale_action")
+            try:
+                recommendation_result = (
+                    await EquipmentRecommendationService().recommend(
+                        repository=EquipmentRepository(session),
+                        main_goal=goal.main_goal,
+                        target_outcome=goal.target_outcome,
+                        event_date=goal.event_date,
+                        today=utc_now().date(),
+                    )
                 )
+            except ValueError:
+                recommendation_result = None
+            if recommendation_result is None:
+                answers.pop(_EQUIPMENT_RECOMMENDATION_KEY, None)
+                answers.pop(_EQUIPMENT_RESOURCES_KEY, None)
                 onboarding = await OnboardingRepository(session).save_progress(
                     user_id=user.id,
-                    current_step=OnboardingStep.EQUIPMENT_RECOMMENDATION,
+                    current_step=OnboardingStep.HEALTH_LIMITATIONS_INTAKE,
                     answers=cast(dict[str, object], answers),
                 )
-                return self._result(
-                    user,
-                    onboarding,
-                    kind="equipment_recommendation",
-                    error_code=recommendation_result.error_code,
-                )
-
-            recommendation = recommendation_result.recommendation
+                return self._result(user, onboarding, kind="health_limitations_intake")
+            recommendation = recommendation_result.text
             await ProfileRepository(session).update_athlete_profile_context_fields(
                 user_id=user.id,
                 payload={"equipment_recommendation_text": recommendation},
             )
             answers[_EQUIPMENT_RECOMMENDATION_KEY] = recommendation
+            answers[_EQUIPMENT_RESOURCES_KEY] = [
+                str(item.resource_id) for item in recommendation_result.resources
+            ]
+            answers[_EQUIPMENT_RESOURCE_LABELS_KEY] = {
+                str(item.resource_id): item.name
+                for item in recommendation_result.resources
+            }
+            answers[_EQUIPMENT_SELECTION_KEY] = []
             answers.pop(_CONTEXT_RETRY_ERROR_KEY, None)
             onboarding = await OnboardingRepository(session).save_progress(
                 user_id=user.id,

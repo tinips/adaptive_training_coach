@@ -57,6 +57,28 @@ def test_create_application_requires_token_without_exposing_a_value() -> None:
         create_application(settings, service=AsyncMock(spec=CoachBotService))
 
 
+def test_create_application_registers_development_commands_only_in_development() -> (
+    None
+):
+    settings = Settings(
+        environment="development",
+        database_url="sqlite+aiosqlite:///:memory:",
+        telegram_bot_token="123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi",
+        telegram_bot_username="adaptive_training_coach_bot",
+        dev_telegram_user_ids={206072865},
+    )
+
+    application = create_application(settings, service=AsyncMock(spec=CoachBotService))
+
+    command_names = {
+        command
+        for handler in application.handlers[0]
+        if isinstance(handler, CommandHandler)
+        for command in handler.commands
+    }
+    assert {"dev_step", "dev_reset"} <= command_names
+
+
 @pytest.mark.asyncio
 async def test_runtime_without_strava_registers_document_handler() -> None:
     settings = Settings(

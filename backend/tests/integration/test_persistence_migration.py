@@ -81,8 +81,8 @@ def test_initial_migration_upgrade_and_downgrade(
             for row in connection.execute("PRAGMA table_info('workout_flow_sessions')")
         }
 
-    assert revision == ("0013_add_athlete_profile_context",)
-    assert len(tables - {"alembic_version"}) == 28
+    assert revision == ("0014_equipment_knowledge",)
+    assert len(tables - {"alembic_version"}) == 35
     assert {
         "activity_feedback",
         "activity_source_links",
@@ -125,6 +125,7 @@ def test_initial_migration_upgrade_and_downgrade(
         "original_description",
         "status",
     }.issubset(training_goal_columns)
+    assert "equipment_context_revision" in training_goal_columns
     assert {"goal_type", "event_name", "goal_priority"}.isdisjoint(
         training_goal_columns
     )
@@ -203,7 +204,7 @@ def test_initial_migration_upgrade_and_downgrade(
                 "SELECT name FROM sqlite_master WHERE type = 'table'",
             )
         }
-    assert reupgraded_revision == ("0013_add_athlete_profile_context",)
+    assert reupgraded_revision == ("0014_equipment_knowledge",)
     assert "heart_rate_observations" not in reupgraded_tables
 
     command.downgrade(configuration, "base")
@@ -525,7 +526,7 @@ def test_unified_import_migration_preserves_and_backfills_0002_data(
             (import_job_id,),
         ).fetchone()
 
-    assert revision == ("0013_add_athlete_profile_context",)
+    assert revision == ("0014_equipment_knowledge",)
     assert apple_sources == [
         (exact_apple_id, "APPLE_HEALTH", "apple-exact"),
         (summary_apple_id, "APPLE_HEALTH", "apple-summary"),
@@ -928,7 +929,7 @@ def test_discipline_workout_migration_preserves_populated_0003_data(
             "PRAGMA foreign_key_check",
         ).fetchall()
 
-    assert revision_at_head == ("0013_add_athlete_profile_context",)
+    assert revision_at_head == ("0014_equipment_knowledge",)
     assert "heart_rate_observations" not in head_tables
     assert len(workout_rows) == len(activities)
     assert {row[0] for row in workout_rows} == {row["id"] for row in activities}

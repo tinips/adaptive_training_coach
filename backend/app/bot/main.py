@@ -172,7 +172,7 @@ def create_application(
 
     application = builder.build()
     application.bot_data[BOT_SERVICE_KEY] = service
-    register_handlers(application)
+    register_handlers(application, runtime_settings)
     return application
 
 

@@ -135,3 +135,65 @@ async def test_profile_inputs_validate_deterministically_and_then_begin_goal_int
         assert persisted_user.status is UserStatus.ONBOARDING_IN_PROGRESS
         assert onboarding.status is OnboardingStatus.ACTIVE
         assert onboarding.current_step is OnboardingStep.GOAL_INTAKE
+
+
+@pytest.mark.asyncio
+async def test_development_steps_seed_only_the_requesting_users_onboarding_state(
+    profile_database: async_sessionmaker[AsyncSession],
+) -> None:
+    identity = _identity()
+    other_identity = TelegramIdentity(
+        telegram_user_id=6302,
+        telegram_username="other_athlete",
+        first_name="Other Athlete",
+        language_code="en",
+    )
+    service = OnboardingService(
+        session_factory=profile_database,
+        goal_extractor=NeverGoalExtractor(),
+        settings=Settings(environment="development", llm_mode="mock"),
+    )
+
+    availability = await service.seed_development_step(identity, "availability")
+    equipment = await service.seed_development_step(identity, "equipment")
+    limitations = await service.seed_development_step(identity, "limitations")
+    completed = await service.seed_development_step(identity, "completed")
+    await service.seed_development_step(other_identity, "availability")
+
+    assert availability.current_step is OnboardingStep.AVAILABILITY_INTAKE
+    assert equipment.current_step is OnboardingStep.EQUIPMENT_RECOMMENDATION
+    assert limitations.current_step is OnboardingStep.HEALTH_LIMITATIONS_INTAKE
+    assert completed.onboarding_status is OnboardingStatus.COMPLETED
+    assert completed.user_status is UserStatus.ONBOARDING_COMPLETED
+
+    async with profile_database() as session:
+        users = UserRepository(session)
+        first_user = await users.get_by_telegram_id(identity.telegram_user_id)
+        other_user = await users.get_by_telegram_id(other_identity.telegram_user_id)
+        assert first_user is not None
+        assert other_user is not None
+        profiles = ProfileRepository(session)
+        first_context = await profiles.get_athlete_profile_context(
+            user_id=first_user.id
+        )
+        other_context = await profiles.get_athlete_profile_context(
+            user_id=other_user.id
+        )
+        first_goal = await profiles.get_training_goal(user_id=first_user.id)
+        other_goal = await profiles.get_training_goal(user_id=other_user.id)
+
+        assert first_context is not None
+        assert (
+            first_context.availability_text == "Weekdays one hour; weekends two hours."
+        )
+        assert first_context.equipment_text == "ALL_RECOMMENDED"
+        assert first_context.health_limitations_text == "NONE_REPORTED"
+        assert first_goal is not None
+        assert other_context is not None
+        assert other_context.availability_text is None
+        assert other_goal is not None
+
+    reset = await service.reset_development_onboarding(identity)
+    assert reset.current_step is OnboardingStep.CONSENT
+    assert reset.onboarding_status is OnboardingStatus.ACTIVE
+    assert reset.user_status is UserStatus.ONBOARDING_IN_PROGRESS

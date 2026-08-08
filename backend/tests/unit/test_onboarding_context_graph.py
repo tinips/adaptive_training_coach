@@ -28,7 +28,9 @@ from app.workflows.onboarding_context.graph import (
     create_context_onboarding_workflow,
 )
 from app.workflows.onboarding_context.nodes import (
+    EquipmentRecommendationItem,
     EquipmentRecommendationOutput,
+    format_equipment_recommendation,
 )
 
 
@@ -152,8 +154,23 @@ async def test_equipment_recommendation_uses_goal_fields_and_returns_short_text(
         responses=[
             StructuredModelResponse(
                 output={
-                    "recommendation": "Road bike, helmet, front and rear lights, "
-                    "and a basic repair kit."
+                    "items": [
+                        {
+                            "equipment_name": "Road bike",
+                            "importance": "Essential",
+                            "when_needed": "Start now — first rides",
+                        },
+                        {
+                            "equipment_name": "Helmet",
+                            "importance": "Essential",
+                            "when_needed": "Start now — every ride",
+                        },
+                        {
+                            "equipment_name": "Front and rear lights",
+                            "importance": "Recommended",
+                            "when_needed": "Base training — lower-light rides",
+                        },
+                    ]
                 },
                 prompt_tokens=7,
                 completion_tokens=9,
@@ -171,12 +188,22 @@ async def test_equipment_recommendation_uses_goal_fields_and_returns_short_text(
 
     assert result.outcome == "recommended"
     assert result.recommendation == (
-        "Road bike, helmet, front and rear lights, and a basic repair kit."
+        "Equipment              Importance  When needed\n"
+        "---------------------  ----------  ---------------------------------\n"
+        "Road bike              Essential   Start now — first rides\n"
+        "Helmet                 Essential   Start now — every ride\n"
+        "Front and rear lights  Recommended  Base training — lower-light rides"
     )
     assert model.schemas == [EquipmentRecommendationOutput]
     assert model.steps == [OnboardingStep.EQUIPMENT_RECOMMENDATION]
     assert not any(isinstance(message, HumanMessage) for message in model.messages[0])
-    assert "cycling gran fondo" in str(model.messages[0][0].content).casefold()
+    prompt = str(model.messages[0][0].content).casefold()
+    assert "cycling gran fondo" in prompt
+    assert "physical coach" in prompt
+    assert "essential, recommended, or optional" in prompt
+    assert '"items"' in prompt
+    assert '"equipment_name"' in prompt
+    assert '"when_needed"' in prompt
 
 
 @pytest.mark.asyncio
@@ -198,18 +225,22 @@ async def test_equipment_recommendation_requires_a_confirmed_main_goal() -> None
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "recommendation",
+    "items",
     [
-        "\n".join(f"- Essential item {index}" for index in range(1, 7)),
-        "Follow this weekly training plan before your event.",
-        "This diagnosis requires medical treatment.",
+        [
+            {"equipment_name": "Running shoes", "importance": "Essential"},
+            {"equipment_name": "running shoes", "importance": "Recommended"},
+        ],
+        [{"equipment_name": "Weekly training plan", "importance": "Essential"}],
+        [{"equipment_name": "Knee treatment", "importance": "Essential"}],
+        [{"equipment_name": "Running shoes", "importance": "Critical"}],
     ],
 )
 async def test_equipment_recommendation_rejects_nonessential_or_oversized_output(
-    recommendation: str,
+    items: list[dict[str, str]],
 ) -> None:
     model = StructuredContextModel(
-        responses=[StructuredModelResponse(output={"recommendation": recommendation})]
+        responses=[StructuredModelResponse(output={"items": items})]
     )
     workflow = _workflow(model)
 
@@ -223,6 +254,103 @@ async def test_equipment_recommendation_rejects_nonessential_or_oversized_output
     assert result.outcome == "retry_required"
     assert result.error_code == "malformed_structured_output"
     assert result.recommendation is None
+
+
+@pytest.mark.asyncio
+async def test_equipment_recommendation_accepts_more_than_five_items() -> None:
+    items = [
+        {
+            "equipment_name": f"Item {index}",
+            "importance": "Essential",
+            "when_needed": "Start now — first sessions",
+        }
+        for index in range(1, 7)
+    ]
+    workflow = _workflow(
+        StructuredContextModel(
+            responses=[StructuredModelResponse(output={"items": items})]
+        )
+    )
+
+    result = await workflow.recommend_equipment(
+        main_goal="Complete a marathon",
+        target_outcome="Finish comfortably",
+        event_date=None,
+        secondary_priority=None,
+    )
+
+    assert result.outcome == "recommended"
+    assert result.recommendation is not None
+    assert "Item 6" in result.recommendation
+
+
+@pytest.mark.asyncio
+async def test_equipment_recommendation_accepts_a_long_item_name() -> None:
+    long_name = "Running shoes suitable for long-distance road training and racing"
+    workflow = _workflow(
+        StructuredContextModel(
+            responses=[
+                StructuredModelResponse(
+                    output={
+                        "items": [
+                            {
+                                "equipment_name": long_name,
+                                "importance": "Essential",
+                                "when_needed": "Race-specific prep — long runs",
+                            }
+                        ]
+                    }
+                )
+            ]
+        )
+    )
+
+    result = await workflow.recommend_equipment(
+        main_goal="Complete a marathon",
+        target_outcome="Finish comfortably",
+        event_date=None,
+        secondary_priority=None,
+    )
+
+    assert result.outcome == "recommended"
+    assert result.recommendation is not None
+    assert long_name in result.recommendation
+
+
+def test_equipment_table_is_stable_and_has_three_columns() -> None:
+    assert format_equipment_recommendation(
+        [
+            EquipmentRecommendationItem(
+                equipment_name="Running shoes",
+                importance="Essential",
+                when_needed="Start now — every run",
+            ),
+            EquipmentRecommendationItem(
+                equipment_name="Water bottle",
+                importance="Recommended",
+                when_needed="Base training — longer sessions",
+            ),
+        ]
+    ) == (
+        "Equipment      Importance  When needed\n"
+        "-------------  ----------  -------------------------------\n"
+        "Running shoes  Essential   Start now — every run\n"
+        "Water bottle   Recommended  Base training — longer sessions"
+    )
+
+
+def test_equipment_table_rejects_output_beyond_telegram_capacity() -> None:
+    items = [
+        EquipmentRecommendationItem(
+            equipment_name=f"Equipment item number {index} for long-distance training",
+            importance="Recommended",
+            when_needed="Advanced prep — goal-specific sessions",
+        )
+        for index in range(1, 41)
+    ]
+
+    with pytest.raises(ValueError, match="Telegram message capacity"):
+        format_equipment_recommendation(items)
 
 
 @pytest.mark.asyncio

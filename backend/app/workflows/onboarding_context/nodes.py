@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 import re
+from typing import Literal
 
-from langchain_core.messages import BaseMessage, SystemMessage
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import Runnable, RunnableConfig, RunnableLambda
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from app.domain.enums import OnboardingStep
 from app.integrations.llm.models import (
@@ -32,8 +40,6 @@ EquipmentRecommendationNode = Runnable[
     EquipmentRecommendationGraphState,
     EquipmentRecommendationGraphState,
 ]
-_RECOMMENDATION_SENTENCE_BREAK = re.compile(r"[.!?]+")
-_RECOMMENDATION_LIST_ITEM = re.compile(r"^(?:[-*•]|[0-9]+[.)])\s+")
 _PROHIBITED_RECOMMENDATION_CONTENT = re.compile(
     r"\b(?:"
     r"(?:training|workout|exercise|weekly)\s+plan|"
@@ -45,38 +51,97 @@ _PROHIBITED_RECOMMENDATION_CONTENT = re.compile(
     re.IGNORECASE,
 )
 
+EquipmentImportance = Literal["Essential", "Recommended", "Optional"]
+_TRAINING_STAGES = (
+    "Start now",
+    "Base training",
+    "Race-specific prep",
+    "Advanced prep",
+    "Race day",
+)
 
-class EquipmentRecommendationOutput(BaseModel):
-    """Short model-generated equipment suggestion for a confirmed goal."""
+
+class EquipmentRecommendationItem(BaseModel):
+    """One equipment item and its practical priority."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    recommendation: str = Field(min_length=1, max_length=700)
+    equipment_name: str = Field(min_length=1)
+    importance: EquipmentImportance
+    when_needed: str = Field(min_length=1)
 
-    @field_validator("recommendation")
+    @field_validator("equipment_name")
     @classmethod
-    def normalize_recommendation(cls, value: str) -> str:
-        nonempty_lines = [line.strip() for line in value.splitlines() if line.strip()]
-        list_item_count = sum(
-            1 for line in nonempty_lines if _RECOMMENDATION_LIST_ITEM.match(line)
-        )
-        if list_item_count > 5:
-            raise ValueError("recommendation must contain at most five items")
+    def normalize_name(cls, value: str) -> str:
         normalized = " ".join(value.split())
         if not normalized:
-            raise ValueError("recommendation must not be blank")
-        sentence_count = len(
-            [
-                sentence
-                for sentence in _RECOMMENDATION_SENTENCE_BREAK.split(normalized)
-                if sentence.strip()
-            ]
-        )
-        if sentence_count > 5:
-            raise ValueError("recommendation must contain at most five sentences")
-        if _PROHIBITED_RECOMMENDATION_CONTENT.search(normalized) is not None:
-            raise ValueError("recommendation must not contain plan or medical content")
+            raise ValueError("equipment name must not be blank")
         return normalized
+
+    @field_validator("when_needed")
+    @classmethod
+    def normalize_training_stage(cls, value: str) -> str:
+        normalized = " ".join(value.split())
+        if not normalized:
+            raise ValueError("when needed must not be blank")
+        if not any(
+            normalized.startswith(f"{stage} —") or normalized.startswith(f"{stage}:")
+            for stage in _TRAINING_STAGES
+        ):
+            raise ValueError("when needed must start with an allowed training stage")
+        return normalized
+
+
+class EquipmentRecommendationOutput(BaseModel):
+    """Short structured material recommendation for a confirmed goal."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    items: list[EquipmentRecommendationItem] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_items(self) -> EquipmentRecommendationOutput:
+        names = [item.equipment_name.casefold() for item in self.items]
+        if len(set(names)) != len(names):
+            raise ValueError("equipment items must be unique")
+        text = " ".join(item.equipment_name for item in self.items)
+        if _PROHIBITED_RECOMMENDATION_CONTENT.search(text) is not None:
+            raise ValueError("recommendation must not contain plan or medical content")
+        return self
+
+
+class EquipmentInterpretationOutput(BaseModel):
+    """Facts stated by the athlete; unknowns stay explicitly unknown."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    available: list[str] = []
+    unavailable: list[str] = []
+    access_constraints: list[str] = []
+    substitutions: list[str] = []
+    unknowns: list[str] = []
+
+
+def format_equipment_recommendation(
+    items: list[EquipmentRecommendationItem],
+) -> str:
+    """Render stable plain text columns suitable for Telegram's ``<pre>`` block."""
+
+    name_width = max(len("Equipment"), *(len(item.equipment_name) for item in items))
+    importance_width = len("Importance")
+    stage_width = max(len("When needed"), *(len(item.when_needed) for item in items))
+    header = (
+        f"{'Equipment':<{name_width}}  {'Importance':<{importance_width}}  When needed"
+    )
+    divider = f"{'-' * name_width}  {'-' * importance_width}  {'-' * stage_width}"
+    rows = [
+        f"{item.equipment_name:<{name_width}}  {item.importance:<{importance_width}}  "
+        f"{item.when_needed}"
+        for item in items
+    ]
+    table = "\n".join([header, divider, *rows])
+    if len(table) > 3_500:
+        raise ValueError("equipment table exceeds Telegram message capacity")
+    return table
 
 
 def build_equipment_recommendation_messages(
@@ -117,10 +182,7 @@ def make_free_text_validation_node(
                 "outcome": "retry_required",
                 "error_code": "empty_text",
             }
-        return {
-            "outcome": "accepted",
-            "error_code": None,
-        }
+        return {"outcome": "accepted", "error_code": None}
 
     return RunnableLambda(validate, name="validate_onboarding_context_text")
 
@@ -135,11 +197,38 @@ def make_equipment_recommendation_node(
         config: RunnableConfig,
     ) -> EquipmentRecommendationGraphState:
         goal_context = state["goal_context"]
-        if goal_context.main_goal is None:
+        if goal_context.equipment_text is not None:
+            messages = [
+                SystemMessage(
+                    content=(
+                        "Interpret only facts explicitly stated in the athlete's "
+                        "equipment answer. Never infer ownership, bike type, "
+                        "schedules, medical facts, or a training plan. Unknown "
+                        "details go in unknowns. Deterministic "
+                        f"recommendation: {goal_context.recommendation_text or ''}"
+                    )
+                ),
+                HumanMessage(content=goal_context.equipment_text),
+            ]
+            try:
+                response = await model.ainvoke_structured(
+                    step=OnboardingStep.EQUIPMENT_DETAILS_INTAKE,
+                    schema=EquipmentInterpretationOutput,
+                    messages=messages,
+                    config=config,
+                )
+                interpretation_output = EquipmentInterpretationOutput.model_validate(
+                    response.output
+                )
+            except Exception:
+                return {"outcome": "provider_error", "error_code": "provider_failure"}
             return {
-                "outcome": "retry_required",
-                "error_code": "missing_goal_context",
+                "outcome": "recommended",
+                "interpretation": interpretation_output.model_dump(),
+                "error_code": None,
             }
+        if goal_context.main_goal is None:
+            return {"outcome": "retry_required", "error_code": "missing_goal_context"}
         try:
             response = await model.ainvoke_structured(
                 step=_equipment_recommendation_step(),
@@ -150,19 +239,13 @@ def make_equipment_recommendation_node(
                 config=config,
             )
         except TimeoutError:
-            return {
-                "outcome": "provider_error",
-                "error_code": "provider_timeout",
-            }
+            return {"outcome": "provider_error", "error_code": "provider_timeout"}
         except LLMConfigurationError as exc:
             return {"outcome": "provider_error", "error_code": exc.code}
         except LLMProviderError as exc:
             return {"outcome": "provider_error", "error_code": exc.code}
         except Exception:
-            return {
-                "outcome": "provider_error",
-                "error_code": "provider_failure",
-            }
+            return {"outcome": "provider_error", "error_code": "provider_failure"}
 
         if response.malformed or response.output is None:
             return {
@@ -183,9 +266,18 @@ def make_equipment_recommendation_node(
                 "prompt_tokens": response.prompt_tokens,
                 "completion_tokens": response.completion_tokens,
             }
+        try:
+            recommendation = format_equipment_recommendation(output.items)
+        except ValueError:
+            return {
+                "outcome": "retry_required",
+                "error_code": "malformed_structured_output",
+                "prompt_tokens": response.prompt_tokens,
+                "completion_tokens": response.completion_tokens,
+            }
         return {
             "outcome": "recommended",
-            "recommendation": output.recommendation,
+            "recommendation": recommendation,
             "error_code": None,
             "prompt_tokens": response.prompt_tokens,
             "completion_tokens": response.completion_tokens,

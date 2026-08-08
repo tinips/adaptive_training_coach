@@ -182,16 +182,118 @@ def profile_gender_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def equipment_intake_keyboard() -> InlineKeyboardMarkup:
-    """Offer deterministic material-response choices after a recommendation."""
+def equipment_intake_keyboard(
+    resources: dict[str, str] | None = None,
+    selected: set[str] | None = None,
+) -> InlineKeyboardMarkup:
+    """Render checkbox-like resource controls with deterministic callbacks."""
+
+    selected = selected or set()
+    if not resources:
+        return _rows(
+            [
+                [(LABELS["equipment_other"], "ob:v1:equipment:done")],
+                [(LABELS["cancel"], "ob:v1:cancel")],
+            ]
+        )
+    rows = [
+        [
+            (
+                ("✓ " if resource_id in selected else "○ ") + name,
+                f"ob:v1:equipment:{resource_id}",
+            )
+        ]
+        for resource_id, name in resources.items()
+    ]
+    rows.extend(
+        [[("Continue", "ob:v1:equipment:done")], [(LABELS["cancel"], "ob:v1:cancel")]]
+    )
+    return _rows(rows)
+
+
+def equipment_details_keyboard() -> InlineKeyboardMarkup:
+    """Allow optional equipment clarification to be skipped deterministically."""
 
     return _rows(
         [
-            [(LABELS["equipment_all"], "ob:v1:equipment:all")],
-            [(LABELS["equipment_other"], "ob:v1:equipment:other")],
+            [("Skip", "ob:v1:equipment:skip")],
             [(LABELS["cancel"], "ob:v1:cancel")],
         ]
     )
+
+
+def completed_onboarding_keyboard() -> InlineKeyboardMarkup:
+    """Offer the deterministic completed-athlete settings entry point."""
+
+    return _rows([[("Change profile", "ps:v1:open")]])
+
+
+def profile_settings_keyboard() -> InlineKeyboardMarkup:
+    return _rows(
+        [
+            [("Goal", "ps:v1:section:goal")],
+            [("Availability", "ps:v1:section:availability")],
+            [("Equipment & access", "ps:v1:section:equipment")],
+            [("Health limitations", "ps:v1:section:health")],
+            [("Personal details", "ps:v1:section:personal")],
+            [("Back / Done", "ps:v1:done")],
+        ]
+    )
+
+
+def profile_goal_date_keyboard() -> InlineKeyboardMarkup:
+    return _rows([[("Not yet", "ps:v1:goal:no-date")], [("Back / Done", "ps:v1:done")]])
+
+
+def profile_health_keyboard() -> InlineKeyboardMarkup:
+    return _rows(
+        [
+            [("None", "ps:v1:health:none")],
+            [("Describe limitations", "ps:v1:health:describe")],
+            [("Back / Done", "ps:v1:done")],
+        ]
+    )
+
+
+def profile_personal_keyboard() -> InlineKeyboardMarkup:
+    return _rows(
+        [
+            [("Birth year", "ps:v1:personal:birth_year")],
+            [("Category", "ps:v1:personal:gender")],
+            [("Weight", "ps:v1:personal:weight")],
+            [("Height", "ps:v1:personal:height")],
+            [("Back / Done", "ps:v1:back")],
+        ]
+    )
+
+
+def profile_settings_gender_keyboard() -> InlineKeyboardMarkup:
+    return _rows(
+        [
+            [(LABELS["gender_male"], "ps:v1:personal:gender:MALE")],
+            [(LABELS["gender_female"], "ps:v1:personal:gender:FEMALE")],
+            [
+                (
+                    LABELS["gender_other_unspecified"],
+                    "ps:v1:personal:gender:OTHER_UNSPECIFIED",
+                )
+            ],
+            [("Back / Done", "ps:v1:back")],
+        ]
+    )
+
+
+def profile_equipment_keyboard(
+    resources: dict[str, str], selected: set[str]
+) -> InlineKeyboardMarkup:
+    rows = [
+        [(("✓ " if key in selected else "○ ") + value, f"ps:v1:equipment:{key}")]
+        for key, value in resources.items()
+    ]
+    rows.extend(
+        [[("Continue", "ps:v1:equipment:done")], [("Back / Done", "ps:v1:back")]]
+    )
+    return _rows(rows)
 
 
 def health_limitations_keyboard() -> InlineKeyboardMarkup:
