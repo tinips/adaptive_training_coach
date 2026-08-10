@@ -316,7 +316,7 @@ class WorkoutRead(_StrictSchema):
 
 
 class WorkoutMetricsProjection(BaseModel):
-    """Flat internal read model used by feedback and baselines."""
+    """Flat internal read model used by training-file import outcomes."""
 
     id: UUID
     athlete_id: UUID

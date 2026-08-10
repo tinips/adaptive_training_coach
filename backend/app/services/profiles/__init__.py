@@ -1,13 +1,7 @@
 """Transactional profile finalization and profile queries."""
 
-from app.services.profiles.service import (
-    BaselineSelectionUnavailableError,
-    IncompleteProfileError,
-    ProfileService,
-)
+from app.services.profiles.service import ProfileService
 
 __all__ = [
-    "BaselineSelectionUnavailableError",
-    "IncompleteProfileError",
     "ProfileService",
 ]

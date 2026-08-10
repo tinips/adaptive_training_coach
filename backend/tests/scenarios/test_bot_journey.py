@@ -52,15 +52,6 @@ class QueueGoalExtractor:
         return self.results.pop(0)
 
 
-class UnusedStrava:
-    async def revoke_for_deletion(self, *, user_id: UUID) -> bool:
-        del user_id
-        return False
-
-    def __getattr__(self, name: str) -> object:
-        raise AssertionError(f"Strava must not be used during onboarding: {name}")
-
-
 class TrackingGlobalAgentModel(DeterministicFakeOnboardingModel):
     """Fail the scenario if active onboarding reaches the global model."""
 
@@ -140,11 +131,7 @@ async def journey() -> AsyncIterator[
             profiles=ProfileService(factory),
             account_queries=AccountQueryService(factory),
             accounts=AccountService(factory),
-            strava=UnusedStrava(),  # type: ignore[arg-type]
             apple_health=None,
-            workout_feedback=None,
-            strava_enabled=False,
-            workout_feedback_enabled=False,
             agent_workspace=workspace,
         ),
         factory,

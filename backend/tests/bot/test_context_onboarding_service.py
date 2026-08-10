@@ -11,9 +11,7 @@ import pytest
 from langchain_core.messages import HumanMessage
 
 from app.bot import keyboards, messages
-from app.bot import service as bot_service_module
 from app.bot.service import CoachBotApplicationService
-from app.config import Settings
 from app.domain.enums import OnboardingStatus, OnboardingStep, UserStatus
 from app.schemas.common import TelegramIdentity
 from app.schemas.onboarding_service import OnboardingResultKind, OnboardingServiceResult
@@ -56,7 +54,6 @@ def _facade(
         profiles=SimpleNamespace(),
         account_queries=cast(object, account_queries or SimpleNamespace()),
         accounts=SimpleNamespace(),
-        strava=SimpleNamespace(),
         agent_workspace=cast(object, agent_workspace),
     )
 
@@ -107,9 +104,7 @@ async def test_health_callback_uses_only_deterministic_onboarding_method() -> No
 
 
 @pytest.mark.asyncio
-async def test_development_step_bypasses_global_agent_for_completed_accounts(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_development_step_bypasses_global_agent_for_completed_accounts() -> None:
     identity = _identity()
     onboarding = SimpleNamespace(
         seed_development_step=AsyncMock(
@@ -119,14 +114,6 @@ async def test_development_step_bypasses_global_agent_for_completed_accounts(
         )
     )
     workspace = SimpleNamespace(invoke=AsyncMock())
-    monkeypatch.setattr(
-        bot_service_module,
-        "get_settings",
-        lambda: Settings(
-            environment="development", dev_telegram_user_ids={identity.telegram_user_id}
-        ),
-    )
-
     response = await _facade(onboarding, agent_workspace=workspace).handle_agent_input(
         identity, HumanMessage(content="/dev_step availability")
     )

@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import StravaWebhookEvent, User
+from app.db.models import User
 from app.domain.enums import UserStatus
 from app.repositories.errors import OwnedRecordNotFoundError
 
@@ -109,11 +109,6 @@ class UserRepository:
         user = await self.get_by_id(user_id)
         if user is None:
             return False
-        await self._session.execute(
-            delete(StravaWebhookEvent).where(
-                StravaWebhookEvent.user_id == user_id,
-            ),
-        )
         await self._session.delete(user)
         await self._session.flush()
         return True

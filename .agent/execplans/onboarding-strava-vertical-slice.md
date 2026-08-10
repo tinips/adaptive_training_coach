@@ -1,5 +1,14 @@
 # Onboarding and Strava Vertical Slice
 
+## Database cleanup (2026-08-10)
+
+The approved development-stage cleanup removed `athlete_profiles.primary_sport`
+and the obsolete baseline, normalized availability/equipment/health,
+coach-preference, Strava/OAuth/webhook/sync, and activity-feedback tables from
+the current ORM schema. Their dedicated application code and tests were removed
+with no replacement tables. Existing Alembic history was intentionally left
+unchanged at the request of the cleanup scope.
+
 > **2026-08-03 scope amendment:** The original multi-step onboarding described
 > below is retained as historical implementation context, not current product
 > behavior. Current onboarding ends immediately after explicit conversational

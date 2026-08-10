@@ -56,9 +56,7 @@ _FAST_COMMANDS = frozenset(
         "/start",
         "/help",
         "/profile",
-        "/baseline",
         "/add_workout",
-        "/strava",
         "/cancel",
         "/delete_me",
     }

@@ -10,10 +10,6 @@ class UserStatus(StrEnum):
     ONBOARDING_IN_PROGRESS = "ONBOARDING_IN_PROGRESS"
     ONBOARDING_COMPLETED = "ONBOARDING_COMPLETED"
     PROFILE_COMPLETED = "PROFILE_COMPLETED"
-    BASELINE_PENDING = "BASELINE_PENDING"
-    BASELINE_IMPORTING = "BASELINE_IMPORTING"
-    BASELINE_READY = "BASELINE_READY"
-    BASELINE_FAILED = "BASELINE_FAILED"
 
 
 class OnboardingStatus(StrEnum):
@@ -46,48 +42,8 @@ class AthleteGender(StrEnum):
     OTHER_UNSPECIFIED = "OTHER_UNSPECIFIED"
 
 
-class PrimarySport(StrEnum):
-    RUNNING = "RUNNING"
-    CYCLING = "CYCLING"
-    TRIATHLON = "TRIATHLON"
-    SWIMMING = "SWIMMING"
-    GENERAL_FITNESS = "GENERAL_FITNESS"
-    OTHER = "OTHER"
-
-
-class BaselineSource(StrEnum):
-    STRAVA = "STRAVA"
-    APPLE_HEALTH_EXPORT = "APPLE_HEALTH_EXPORT"
-    FILE_IMPORT = "FILE_IMPORT"
-    MANUAL = "MANUAL"
-    CALIBRATION = "CALIBRATION"
-    SKIP_FOR_NOW = "SKIP_FOR_NOW"
-
-
-class BaselinePreferenceStatus(StrEnum):
-    SELECTED = "SELECTED"
-    PENDING = "PENDING"
-    IMPORTING = "IMPORTING"
-    READY = "READY"
-    NOT_IMPLEMENTED = "NOT_IMPLEMENTED"
-    FAILED = "FAILED"
-
-
-class OAuthProvider(StrEnum):
-    STRAVA_CONNECT = "STRAVA_CONNECT"
-    STRAVA = "STRAVA"
-
-
-class ConnectionStatus(StrEnum):
-    CONNECTED = "CONNECTED"
-    REFRESH_FAILED = "REFRESH_FAILED"
-    DISCONNECTED = "DISCONNECTED"
-    INSUFFICIENT_SCOPE = "INSUFFICIENT_SCOPE"
-
-
 class ActivitySource(StrEnum):
     MANUAL = "MANUAL"
-    STRAVA = "STRAVA"
     APPLE_HEALTH = "APPLE_HEALTH"
     TCX = "TCX"
     FIT = "FIT"
@@ -196,43 +152,6 @@ class StrengthType(StrEnum):
     OTHER = "OTHER"
 
 
-class SyncStatus(StrEnum):
-    REQUESTED = "REQUESTED"
-    RUNNING = "RUNNING"
-    SUCCEEDED = "SUCCEEDED"
-    PARTIAL = "PARTIAL"
-    FAILED = "FAILED"
-    RATE_LIMITED = "RATE_LIMITED"
-
-
-class SyncType(StrEnum):
-    INITIAL = "INITIAL"
-    MANUAL = "MANUAL"
-    WEBHOOK = "WEBHOOK"
-
-
-class WebhookProcessingStatus(StrEnum):
-    PENDING = "PENDING"
-    PROCESSING = "PROCESSING"
-    PROCESSED = "PROCESSED"
-    IGNORED = "IGNORED"
-    FAILED = "FAILED"
-
-
-class BaselineStatus(StrEnum):
-    READY = "READY"
-    INSUFFICIENT_DATA = "INSUFFICIENT_DATA"
-    FAILED = "FAILED"
-
-
-class LevelLabel(StrEnum):
-    UNKNOWN = "UNKNOWN"
-    BEGINNER = "BEGINNER"
-    DEVELOPING = "DEVELOPING"
-    INTERMEDIATE = "INTERMEDIATE"
-    ADVANCED = "ADVANCED"
-
-
 class LLMUsageStatus(StrEnum):
     SUCCEEDED = "SUCCEEDED"
     CLARIFICATION = "CLARIFICATION"
@@ -294,37 +213,3 @@ class ProfileSettingsStep(StrEnum):
     PERSONAL_GENDER = "PERSONAL_GENDER"
     PERSONAL_WEIGHT = "PERSONAL_WEIGHT"
     PERSONAL_HEIGHT = "PERSONAL_HEIGHT"
-
-
-class CoachTone(StrEnum):
-    DIRECT_DEMANDING = "DIRECT_DEMANDING"
-    ANALYTICAL_DETAILED = "ANALYTICAL_DETAILED"
-    CONCISE_PRACTICAL = "CONCISE_PRACTICAL"
-    SUPPORTIVE_MOTIVATIONAL = "SUPPORTIVE_MOTIVATIONAL"
-
-
-class DetailLevel(StrEnum):
-    SHORT = "SHORT"
-    MEDIUM = "MEDIUM"
-    DETAILED = "DETAILED"
-
-
-class DayOfWeek(StrEnum):
-    MONDAY = "MONDAY"
-    TUESDAY = "TUESDAY"
-    WEDNESDAY = "WEDNESDAY"
-    THURSDAY = "THURSDAY"
-    FRIDAY = "FRIDAY"
-    SATURDAY = "SATURDAY"
-    SUNDAY = "SUNDAY"
-
-
-class WebhookObjectType(StrEnum):
-    ACTIVITY = "activity"
-    ATHLETE = "athlete"
-
-
-class WebhookAspectType(StrEnum):
-    CREATE = "create"
-    UPDATE = "update"
-    DELETE = "delete"

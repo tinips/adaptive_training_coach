@@ -10,7 +10,6 @@ from uuid import UUID
 import pytest
 import pytest_asyncio
 from pydantic import JsonValue
-from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -20,7 +19,6 @@ from sqlalchemy.ext.asyncio import (
 
 from app.config import Settings
 from app.db.base import Base
-from app.db.models import AvailabilityRule, EquipmentAccess, HealthConstraint
 from app.domain.enums import (
     OnboardingStatus,
     OnboardingStep,
@@ -631,13 +629,6 @@ async def test_confirmation_persists_goal_then_requires_context_before_completio
         )
         assert profile_context.equipment_text == "ALL_RECOMMENDED"
         assert profile_context.health_limitations_text == "NONE_REPORTED"
-        for table in (AvailabilityRule, EquipmentAccess, HealthConstraint):
-            count = await session.scalar(
-                select(func.count())
-                .select_from(table)
-                .where(table.user_id == completed.user_id),
-            )
-            assert count == 0
 
     updated = await onboarding.update_onboarding_data(
         user_id=completed.user_id,

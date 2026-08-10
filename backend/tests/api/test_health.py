@@ -59,7 +59,7 @@ async def test_ready_reports_database_success(test_settings: Settings) -> None:
 
 
 @pytest.mark.asyncio
-async def test_lifespan_health_and_readiness_start_without_strava_credentials() -> None:
+async def test_lifespan_health_and_readiness_start() -> None:
     settings = Settings(
         environment="test",
         database_url="sqlite+aiosqlite:///:memory:",
@@ -67,21 +67,12 @@ async def test_lifespan_health_and_readiness_start_without_strava_credentials() 
         telegram_bot_username="adaptive_training_coach_bot",
         llm_mode="mock",
         llm_api_key=None,
-        strava_enabled=False,
-        strava_client_id=None,
-        strava_client_secret=None,
-        strava_webhook_verify_token=None,
-        strava_webhook_subscription_id=None,
     )
     engine = create_async_engine(settings.database_url)
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     application = create_app(settings, engine=engine)
     transport = httpx.ASGITransport(app=application)
-
-    assert settings.strava_enabled is False
-    assert settings.strava_client_id is None
-    assert settings.strava_client_secret is None
 
     async with application.router.lifespan_context(application):
         async with httpx.AsyncClient(
@@ -122,19 +113,4 @@ async def test_ready_hides_database_failure(test_settings: Settings) -> None:
     assert response.status_code == 503
     assert response.json() == {"status": "unavailable"}
     assert "sensitive" not in response.text
-    await engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_production_app_mounts_all_strava_routes(
-    test_settings: Settings,
-) -> None:
-    engine = create_async_engine(test_settings.database_url)
-    application = create_app(test_settings, engine=engine)
-
-    paths = application.openapi()["paths"]
-    assert "/integrations/strava/connect" in paths
-    assert "/integrations/strava/callback" in paths
-    assert "/integrations/strava/webhook" in paths
-    assert application.state.strava_coordinator is not None
     await engine.dispose()

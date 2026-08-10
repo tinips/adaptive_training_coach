@@ -1,4 +1,4 @@
-"""Ownership-scoped reads and retained profile persistence operations."""
+"""Ownership-scoped profile and training-goal persistence."""
 
 from __future__ import annotations
 
@@ -11,43 +11,13 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.base import utc_now
-from app.db.models import (
-    AthleteProfile,
-    AvailabilityRule,
-    BaselinePreference,
-    CoachPreference,
-    EquipmentAccess,
-    HealthConstraint,
-    TrainingGoal,
-    User,
-)
-from app.domain.enums import (
-    AthleteGender,
-    BaselinePreferenceStatus,
-    BaselineSource,
-    PrimarySport,
-    TrainingGoalStatus,
-)
+from app.db.models import AthleteProfile, TrainingGoal, User
+from app.domain.enums import AthleteGender, TrainingGoalStatus
 from app.repositories.errors import OwnedRecordNotFoundError
 
 
 @dataclass(frozen=True, slots=True)
-class ProfileBundle:
-    """All normalized profile records retained for one authenticated user."""
-
-    athlete_profile: AthleteProfile | None
-    training_goal: TrainingGoal | None
-    availability_rules: tuple[AvailabilityRule, ...]
-    equipment_access: tuple[EquipmentAccess, ...]
-    health_constraints: tuple[HealthConstraint, ...]
-    coach_preference: CoachPreference | None
-    baseline_preference: BaselinePreference | None
-
-
-@dataclass(frozen=True, slots=True)
 class AthleteProfileContext:
-    """Raw contextual text retained alongside an athlete profile."""
-
     availability_text: str | None
     equipment_recommendation_text: str | None
     equipment_text: str | None
@@ -55,40 +25,28 @@ class AthleteProfileContext:
 
 
 class ProfileRepository:
-    """Read historical profiles and persist the one supported goal path."""
-
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
     async def lock_owner(self, *, user_id: uuid.UUID) -> User:
-        """Lock the profile owner for a transactional lifecycle transition."""
-
         user = await self._session.scalar(
-            select(User).where(User.id == user_id).with_for_update(),
+            select(User).where(User.id == user_id).with_for_update()
         )
         if user is None:
             raise OwnedRecordNotFoundError("user not found")
         return user
 
     async def get_athlete_profile(
-        self,
-        *,
-        user_id: uuid.UUID,
-        profile_id: uuid.UUID | None = None,
+        self, *, user_id: uuid.UUID, profile_id: uuid.UUID | None = None
     ) -> AthleteProfile | None:
         statement = select(AthleteProfile).where(AthleteProfile.user_id == user_id)
         if profile_id is not None:
             statement = statement.where(AthleteProfile.id == profile_id)
-        result = await self._session.execute(statement)
-        return result.scalar_one_or_none()
+        return (await self._session.execute(statement)).scalar_one_or_none()
 
     async def get_athlete_profile_context(
-        self,
-        *,
-        user_id: uuid.UUID,
+        self, *, user_id: uuid.UUID
     ) -> AthleteProfileContext | None:
-        """Read only the raw context belonging to the authenticated user."""
-
         profile = await self.get_athlete_profile(user_id=user_id)
         if profile is None:
             return None
@@ -100,52 +58,12 @@ class ProfileRepository:
         )
 
     async def get_training_goal(
-        self,
-        *,
-        user_id: uuid.UUID,
-        goal_id: uuid.UUID | None = None,
+        self, *, user_id: uuid.UUID, goal_id: uuid.UUID | None = None
     ) -> TrainingGoal | None:
         statement = select(TrainingGoal).where(TrainingGoal.user_id == user_id)
         if goal_id is not None:
             statement = statement.where(TrainingGoal.id == goal_id)
-        result = await self._session.execute(statement)
-        return result.scalar_one_or_none()
-
-    async def get_bundle(self, *, user_id: uuid.UUID) -> ProfileBundle:
-        """Load existing normalized data with every query constrained by owner."""
-
-        athlete_profile = await self.get_athlete_profile(user_id=user_id)
-        training_goal = await self.get_training_goal(user_id=user_id)
-        availability = await self._session.scalars(
-            select(AvailabilityRule)
-            .where(AvailabilityRule.user_id == user_id)
-            .order_by(AvailabilityRule.day_of_week),
-        )
-        equipment = await self._session.scalars(
-            select(EquipmentAccess)
-            .where(EquipmentAccess.user_id == user_id)
-            .order_by(EquipmentAccess.equipment_type),
-        )
-        constraints = await self._session.scalars(
-            select(HealthConstraint)
-            .where(HealthConstraint.user_id == user_id)
-            .order_by(HealthConstraint.created_at, HealthConstraint.id),
-        )
-        coach = await self._session.scalar(
-            select(CoachPreference).where(CoachPreference.user_id == user_id),
-        )
-        baseline = await self._session.scalar(
-            select(BaselinePreference).where(BaselinePreference.user_id == user_id),
-        )
-        return ProfileBundle(
-            athlete_profile=athlete_profile,
-            training_goal=training_goal,
-            availability_rules=tuple(availability.all()),
-            equipment_access=tuple(equipment.all()),
-            health_constraints=tuple(constraints.all()),
-            coach_preference=coach,
-            baseline_preference=baseline,
-        )
+        return (await self._session.execute(statement)).scalar_one_or_none()
 
     async def upsert_conversational_training_goal(
         self,
@@ -157,8 +75,6 @@ class ProfileRepository:
         secondary_priority: str | None,
         original_description: str,
     ) -> TrainingGoal:
-        """Persist only an application-validated, explicitly confirmed goal."""
-
         await self._require_user(user_id)
         goal = await self.get_training_goal(user_id=user_id)
         if goal is None:
@@ -174,69 +90,35 @@ class ProfileRepository:
         return goal
 
     async def update_athlete_profile_fields(
-        self,
-        *,
-        user_id: uuid.UUID,
-        payload: Mapping[str, object],
+        self, *, user_id: uuid.UUID, payload: Mapping[str, object]
     ) -> AthleteProfile:
-        """Dynamically update allowed fields on the owning athlete profile."""
-
-        allowed_fields = {
-            "age",
-            "birth_year",
-            "gender",
-            "weight_kg",
-            "height_cm",
-        }
-        values: dict[str, object] = {}
-        for key, value in payload.items():
-            if key not in allowed_fields:
-                raise ValueError("unsupported athlete profile update field")
-            values[key] = value
-        if not values:
-            raise ValueError("athlete profile update payload is empty")
-        values["updated_at"] = utc_now()
-
-        profile = await self._session.scalar(
-            update(AthleteProfile)
-            .where(AthleteProfile.user_id == user_id)
-            .values(**values)
-            .returning(AthleteProfile)
+        return await self._update_profile(
+            user_id, payload, {"age", "birth_year", "gender", "weight_kg", "height_cm"}
         )
-        if profile is None:
-            raise OwnedRecordNotFoundError("athlete profile not found")
-        await self._session.flush()
-        return profile
 
     async def update_athlete_profile_context_fields(
-        self,
-        *,
-        user_id: uuid.UUID,
-        payload: Mapping[str, object],
+        self, *, user_id: uuid.UUID, payload: Mapping[str, object]
     ) -> AthleteProfile:
-        """Update only raw textual context on the owning athlete profile."""
+        return await self._update_profile(
+            user_id,
+            payload,
+            {
+                "availability_text",
+                "equipment_recommendation_text",
+                "equipment_text",
+                "health_limitations_text",
+            },
+        )
 
-        allowed_fields = {
-            "availability_text",
-            "equipment_recommendation_text",
-            "equipment_text",
-            "health_limitations_text",
-        }
-        values: dict[str, object] = {}
-        for key, value in payload.items():
-            if key not in allowed_fields:
-                raise ValueError("unsupported athlete profile context update field")
-            if value is not None and not isinstance(value, str):
-                raise ValueError("athlete profile context values must be text or null")
-            values[key] = value
-        if not values:
-            raise ValueError("athlete profile context update payload is empty")
-        values["updated_at"] = utc_now()
-
+    async def _update_profile(
+        self, user_id: uuid.UUID, payload: Mapping[str, object], allowed: set[str]
+    ) -> AthleteProfile:
+        if not payload or not set(payload).issubset(allowed):
+            raise ValueError("unsupported athlete profile update field")
         profile = await self._session.scalar(
             update(AthleteProfile)
             .where(AthleteProfile.user_id == user_id)
-            .values(**values)
+            .values(**dict(payload), updated_at=utc_now())
             .returning(AthleteProfile)
         )
         if profile is None:
@@ -245,27 +127,16 @@ class ProfileRepository:
         return profile
 
     async def update_training_goal_fields(
-        self,
-        *,
-        user_id: uuid.UUID,
-        payload: Mapping[str, object],
+        self, *, user_id: uuid.UUID, payload: Mapping[str, object]
     ) -> TrainingGoal:
-        """Dynamically update allowed fields on the owning training goal."""
-
-        allowed_fields = {"main_goal", "target_outcome", "event_date"}
-        values: dict[str, object] = {}
-        for key, value in payload.items():
-            if key not in allowed_fields:
-                raise ValueError("unsupported training goal update field")
-            values[key] = value
-        if not values:
-            raise ValueError("training goal update payload is empty")
-        values["updated_at"] = utc_now()
-
+        if not payload or not set(payload).issubset(
+            {"main_goal", "target_outcome", "event_date"}
+        ):
+            raise ValueError("unsupported training goal update field")
         goal = await self._session.scalar(
             update(TrainingGoal)
             .where(TrainingGoal.user_id == user_id)
-            .values(**values)
+            .values(**dict(payload), updated_at=utc_now())
             .returning(TrainingGoal)
         )
         if goal is None:
@@ -276,7 +147,6 @@ class ProfileRepository:
     async def increment_equipment_context_revision(
         self, *, user_id: uuid.UUID
     ) -> TrainingGoal:
-        """Create a new logical equipment-review identity for a changed goal."""
         goal = await self.get_training_goal(user_id=user_id)
         if goal is None:
             raise OwnedRecordNotFoundError("training goal not found")
@@ -293,45 +163,22 @@ class ProfileRepository:
         weight_kg: float,
         height_cm: float,
     ) -> AthleteProfile:
-        """Persist the four validated mandatory fields for the owning user."""
-
         await self._require_user(user_id)
         profile = await self.get_athlete_profile(user_id=user_id)
         if profile is None:
-            profile = AthleteProfile(user_id=user_id)
+            profile = AthleteProfile(user_id=user_id, age=utc_now().year - birth_year)
             self._session.add(profile)
         profile.birth_year = birth_year
         profile.gender = gender
         profile.weight_kg = weight_kg
         profile.height_cm = height_cm
-        # Retained compatibility columns are not part of the new intake.
         profile.age = utc_now().year - birth_year
-        profile.primary_sport = profile.primary_sport or PrimarySport.OTHER
         await self._session.flush()
         return profile
 
-    async def upsert_baseline_preference(
-        self,
-        *,
-        user_id: uuid.UUID,
-        selected_source: BaselineSource,
-        status: BaselinePreferenceStatus,
-    ) -> BaselinePreference:
-        """Retain post-profile baseline selection for existing complete profiles."""
-
-        await self._require_user(user_id)
-        preference = await self._session.scalar(
-            select(BaselinePreference).where(BaselinePreference.user_id == user_id),
-        )
-        if preference is None:
-            preference = BaselinePreference(user_id=user_id)
-            self._session.add(preference)
-        preference.selected_source = selected_source
-        preference.status = status
-        await self._session.flush()
-        return preference
-
     async def _require_user(self, user_id: uuid.UUID) -> None:
-        exists = await self._session.scalar(select(User.id).where(User.id == user_id))
-        if exists is None:
+        if (
+            await self._session.scalar(select(User.id).where(User.id == user_id))
+            is None
+        ):
             raise OwnedRecordNotFoundError("user not found")

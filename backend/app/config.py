@@ -32,8 +32,6 @@ class Settings(BaseSettings):
     database_url: str = (
         "postgresql+asyncpg://coach:coach@localhost:55432/adaptive_coach"
     )
-    public_base_url: str = "http://localhost:8000"
-    app_encryption_key: SecretStr | None = None
 
     llm_mode: Literal["mock", "live"] = "mock"
     llm_api_key: SecretStr | None = None
@@ -42,17 +40,6 @@ class Settings(BaseSettings):
     llm_min_confidence: float = Field(default=0.75, ge=0, le=1)
     llm_other_requests_per_hour: int = Field(default=10, ge=1, le=100)
     ai_workflow_name: str = "onboarding_goal_extractor"
-
-    strava_enabled: bool = False
-    strava_client_id: str | None = None
-    strava_client_secret: SecretStr | None = None
-    strava_redirect_uri: str = "http://localhost:8000/integrations/strava/callback"
-    strava_initial_sync_days: int = Field(default=56, ge=7, le=365)
-    strava_sync_page_size: int = Field(default=100, ge=1, le=200)
-    strava_webhook_verify_token: SecretStr | None = None
-    strava_webhook_subscription_id: str | None = None
-    strava_sync_cooldown_seconds: int = Field(default=300, ge=0, le=3600)
-    oauth_state_ttl_seconds: int = Field(default=600, ge=60, le=3600)
 
     apple_health_import_enabled: bool = True
     apple_health_import_max_compressed_size_mb: int = Field(
@@ -75,7 +62,6 @@ class Settings(BaseSettings):
     apple_health_import_keep_original_files: bool = False
     tcx_import_enabled: bool = True
     tcx_import_max_size_mb: int = Field(default=25, ge=1, le=100)
-    workout_feedback_enabled: bool = True
 
     @field_validator("telegram_bot_username", mode="before")
     @classmethod
@@ -125,12 +111,8 @@ class Settings(BaseSettings):
             "default_bot_language": self.default_bot_language,
             "llm_mode": self.llm_mode,
             "llm_model": self.llm_model,
-            "strava_enabled": self.strava_enabled,
-            "strava_initial_sync_days": self.strava_initial_sync_days,
-            "strava_sync_page_size": self.strava_sync_page_size,
             "apple_health_import_enabled": self.apple_health_import_enabled,
             "tcx_import_enabled": self.tcx_import_enabled,
-            "workout_feedback_enabled": self.workout_feedback_enabled,
         }
 
 

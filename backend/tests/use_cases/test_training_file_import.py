@@ -23,17 +23,12 @@ from app.config import Settings
 from app.db.base import Base
 from app.db.models import (
     AppleHealthImportJob,
-    AthleteBaseline,
-    BaselinePreference,
     CyclingWorkoutDetails,
-    User,
     Workout,
 )
 from app.domain.enums import (
     ActivitySource,
     AppleHealthImportStatus,
-    BaselinePreferenceStatus,
-    BaselineSource,
     Discipline,
     TrainingFileFormat,
     UserStatus,
@@ -75,7 +70,7 @@ async def stage_user(
     factory: async_sessionmaker[AsyncSession],
     *,
     owner: TelegramIdentity,
-    status: UserStatus = UserStatus.PROFILE_COMPLETED,
+    status: UserStatus = UserStatus.ONBOARDING_COMPLETED,
 ) -> uuid.UUID:
     async with factory.begin() as session:
         user, _ = await UserRepository(session).get_or_create(
@@ -104,7 +99,6 @@ def service(
             apple_health_import_max_compressed_size_mb=25,
             tcx_import_enabled=True,
             tcx_import_max_size_mb=25,
-            strava_enabled=False,
         ),
         clock=lambda: NOW,
     )
@@ -212,7 +206,7 @@ async def test_file_upload_is_not_an_onboarding_action(
 
 
 @pytest.mark.asyncio
-async def test_existing_athlete_tcx_imports_and_recalculates(
+async def test_existing_athlete_tcx_imports(
     persistence: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
     tmp_path: Path,
 ) -> None:
@@ -238,20 +232,12 @@ async def test_existing_athlete_tcx_imports_and_recalculates(
     assert outcome.sport == "RUNNING"
     assert outcome.duration_seconds == 2400
     assert outcome.distance_meters == 7200
-    assert "recalculating_baseline" in stages
+    assert "saving_activities" in stages
     async with factory() as session:
-        baseline = await session.scalar(
-            select(AthleteBaseline).where(AthleteBaseline.user_id == user_id)
-        )
-        preference = await session.scalar(
-            select(BaselinePreference).where(BaselinePreference.user_id == user_id)
-        )
-        user = await session.get(User, user_id)
-        assert baseline is not None
-        assert baseline.source is BaselineSource.FILE_IMPORT
-        assert preference is not None
-        assert preference.status is BaselinePreferenceStatus.READY
-        assert user is not None and user.status is UserStatus.BASELINE_READY
+        workout = await session.get(Workout, outcome.activity_id)
+        assert workout is not None
+        assert workout.athlete_id == user_id
+        assert workout.source is ActivitySource.TCX
 
 
 @pytest.mark.asyncio
@@ -273,7 +259,7 @@ async def test_existing_athlete_apple_history_import_stays_available(
     assert outcome.status is AppleHealthImportStatus.SUCCEEDED
     assert outcome.file_format is TrainingFileFormat.APPLE_HEALTH_ZIP
     assert outcome.average_heart_rate == 142
-    assert "recalculating_baseline" in stages
+    assert "saving_activities" in stages
     async with factory() as session:
         workout = await session.get(Workout, outcome.activity_id)
         assert workout is not None
@@ -388,48 +374,3 @@ async def test_startup_recovery_cleans_recorded_daily_temp_file(
         assert job.status is AppleHealthImportStatus.FAILED
         assert job.safe_error_code == "import_interrupted"
         assert job.temporary_path is None
-
-
-@pytest.mark.asyncio
-async def test_daily_import_preserves_existing_strava_baseline_choice(
-    persistence: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
-    tmp_path: Path,
-) -> None:
-    _, factory = persistence
-    owner = identity(9106)
-    user_id = await stage_user(
-        factory,
-        owner=owner,
-        status=UserStatus.BASELINE_IMPORTING,
-    )
-    async with factory.begin() as session:
-        session.add(
-            BaselinePreference(
-                user_id=user_id,
-                selected_source=BaselineSource.STRAVA,
-                status=BaselinePreferenceStatus.IMPORTING,
-            )
-        )
-    tcx = write_tcx(tmp_path / "strava.tcx", activity_id="2026-07-28T12:00:00Z")
-
-    outcome, _ = await upload(
-        service(factory, temp_dir=tmp_path / "temporary"),
-        owner=owner,
-        source=tcx,
-        update_id=106,
-    )
-
-    assert outcome.status is AppleHealthImportStatus.SUCCEEDED
-    async with factory() as session:
-        preference = await session.scalar(
-            select(BaselinePreference).where(BaselinePreference.user_id == user_id)
-        )
-        baseline = await session.scalar(
-            select(AthleteBaseline)
-            .where(AthleteBaseline.user_id == user_id)
-            .order_by(AthleteBaseline.version.desc())
-        )
-        assert preference is not None
-        assert preference.selected_source is BaselineSource.STRAVA
-        assert preference.status is BaselinePreferenceStatus.IMPORTING
-        assert baseline is not None and baseline.source is BaselineSource.STRAVA

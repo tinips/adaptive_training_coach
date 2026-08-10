@@ -9,7 +9,7 @@ import os
 import tempfile
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -18,15 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings
 from app.db.models import AppleHealthImportJob, Workout
-from app.domain.enums import (
-    AppleHealthImportStatus,
-    BaselinePreferenceStatus,
-    BaselineSource,
-    BaselineStatus,
-    LevelLabel,
-    TrainingFileFormat,
-    UserStatus,
-)
+from app.domain.enums import AppleHealthImportStatus, TrainingFileFormat, UserStatus
 from app.integrations.apple_health import (
     AppleHealthArchiveLimits,
     AppleHealthParser,
@@ -42,15 +34,10 @@ from app.repositories.apple_health import (
     AppleHealthImportConflictError,
     AppleHealthRepository,
 )
-from app.repositories.baselines import BaselineRepository
-from app.repositories.profiles import ProfileRepository
-from app.repositories.strava import StravaRepository
 from app.repositories.users import UserRepository
-from app.schemas.baseline import BaselineCalculation
 from app.schemas.common import TelegramIdentity
 from app.schemas.training_import import TelegramDocumentUpload
 from app.schemas.workouts import workout_metrics
-from app.services.baseline import BaselineService
 from app.services.onboarding import OnboardingApplicationError
 
 logger = logging.getLogger(__name__)
@@ -60,11 +47,6 @@ ProgressCallback = Callable[[str], Awaitable[None]]
 
 _COMPLETED_PROFILE_STATES = {
     UserStatus.ONBOARDING_COMPLETED,
-    UserStatus.PROFILE_COMPLETED,
-    UserStatus.BASELINE_PENDING,
-    UserStatus.BASELINE_IMPORTING,
-    UserStatus.BASELINE_READY,
-    UserStatus.BASELINE_FAILED,
 }
 _ZIP_MAGIC = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
 
@@ -91,11 +73,10 @@ class TrainingFileImportOutcome:
     duration_seconds: int | None = None
     distance_meters: float | None = None
     average_heart_rate: float | None = None
-    baseline_limited: bool = False
 
 
 class TrainingFileImportService:
-    """Own temp files, format detection, canonical imports, and baseline refresh."""
+    """Own temp files, format detection, and canonical imports."""
 
     def __init__(
         self,
@@ -207,15 +188,7 @@ class TrainingFileImportService:
                     job_id=job.id,
                     duplicate=duplicate,
                 )
-                baseline_limited = False
-                if copied.status is AppleHealthImportStatus.SUCCEEDED:
-                    calculation = await self._recalculate_daily(user_id=user_id)
-                    baseline_limited = _baseline_is_limited(calculation)
-                result = await self._outcome(
-                    copied,
-                    exact_file_duplicate=True,
-                )
-                return replace(result, baseline_limited=baseline_limited)
+                return await self._outcome(copied, exact_file_duplicate=True)
 
             if file_format is TrainingFileFormat.APPLE_HEALTH_ZIP:
                 return await self._process_apple(
@@ -385,11 +358,6 @@ class TrainingFileImportService:
                     updated += 1
                 else:
                     unchanged += 1
-            await progress("recalculating_baseline")
-            calculation = await self._recalculate_in_session(
-                session,
-                user_id=user_id,
-            )
             completed = await jobs.mark_succeeded(
                 user_id=user_id,
                 job_id=job.id,
@@ -402,11 +370,7 @@ class TrainingFileImportService:
                 activity_id=latest.id if len(workouts) == 1 and latest else None,
                 file_format=TrainingFileFormat.APPLE_HEALTH_ZIP,
             )
-            result = await self._outcome_in_session(session, completed)
-            return replace(
-                result,
-                baseline_limited=_baseline_is_limited(calculation),
-            )
+            return await self._outcome_in_session(session, completed)
 
     async def _process_tcx(
         self,
@@ -441,11 +405,6 @@ class TrainingFileImportService:
                 file_sha256=file_sha256,
                 import_job_id=job.id,
             )
-            await progress("recalculating_baseline")
-            calculation = await self._recalculate_in_session(
-                session,
-                user_id=user_id,
-            )
             completed = await jobs.mark_succeeded(
                 user_id=user_id,
                 job_id=job.id,
@@ -458,11 +417,7 @@ class TrainingFileImportService:
                 activity_id=activity.id,
                 file_format=TrainingFileFormat.TCX,
             )
-            result = await self._outcome_in_session(session, completed)
-            return replace(
-                result,
-                baseline_limited=_baseline_is_limited(calculation),
-            )
+            return await self._outcome_in_session(session, completed)
 
     async def _mark_processing(
         self,
@@ -525,47 +480,6 @@ class TrainingFileImportService:
                 safe_error_code=code,
             )
             return await self._outcome_in_session(session, job)
-
-    async def _recalculate_daily(
-        self,
-        *,
-        user_id: uuid.UUID,
-    ) -> BaselineCalculation:
-        async with self._session_factory.begin() as session:
-            return await self._recalculate_in_session(session, user_id=user_id)
-
-    async def _recalculate_in_session(
-        self,
-        session: AsyncSession,
-        *,
-        user_id: uuid.UUID,
-    ) -> BaselineCalculation:
-        bundle = await ProfileRepository(session).get_bundle(user_id=user_id)
-        source = (
-            bundle.baseline_preference.selected_source
-            if bundle.baseline_preference is not None
-            else BaselineSource.FILE_IMPORT
-        )
-        calculation = await BaselineService(
-            activities=StravaRepository(session),
-            baselines=BaselineRepository(session),
-            analysis_days=self._settings.strava_initial_sync_days,
-            clock=self._clock,
-        ).recalculate(
-            user_id=user_id,
-            source=source,
-        )
-        if bundle.baseline_preference is None:
-            await ProfileRepository(session).upsert_baseline_preference(
-                user_id=user_id,
-                selected_source=BaselineSource.FILE_IMPORT,
-                status=BaselinePreferenceStatus.READY,
-            )
-            await UserRepository(session).update_status(
-                user_id=user_id,
-                status=UserStatus.BASELINE_READY,
-            )
-        return calculation
 
     async def _record_temporary_path(
         self,
@@ -774,13 +688,6 @@ async def _download_with_limit(
         if not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-
-
-def _baseline_is_limited(calculation: BaselineCalculation) -> bool:
-    return calculation.status is not BaselineStatus.READY or any(
-        discipline.level_label is LevelLabel.UNKNOWN
-        for discipline in calculation.disciplines
-    )
 
 
 def _file_size(path: Path) -> int:

@@ -42,25 +42,11 @@ async def profile_handler(
     await _agent_delegate(update, context, "/profile")
 
 
-async def baseline_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-    await _agent_delegate(update, context, "/baseline")
-
-
 async def add_workout_handler(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
     await _agent_delegate(update, context, "/add_workout")
-
-
-async def strava_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-    await _agent_delegate(update, context, "/strava")
 
 
 async def cancel_handler(

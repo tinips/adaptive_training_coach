@@ -13,7 +13,6 @@ from telegram.constants import ParseMode
 from telegram.ext import Application, Defaults
 
 from app.bot.handlers import BOT_SERVICE_KEY
-from app.bot.notifier import TelegramInitialSyncNotifier
 from app.bot.router import register_handlers
 from app.bot.service import CoachBotApplicationService
 from app.bot.service_protocol import CoachBotService
@@ -24,9 +23,7 @@ from app.logging import configure_logging
 from app.services.accounts import AccountQueryService, AccountService
 from app.services.onboarding import OnboardingService
 from app.services.profiles import ProfileService
-from app.services.strava.orchestrator import StravaCoordinator
 from app.services.training_import import TrainingFileImportService
-from app.services.workout_feedback import WorkoutFeedbackService
 from app.workflows.onboarding_context import create_context_onboarding_workflow
 from app.workflows.onboarding_goal.graph import create_goal_extractor
 from app.workflows.telegram_orchestrator import TelegramAgentWorkspace
@@ -41,7 +38,6 @@ class BotRuntime:
 
     settings: Settings
     engine: AsyncEngine
-    strava: StravaCoordinator
     apple_health: TrainingFileImportService
     agent_workspace: TelegramAgentWorkspace
     service: CoachBotApplicationService
@@ -49,7 +45,6 @@ class BotRuntime:
     async def recover(self) -> None:
         """Reconcile durable background work before accepting updates."""
 
-        await self.strava.recover_stale_work()
         await self.apple_health.recover_stale_work()
         await self.agent_workspace.start()
 
@@ -57,12 +52,9 @@ class BotRuntime:
         """Close provider and database connection pools exactly once."""
 
         try:
-            await self.strava.aclose()
+            await self.agent_workspace.aclose()
         finally:
-            try:
-                await self.agent_workspace.aclose()
-            finally:
-                await self.engine.dispose()
+            await self.engine.dispose()
 
 
 def build_runtime(
@@ -81,20 +73,6 @@ def build_runtime(
         model=create_goal_extraction_model(runtime_settings),
         postgres_dsn=_checkpoint_dsn(runtime_settings.database_url),
     )
-    telegram_token = runtime_settings.telegram_bot_token
-    initial_sync_notifier = (
-        TelegramInitialSyncNotifier(
-            session_factory=session_factory,
-            bot_token=telegram_token,
-        )
-        if telegram_token is not None and telegram_token.get_secret_value()
-        else None
-    )
-    strava = StravaCoordinator(
-        session_factory=session_factory,
-        settings=runtime_settings,
-        initial_sync_notifier=initial_sync_notifier,
-    )
     apple_health = TrainingFileImportService(
         session_factory=session_factory,
         settings=runtime_settings,
@@ -109,19 +87,14 @@ def build_runtime(
         profiles=ProfileService(session_factory),
         account_queries=AccountQueryService(session_factory),
         accounts=AccountService(session_factory),
-        strava=strava,
         apple_health=apple_health,
-        workout_feedback=WorkoutFeedbackService(session_factory),
-        strava_enabled=runtime_settings.strava_enabled,
         apple_health_enabled=runtime_settings.apple_health_import_enabled,
         tcx_enabled=runtime_settings.tcx_import_enabled,
-        workout_feedback_enabled=runtime_settings.workout_feedback_enabled,
         agent_workspace=agent_workspace,
     )
     return BotRuntime(
         settings=runtime_settings,
         engine=runtime_engine,
-        strava=strava,
         apple_health=apple_health,
         agent_workspace=agent_workspace,
         service=service,

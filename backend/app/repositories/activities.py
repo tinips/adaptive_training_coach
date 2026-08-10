@@ -26,7 +26,6 @@ from app.schemas.workouts import (
     serialize_workout,
 )
 from app.services.activities.adapters.apple_health import from_apple_health
-from app.services.activities.adapters.strava import from_strava
 from app.services.activities.adapters.tcx import from_tcx
 from app.services.activities.contracts import (
     ActivityImportData,
@@ -44,7 +43,6 @@ from app.services.activities.normalization import (
 
 if TYPE_CHECKING:
     from app.integrations.tcx.models import ParsedTCXActivity
-    from app.schemas.strava import NormalizedStravaActivity
     from app.schemas.workouts import WorkoutDetailsData, WorkoutRead
 
 
@@ -154,36 +152,6 @@ class TrainingActivityRepository:
             incoming=from_tcx(parsed),
             file_sha256=file_sha256,
             import_job_id=import_job_id,
-        )
-
-    async def import_strava_activity(
-        self,
-        *,
-        user_id: uuid.UUID,
-        normalized: NormalizedStravaActivity,
-    ) -> tuple[Workout, ActivityUpsertOutcome]:
-        """Import one Strava workout using its provider activity ID."""
-
-        return await self._import_activity(
-            user_id=user_id,
-            incoming=from_strava(normalized),
-            file_sha256=None,
-            import_job_id=None,
-        )
-
-    async def mark_source_deleted(
-        self,
-        *,
-        user_id: uuid.UUID,
-        source: ActivitySource,
-        external_id: str,
-        deleted_at: datetime,
-    ) -> bool:
-        return await self._source_links.mark_deleted(
-            user_id=user_id,
-            source=source,
-            external_id=external_id,
-            deleted_at=deleted_at,
         )
 
     async def _import_activity(

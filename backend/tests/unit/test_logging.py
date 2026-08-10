@@ -8,7 +8,7 @@ import logging
 from app.logging import SensitiveValueFilter, configure_logging
 
 
-def test_uvicorn_access_tuple_redacts_oauth_query_bearers() -> None:
+def test_uvicorn_access_tuple_redacts_sensitive_query_values() -> None:
     record = logging.LogRecord(
         name="uvicorn.access",
         level=logging.INFO,
@@ -18,7 +18,7 @@ def test_uvicorn_access_tuple_redacts_oauth_query_bearers() -> None:
         args=(
             "127.0.0.1:5000",
             "GET",
-            "/integrations/strava/callback?state=raw-state&code=raw-code"
+            "/integrations/callback?state=raw-state&code=raw-code"
             "&hub.verify_token=raw-verify&scope=read",
             "1.1",
             200,
@@ -42,7 +42,7 @@ def test_preformatted_connect_ticket_and_structured_secret_are_redacted() -> Non
         pathname=__file__,
         lineno=1,
         msg=(
-            "GET /integrations/strava/connect?ticket=raw-ticket "
+            "GET /integrations/connect?ticket=raw-ticket "
             "https://api.telegram.org/botraw-telegram/sendMessage "
             "postgresql+asyncpg://coach:raw-password@localhost/db"
         ),

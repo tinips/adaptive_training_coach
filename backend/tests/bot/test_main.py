@@ -80,7 +80,7 @@ def test_create_application_registers_development_commands_only_in_development()
 
 
 @pytest.mark.asyncio
-async def test_runtime_without_strava_registers_document_handler() -> None:
+async def test_runtime_registers_document_handler() -> None:
     settings = Settings(
         environment="test",
         database_url="sqlite+aiosqlite:///:memory:",
@@ -88,20 +88,11 @@ async def test_runtime_without_strava_registers_document_handler() -> None:
         telegram_bot_username="adaptive_training_coach_bot",
         llm_mode="mock",
         llm_api_key=None,
-        strava_enabled=False,
-        strava_client_id=None,
-        strava_client_secret=None,
-        strava_webhook_verify_token=None,
-        strava_webhook_subscription_id=None,
     )
     engine = create_async_engine(settings.database_url)
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     runtime = build_runtime(settings, engine=engine)
-
-    assert runtime.settings.strava_enabled is False
-    assert runtime.settings.strava_client_id is None
-    assert runtime.settings.strava_client_secret is None
 
     try:
         await runtime.recover()
