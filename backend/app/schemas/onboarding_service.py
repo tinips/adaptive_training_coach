@@ -22,7 +22,6 @@ OnboardingResultKind = Literal[
     "goal_intake",
     "goal_clarification",
     "goal_confirmation",
-    "goal_addition",
     "goal_off_topic",
     "onboarding_modification",
     "goal_confirmed",

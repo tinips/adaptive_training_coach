@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from telegram import InlineKeyboardMarkup
+from telegram import InlineKeyboardMarkup, ReplyKeyboardMarkup
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,6 +22,7 @@ class TelegramResponse:
 
     text: str
     keyboard: InlineKeyboardMarkup | None = None
+    user_keyboard: ReplyKeyboardMarkup | None = None
     edit_existing: bool = False
     button_rows: tuple[tuple[TelegramButtonSpec, ...], ...] = ()
     clear_agent_thread: bool = False

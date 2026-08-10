@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 
 from app.bot.rendering import TelegramButtonSpec
 
@@ -37,10 +37,7 @@ LABELS = {
     "privacy_safety": "Privacy & safety",
     "understand_continue": "I understand — continue",
     "build_profile": "Let's build my profile",
-    "goal_correct": "No, that\u2019s right",
-    "goal_add": "Yes, add something",
-    "goal_restart": "Start again",
-    "goal_has_date": "Yes, I have a date",
+    "continue": "Continue",
     "goal_no_date": "Not yet",
     "goal_prepare_race": "Prepare for a race",
     "goal_distance": "Reach a specific distance",
@@ -50,10 +47,8 @@ LABELS = {
     "equipment_all": "I have all the recommended equipment",
     "equipment_other": "Other / I have limitations",
     "health_none": "None",
-    "health_describe": "Describe limitations",
     "gender_male": "Male",
     "gender_female": "Female",
-    "gender_other_unspecified": "Other / Unspecified",
     "cancel": "Cancel",
     "back": "Back",
     "skip": "Skip",
@@ -115,9 +110,7 @@ def goal_input_keyboard() -> InlineKeyboardMarkup:
 def goal_confirmation_keyboard() -> InlineKeyboardMarkup:
     return _rows(
         [
-            [(LABELS["goal_correct"], "ob:v1:goal:confirm")],
-            [(LABELS["goal_add"], "ob:v1:goal:add")],
-            [(LABELS["goal_restart"], "ob:v1:goal:restart")],
+            [(LABELS["continue"], "ob:v1:goal:confirm")],
             [(LABELS["cancel"], "ob:v1:cancel")],
         ]
     )
@@ -140,12 +133,6 @@ def profile_gender_keyboard() -> InlineKeyboardMarkup:
         [
             [(LABELS["gender_male"], "ob:v1:profile:gender:MALE")],
             [(LABELS["gender_female"], "ob:v1:profile:gender:FEMALE")],
-            [
-                (
-                    LABELS["gender_other_unspecified"],
-                    "ob:v1:profile:gender:OTHER_UNSPECIFIED",
-                )
-            ],
             [(LABELS["cancel"], "ob:v1:cancel")],
         ]
     )
@@ -191,10 +178,14 @@ def equipment_details_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def completed_onboarding_keyboard() -> InlineKeyboardMarkup:
-    """Offer the deterministic completed-athlete settings entry point."""
+def completed_onboarding_keyboard() -> ReplyKeyboardMarkup:
+    """Keep the completed-athlete settings entry point in the input keyboard."""
 
-    return _rows([[("Change profile", "ps:v1:open")]])
+    return ReplyKeyboardMarkup(
+        [["Change profile"]],
+        resize_keyboard=True,
+        is_persistent=True,
+    )
 
 
 def profile_settings_keyboard() -> InlineKeyboardMarkup:
@@ -218,7 +209,6 @@ def profile_health_keyboard() -> InlineKeyboardMarkup:
     return _rows(
         [
             [("None", "ps:v1:health:none")],
-            [("Describe limitations", "ps:v1:health:describe")],
             [("Back / Done", "ps:v1:done")],
         ]
     )
@@ -241,12 +231,6 @@ def profile_settings_gender_keyboard() -> InlineKeyboardMarkup:
         [
             [(LABELS["gender_male"], "ps:v1:personal:gender:MALE")],
             [(LABELS["gender_female"], "ps:v1:personal:gender:FEMALE")],
-            [
-                (
-                    LABELS["gender_other_unspecified"],
-                    "ps:v1:personal:gender:OTHER_UNSPECIFIED",
-                )
-            ],
             [("Back / Done", "ps:v1:back")],
         ]
     )
@@ -271,7 +255,6 @@ def health_limitations_keyboard() -> InlineKeyboardMarkup:
     return _rows(
         [
             [(LABELS["health_none"], "ob:v1:health:none")],
-            [(LABELS["health_describe"], "ob:v1:health:describe")],
             [(LABELS["cancel"], "ob:v1:cancel")],
         ]
     )
@@ -280,7 +263,6 @@ def health_limitations_keyboard() -> InlineKeyboardMarkup:
 def goal_date_clarification_keyboard() -> InlineKeyboardMarkup:
     return _rows(
         [
-            [(LABELS["goal_has_date"], "ob:v1:goal:choice:HAS_DATE")],
             [(LABELS["goal_no_date"], "ob:v1:goal:choice:NOT_YET")],
             [(LABELS["cancel"], "ob:v1:cancel")],
         ]

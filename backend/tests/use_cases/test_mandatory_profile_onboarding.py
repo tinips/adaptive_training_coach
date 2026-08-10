@@ -100,7 +100,10 @@ async def test_profile_inputs_validate_deterministically_and_then_begin_goal_int
     with pytest.raises(OnboardingApplicationError, match="invalid_action"):
         await service.choose_gender(identity, "NOT_A_CATEGORY")
 
-    weight = await service.choose_gender(identity, "OTHER_UNSPECIFIED")
+    with pytest.raises(OnboardingApplicationError, match="invalid_action"):
+        await service.choose_gender(identity, "OTHER_UNSPECIFIED")
+
+    weight = await service.choose_gender(identity, "FEMALE")
     assert weight.current_step is OnboardingStep.PROFILE_WEIGHT_INTAKE
     for bad_weight in ("weight", "nan", "39.9", "200.1"):
         invalid_weight = await service.handle_text(identity, bad_weight)
@@ -129,7 +132,7 @@ async def test_profile_inputs_validate_deterministically_and_then_begin_goal_int
         )
         assert profile is not None
         assert profile.birth_year == 2004
-        assert profile.gender is AthleteGender.OTHER_UNSPECIFIED
+        assert profile.gender is AthleteGender.FEMALE
         assert profile.weight_kg == 72.5
         assert profile.height_cm == 178.0
         assert persisted_user.status is UserStatus.ONBOARDING_IN_PROGRESS

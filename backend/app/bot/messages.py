@@ -22,7 +22,12 @@ WELCOME_NEW = WELCOME
 SETUP_INTRODUCTION = (
     "Before we begin, I will collect the details needed for your athlete profile."
 )
-GOAL_INTAKE = "What are you currently training for, and what would success look like?"
+GOAL_INTAKE = (
+    "What are you currently training for, and what would success look like?\n\n"
+    "For example: 'I am preparing for an Ironman 70.3. I want to finish in a "
+    "decent time while maintaining muscle.'\n\n"
+    "Include an event date if you know it."
+)
 COACH_HELP = (
     "How can Adaptive Endurance Coach help me?\n\n"
     "The coach builds your athlete profile from your goal, availability, equipment, "
@@ -123,9 +128,7 @@ PROFILE_BIRTH_YEAR_INTAKE = (
     "First, let\u2019s build your athlete profile.\n\n"
     "What year were you born? Send the four-digit year (1940 to 2008)."
 )
-PROFILE_GENDER_INTAKE = (
-    "Which competitive category / biological sex should I use for your athlete profile?"
-)
+PROFILE_GENDER_INTAKE = "Which is your sex?"
 PROFILE_WEIGHT_INTAKE = (
     "What is your current weight in kilograms? Send a number from 40.0 to 200.0."
 )
@@ -145,8 +148,8 @@ EQUIPMENT_DETAILS_INTAKE = (
     "on weekends.'"
 )
 HEALTH_LIMITATIONS_INTAKE = (
-    "Do you have any current or past injuries, discomfort, or physical limitations "
-    "that should influence training? This is not medical advice."
+    "Write any current or past injuries, discomfort, or physical limitations that "
+    "should influence training, or choose None. This is not medical advice."
 )
 CONTEXT_VALIDATION_ERROR = (
     "Please send a short answer for this part of your athlete profile."
@@ -179,7 +182,7 @@ PROFILE_GOAL_MAIN = "What is your training goal?"
 PROFILE_GOAL_OUTCOME = "What would success or the outcome look like?"
 PROFILE_GOAL_DATE = "When is the event? Send YYYY-MM-DD, or choose Not yet."
 PROFILE_AVAILABILITY = "Describe your weekly training availability."
-PROFILE_HEALTH = "Choose None, or describe limitations in a message."
+PROFILE_HEALTH = "Write any training limitations, or choose None."
 PROFILE_PERSONAL = "Choose the personal detail to change."
 PROFILE_BIRTH_YEAR = "Send your birth year."
 PROFILE_WEIGHT = "Send your weight in kilograms."
@@ -218,9 +221,7 @@ def goal_clarification(answers: Mapping[str, Any]) -> str:
             "reaching a specific time or pace."
         )
     if field == "event_date":
-        if hint == "exact_date":
-            return "What is the race or target date?"
-        return "Do you already have a race or target date?"
+        return "When is the event? Send YYYY-MM-DD, or choose Not yet."
     return "Could you make your goal a little more specific?"
 
 
@@ -243,7 +244,7 @@ def goal_confirmation(answers: Mapping[str, Any]) -> str:
         f"Event date\n{event_date}\n\n"
         f"Target outcome\n{target_outcome}\n\n"
         f"Secondary priority\n{secondary}\n\n"
-        "Is there anything else you want me to know about this goal?"
+        "To change anything just write."
     )
 
 
@@ -266,6 +267,7 @@ VALIDATION_ERRORS: dict[str, str] = {
     "invalid_height_cm": (
         "Enter your height in centimeters as a whole number from 120 to 230."
     ),
+    "invalid_event_date": "Enter a future event date as YYYY-MM-DD.",
     "apple_health_import_disabled": ("Apple Health import is currently unavailable."),
     "import_already_active": ("An Apple Health import is already in progress."),
     "training_file_not_expected": (

@@ -35,11 +35,10 @@ class OnboardingStep(StrEnum):
 
 
 class AthleteGender(StrEnum):
-    """Competition category / biological-sex value supplied by the athlete."""
+    """Biological-sex value supplied by the athlete."""
 
     MALE = "MALE"
     FEMALE = "FEMALE"
-    OTHER_UNSPECIFIED = "OTHER_UNSPECIFIED"
 
 
 class ActivitySource(StrEnum):

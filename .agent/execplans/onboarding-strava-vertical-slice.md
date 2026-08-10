@@ -15,6 +15,20 @@ unchanged at the request of the cleanup scope.
 > goal confirmation. See the final amendment section and
 > `docs/current-product-flow.md` for the supported architecture.
 
+## Onboarding refinement (2026-08-10)
+
+- Restricted athlete sex to `MALE` and `FEMALE` in the application and database.
+  Migration `0016_restrict_athlete_gender` resets the onboarding data of any
+  historical `OTHER_UNSPECIFIED` profile while preserving its account and
+  workouts.
+- Simplified goal confirmation to Continue/Cancel with direct free-text edits,
+  made the pending event-date prompt deterministic (`YYYY-MM-DD` or Not yet),
+  and removed obsolete add/restart, date-presence, and health-description
+  buttons.
+- Focused onboarding tests, Ruff, and mypy pass. The full suite has eight
+  pre-existing stale assertions for the removed LLM equipment recommender and
+  its `all`/`other` callbacks, plus an outdated Telegram-handler count.
+
 ## Objective
 
 Build and validate a runnable, multi-user adaptive endurance coaching vertical

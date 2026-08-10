@@ -61,7 +61,7 @@ _FAST_COMMANDS = frozenset(
         "/delete_me",
     }
 )
-_GENDER_CHOICES = frozenset({"MALE", "FEMALE", "OTHER_UNSPECIFIED"})
+_GENDER_CHOICES = frozenset({"MALE", "FEMALE"})
 _NUMERIC_PROMPT_HINTS = (
     "what year were you born",
     "birth year",
@@ -74,10 +74,7 @@ _NUMERIC_PROMPT_HINTS = (
     "your height",
     "new height",
 )
-_GENDER_PROMPT_HINTS = (
-    "competitive category",
-    "biological sex",
-)
+_GENDER_PROMPT_HINTS = ("which is your sex",)
 _MANDATORY_NUMERIC_PROMPTS = frozenset(
     {
         bot_messages.PROFILE_BIRTH_YEAR_INTAKE.casefold(),
@@ -162,7 +159,7 @@ class UpdateOnboardingAgentSchema(BaseModel):
     )
     age: int | None = Field(default=None, ge=16, le=100)
     birth_year: int | None = Field(default=None, ge=1940, le=2008)
-    gender: Literal["MALE", "FEMALE", "OTHER_UNSPECIFIED"] | None = None
+    gender: Literal["MALE", "FEMALE"] | None = None
     weight_kg: float | None = Field(default=None, ge=40, le=200)
     height_cm: int | None = Field(default=None, ge=120, le=230)
     availability_text: str | None = Field(

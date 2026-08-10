@@ -147,7 +147,7 @@ def test_goal_extraction_prompt_uses_versioned_static_contract() -> None:
         current_date="2026-08-03",
     )
 
-    assert GOAL_EXTRACTION_CONTRACT_VERSION == "1"
+    assert GOAL_EXTRACTION_CONTRACT_VERSION == "2"
     assert "Today's date is" not in GOAL_EXTRACTION_CONTRACT
     assert "Current persisted draft" not in GOAL_EXTRACTION_CONTRACT
     assert str(messages[0].content) == (
@@ -164,6 +164,8 @@ def test_goal_extraction_contract_keeps_json_fields_and_all_statuses() -> None:
         "main_goal, event_date, target_outcome, secondary_priority, "
         "missing_fields, ambiguous_fields, and message_status.",
         "Use COMPLETE only when main_goal and target_outcome are known",
+        "target_outcome is 'Finish in a decent time' and secondary_priority is "
+        "'Maintain muscle'.",
         "Use NEEDS_CLARIFICATION otherwise.",
         "Use OFF_TOPIC when the answer is unrelated:",
     ):

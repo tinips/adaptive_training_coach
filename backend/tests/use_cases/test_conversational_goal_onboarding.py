@@ -342,11 +342,6 @@ async def test_multiple_turns_merge_and_explicitly_unknown_date_is_complete(
                 missing_fields=["event_date"],
                 message_status="NEEDS_CLARIFICATION",
             ),
-            extracted(
-                main_goal=None,
-                target_outcome=None,
-                message_status="COMPLETE",
-            ),
         ]
     )
     onboarding = service(factory, extractor)
@@ -355,7 +350,7 @@ async def test_multiple_turns_merge_and_explicitly_unknown_date_is_complete(
 
     first = await onboarding.handle_text(athlete, "I want to prepare for a marathon.")
     second = await onboarding.handle_text(athlete, "I want to finish it safely.")
-    final = await onboarding.handle_text(athlete, "I do not have a race date yet.")
+    final = await onboarding.choose_goal_clarification(athlete, "NOT_YET")
 
     assert first.kind == "goal_clarification"
     assert second.kind == "goal_clarification"
@@ -372,9 +367,6 @@ async def test_multiple_turns_merge_and_explicitly_unknown_date_is_complete(
     assert extractor.calls[1][0] == "UPDATE_EXISTING_GOAL"
     assert extractor.calls[1][2] is not None
     assert extractor.calls[1][2].main_goal == "Complete a marathon"
-    assert extractor.calls[2][0] == "UPDATE_EXISTING_GOAL"
-    assert extractor.calls[2][2] is not None
-    assert extractor.calls[2][2].target_outcome == "Finish safely"
 
 
 @pytest.mark.asyncio
@@ -409,7 +401,7 @@ async def test_not_yet_button_completes_missing_date_without_an_llm_call(
 
 
 @pytest.mark.asyncio
-async def test_secondary_priority_is_optional_and_addition_updates_existing_draft(
+async def test_secondary_priority_is_optional_and_confirmation_text_updates_draft(
     goal_database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
 ) -> None:
     _, factory = goal_database
@@ -434,7 +426,6 @@ async def test_secondary_priority_is_optional_and_addition_updates_existing_draf
         "I want to run 10 kilometres without stopping.",
     )
 
-    addition = await onboarding.add_to_goal(athlete)
     updated = await onboarding.handle_text(
         athlete,
         "I also want to continue practising calisthenics.",
@@ -442,7 +433,6 @@ async def test_secondary_priority_is_optional_and_addition_updates_existing_draf
 
     assert first.kind == "goal_confirmation"
     assert first.answers["goal_draft"]["secondary_priority"] is None
-    assert addition.kind == "goal_addition"
     assert updated.kind == "goal_confirmation"
     assert updated.answers["goal_draft"]["main_goal"] == (
         "Run 10 kilometres without stopping"
@@ -453,7 +443,7 @@ async def test_secondary_priority_is_optional_and_addition_updates_existing_draf
 
 
 @pytest.mark.asyncio
-async def test_date_and_secondary_priority_patch_preserves_existing_goal_fields(
+async def test_iso_date_clarification_does_not_invoke_the_llm(
     goal_database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
 ) -> None:
     _, factory = goal_database
@@ -465,12 +455,6 @@ async def test_date_and_secondary_priority_patch_preserves_existing_goal_fields(
                 missing_fields=["event_date"],
                 message_status="NEEDS_CLARIFICATION",
             ),
-            extracted(
-                main_goal=None,
-                event_date="2027-07-11",
-                target_outcome=None,
-                secondary_priority="Maintain muscle",
-            ),
         ]
     )
     onboarding = service(factory, extractor)
@@ -480,28 +464,26 @@ async def test_date_and_secondary_priority_patch_preserves_existing_goal_fields(
         athlete,
         "I want to complete my first Ironman 70.3 and finish safely.",
     )
+    invalid = await onboarding.handle_text(athlete, "11 July 2027")
 
     updated = await onboarding.handle_text(
         athlete,
-        "The event is on 11 July 2027 and I also want to maintain muscle.",
+        "2027-07-11",
     )
 
+    assert invalid.kind == "goal_clarification"
+    assert invalid.error_code == "invalid_event_date"
     assert updated.kind == "goal_confirmation"
     assert updated.answers["goal_draft"] == {
         "main_goal": "Complete my first Ironman 70.3",
         "event_date": "2027-07-11",
         "target_outcome": "Finish safely",
-        "secondary_priority": "Maintain muscle",
+        "secondary_priority": None,
         "missing_fields": [],
         "ambiguous_fields": [],
         "message_status": "COMPLETE",
     }
-    action, latest_message, current_draft = extractor.calls[1]
-    assert action == "UPDATE_EXISTING_GOAL"
-    assert latest_message.startswith("The event is on 11 July 2027")
-    assert current_draft is not None
-    assert current_draft.main_goal == "Complete my first Ironman 70.3"
-    assert current_draft.target_outcome == "Finish safely"
+    assert len(extractor.calls) == 1
 
 
 @pytest.mark.asyncio
@@ -531,8 +513,6 @@ async def test_explicit_main_goal_correction_overrides_only_that_field(
         "I want to complete a marathon on 19 September 2027, finish safely, "
         "and maintain strength.",
     )
-    await onboarding.add_to_goal(athlete)
-
     corrected = await onboarding.handle_text(
         athlete,
         "Correction: my main goal is to complete a half marathon.",
@@ -741,54 +721,6 @@ async def test_completed_athlete_goal_modification_uses_owned_service_update(
             "Swim, bike, run essentials for Ironman preparation."
         )
         assert profile.equipment_text is None
-
-
-@pytest.mark.asyncio
-async def test_start_again_clears_only_temporary_goal_state(
-    goal_database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
-) -> None:
-    _, factory = goal_database
-    extractor = QueueGoalExtractor(
-        [
-            extracted(
-                main_goal="Complete a marathon",
-                target_outcome="Finish safely",
-            )
-        ]
-    )
-    onboarding = service(factory, extractor)
-    athlete = identity(6207)
-    await start_goal(onboarding, athlete)
-    draft = await onboarding.handle_text(
-        athlete,
-        "I want to complete a marathon safely.",
-    )
-    async with factory.begin() as session:
-        repository = OnboardingRepository(session)
-        persisted = await repository.require_for_user(user_id=draft.user_id)
-        answers = dict(persisted.answers)
-        answers["unrelated_profile_marker"] = "keep"
-        await repository.save_progress(
-            user_id=draft.user_id,
-            current_step=OnboardingStep.GOAL_INTAKE,
-            answers=answers,
-        )
-
-    restarted = await onboarding.restart_goal(athlete)
-
-    assert restarted.kind == "goal_intake"
-    assert restarted.answers["consent"] is True
-    assert restarted.answers["unrelated_profile_marker"] == "keep"
-    assert "goal_draft" not in restarted.answers
-    assert "raw_goal_text" not in restarted.answers
-    assert "goal_messages" not in restarted.answers
-    async with factory() as session:
-        assert (
-            await ProfileRepository(session).get_training_goal(
-                user_id=restarted.user_id
-            )
-            is None
-        )
 
 
 @pytest.mark.asyncio

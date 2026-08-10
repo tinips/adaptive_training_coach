@@ -285,6 +285,10 @@ class AthleteProfile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             name="birth_year_range",
         ),
         CheckConstraint(
+            "gender IS NULL OR gender IN ('MALE', 'FEMALE')",
+            name="athlete_gender",
+        ),
+        CheckConstraint(
             "height_cm IS NULL OR (height_cm >= 120 AND height_cm <= 230)",
             name="height_cm_range",
         ),

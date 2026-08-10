@@ -57,7 +57,6 @@ _GOAL_PHASE_KEY = "_goal_intake_phase"
 _GOAL_PHASE_COLLECTING = "COLLECTING"
 _GOAL_PHASE_CLARIFYING = "CLARIFYING"
 _GOAL_PHASE_CONFIRMING = "CONFIRMING"
-_GOAL_PHASE_ADDING = "ADDING"
 _GOAL_DRAFT_KEY = "goal_draft"
 _RAW_GOAL_TEXT_KEY = "raw_goal_text"
 _GOAL_MESSAGES_KEY = "goal_messages"
@@ -75,6 +74,7 @@ _EQUIPMENT_SETTINGS_REVIEW_KEY = "equipment_settings_review"
 _CONTEXT_RETRY_ERROR_KEY = "_context_retry_error"
 _INTEGER_PATTERN = re.compile(r"[0-9]+")
 _WEIGHT_PATTERN = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+_ISO_DATE_PATTERN = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}\Z")
 _ATHLETE_PROFILE_UPDATE_FIELDS = frozenset(
     {"age", "birth_year", "gender", "weight_kg", "height_cm"}
 )
@@ -179,7 +179,7 @@ class OnboardingService:
             await profiles.upsert_mandatory_athlete_profile(
                 user_id=user.id,
                 birth_year=1990,
-                gender=AthleteGender.OTHER_UNSPECIFIED,
+                gender=AthleteGender.FEMALE,
                 weight_kg=70.0,
                 height_cm=175.0,
             )
@@ -285,69 +285,6 @@ class OnboardingService:
             onboarding = await OnboardingRepository(session).save_progress(
                 user_id=user.id,
                 current_step=OnboardingStep.PROFILE_BIRTH_YEAR_INTAKE,
-                answers=cast(dict[str, object], answers),
-            )
-            return self._result(user, onboarding)
-
-    async def add_to_goal(
-        self,
-        identity: TelegramIdentity,
-    ) -> OnboardingServiceResult:
-        """Request one more free-text update to the accumulated draft."""
-
-        async with self._session_factory.begin() as session:
-            user, onboarding = await self._locked_state(session, identity)
-            self._require_active(onboarding)
-            answers = self._answers(onboarding)
-            self._require_goal_phase(
-                onboarding,
-                answers,
-                {_GOAL_PHASE_CONFIRMING},
-            )
-            self._goal_draft_from_answers(answers, required=True)
-            answers[_GOAL_PHASE_KEY] = _GOAL_PHASE_ADDING
-            answers.pop(_GOAL_CLARIFICATION_FIELD_KEY, None)
-            answers.pop(_GOAL_CLARIFICATION_HINT_KEY, None)
-            onboarding = await OnboardingRepository(session).save_progress(
-                user_id=user.id,
-                current_step=OnboardingStep.GOAL_INTAKE,
-                answers=cast(dict[str, object], answers),
-            )
-            return self._result(user, onboarding)
-
-    async def restart_goal(
-        self,
-        identity: TelegramIdentity,
-    ) -> OnboardingServiceResult:
-        """Clear only the temporary goal draft while preserving consent."""
-
-        async with self._session_factory.begin() as session:
-            user, onboarding = await self._locked_state(session, identity)
-            self._require_active(onboarding)
-            answers = self._answers(onboarding)
-            self._require_goal_phase(
-                onboarding,
-                answers,
-                {
-                    _GOAL_PHASE_COLLECTING,
-                    _GOAL_PHASE_CLARIFYING,
-                    _GOAL_PHASE_CONFIRMING,
-                    _GOAL_PHASE_ADDING,
-                },
-            )
-            for key in (
-                _GOAL_DRAFT_KEY,
-                _RAW_GOAL_TEXT_KEY,
-                _GOAL_MESSAGES_KEY,
-                _GOAL_CLARIFICATION_FIELD_KEY,
-                _GOAL_CLARIFICATION_HINT_KEY,
-                _PARSE_IN_FLIGHT_KEY,
-            ):
-                answers.pop(key, None)
-            answers[_GOAL_PHASE_KEY] = _GOAL_PHASE_COLLECTING
-            onboarding = await OnboardingRepository(session).save_progress(
-                user_id=user.id,
-                current_step=OnboardingStep.GOAL_INTAKE,
                 answers=cast(dict[str, object], answers),
             )
             return self._result(user, onboarding)
@@ -511,7 +448,7 @@ class OnboardingService:
     ) -> OnboardingServiceResult:
         """Handle deterministic health-limitations callbacks without an LLM."""
 
-        if choice not in {"none", "describe"}:
+        if choice != "none":
             raise OnboardingApplicationError("invalid_action")
         async with self._session_factory.begin() as session:
             user, onboarding = await self._locked_state(session, identity)
@@ -519,10 +456,6 @@ class OnboardingService:
             if onboarding.current_step is not OnboardingStep.HEALTH_LIMITATIONS_INTAKE:
                 raise OnboardingApplicationError("stale_action")
             answers = self._answers(onboarding)
-            if choice == "describe":
-                # The same checkpoint accepts the subsequent raw message.  This
-                # callback is intentionally state-preserving and deterministic.
-                return self._result(user, onboarding)
             await ProfileRepository(session).update_athlete_profile_context_fields(
                 user_id=user.id,
                 payload={"health_limitations_text": "NONE_REPORTED"},
@@ -679,12 +612,6 @@ class OnboardingService:
                 )
                 return ProfileSettingsResult(
                     step=state.current_step, saved_field="Health limitations"
-                )
-            if action == "health:describe":
-                if step is not ProfileSettingsStep.HEALTH:
-                    raise OnboardingApplicationError("stale_action")
-                return ProfileSettingsResult(
-                    step=step, pending=cast(dict[str, JsonValue], pending)
                 )
             if action == "section:equipment":
                 return await self._open_profile_equipment(
@@ -972,9 +899,7 @@ class OnboardingService:
             )
             field = answers.get(_GOAL_CLARIFICATION_FIELD_KEY)
             if field == "event_date":
-                if choice == "HAS_DATE":
-                    answers[_GOAL_CLARIFICATION_HINT_KEY] = "exact_date"
-                elif choice == "NOT_YET":
+                if choice == "NOT_YET":
                     draft = draft.model_copy(
                         update={
                             "event_date": None,
@@ -1053,6 +978,16 @@ class OnboardingService:
             and onboarding.current_step is OnboardingStep.GOAL_INTAKE
             and isinstance(goal_phase, str)
         ):
+            if (
+                goal_phase == _GOAL_PHASE_CLARIFYING
+                and dict(onboarding.answers).get(_GOAL_CLARIFICATION_FIELD_KEY)
+                == "event_date"
+            ):
+                return await self._handle_goal_event_date(
+                    identity=identity,
+                    user_id=user.id,
+                    text=text,
+                )
             return await self._extract_goal(
                 identity=identity,
                 user_id=user.id,
@@ -1086,6 +1021,67 @@ class OnboardingService:
             # never infer or persist an update from an unprompted message.
             raise OnboardingApplicationError("profile_settings_required")
         raise OnboardingApplicationError("invalid_action")
+
+    async def _handle_goal_event_date(
+        self,
+        *,
+        identity: TelegramIdentity,
+        user_id: uuid.UUID,
+        text: str,
+    ) -> OnboardingServiceResult:
+        """Apply the date clarification without sending it to the LLM."""
+
+        event_date: date | None = None
+        if _ISO_DATE_PATTERN.fullmatch(text) is not None:
+            try:
+                parsed_date = date.fromisoformat(text)
+            except ValueError:
+                parsed_date = None
+            if parsed_date is not None and parsed_date > utc_now().date():
+                event_date = parsed_date
+
+        async with self._session_factory.begin() as session:
+            user, onboarding = await self._locked_state(session, identity)
+            self._require_active(onboarding)
+            if user.id != user_id:
+                raise OnboardingApplicationError("user_not_found")
+            answers = self._answers(onboarding)
+            self._require_goal_phase(
+                onboarding,
+                answers,
+                {_GOAL_PHASE_CLARIFYING},
+            )
+            if answers.get(_GOAL_CLARIFICATION_FIELD_KEY) != "event_date":
+                raise OnboardingApplicationError("stale_action")
+            if event_date is None:
+                return self._result(
+                    user,
+                    onboarding,
+                    kind="goal_clarification",
+                    error_code="invalid_event_date",
+                )
+            draft = cast(
+                GoalExtractionOutput,
+                self._goal_draft_from_answers(answers, required=True),
+            )
+            updated = draft.model_copy(
+                update={
+                    "event_date": event_date,
+                    "missing_fields": [
+                        item for item in draft.missing_fields if item != "event_date"
+                    ],
+                    "ambiguous_fields": [
+                        item for item in draft.ambiguous_fields if item != "event_date"
+                    ],
+                }
+            )
+            self._stage_goal_draft(answers, updated)
+            onboarding = await OnboardingRepository(session).save_progress(
+                user_id=user.id,
+                current_step=OnboardingStep.GOAL_INTAKE,
+                answers=cast(dict[str, object], answers),
+            )
+            return self._result(user, onboarding)
 
     async def update_onboarding_data(
         self,
@@ -1791,7 +1787,7 @@ class OnboardingService:
                 {
                     _GOAL_PHASE_COLLECTING,
                     _GOAL_PHASE_CLARIFYING,
-                    _GOAL_PHASE_ADDING,
+                    _GOAL_PHASE_CONFIRMING,
                 },
             )
             if self._parse_is_in_flight(onboarding):
@@ -2178,7 +2174,6 @@ class OnboardingService:
                 phase_kinds: dict[str, OnboardingResultKind] = {
                     _GOAL_PHASE_CLARIFYING: "goal_clarification",
                     _GOAL_PHASE_CONFIRMING: "goal_confirmation",
-                    _GOAL_PHASE_ADDING: "goal_addition",
                 }
                 kind = phase_kinds.get(phase or "", "goal_intake")
         return OnboardingServiceResult(

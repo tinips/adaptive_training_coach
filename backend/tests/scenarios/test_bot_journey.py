@@ -187,7 +187,6 @@ async def test_journey_collects_profile_goal_and_required_context_before_complet
         athlete,
         "I want to complete a marathon and finish safely.",
     )
-    addition = await bot.handle_callback(athlete, "ob:v1:goal:add")
     updated = await bot.handle_text(athlete, "I also want to maintain strength.")
     availability = await bot.handle_callback(athlete, "ob:v1:goal:confirm")
     equipment = await bot.handle_text(
@@ -204,7 +203,6 @@ async def test_journey_collects_profile_goal_and_required_context_before_complet
     assert intake.text == messages.GOAL_INTAKE
     assert ("Cancel", "ob:v1:cancel") in _buttons(intake)
     assert confirmation.text.startswith("Here\u2019s what I understood:")
-    assert addition.text == messages.GOAL_ADDITION
     assert "Maintain strength" in updated.text
     assert birth_year.text == messages.PROFILE_BIRTH_YEAR_INTAKE
     assert gender.text == messages.PROFILE_GENDER_INTAKE

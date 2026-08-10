@@ -168,7 +168,7 @@ async def live_agent_harness() -> LiveAgentHarness:
         await profiles.upsert_mandatory_athlete_profile(
             user_id=user.id,
             birth_year=1990,
-            gender=AthleteGender.OTHER_UNSPECIFIED,
+            gender=AthleteGender.FEMALE,
             weight_kg=70.0,
             height_cm=175.0,
         )

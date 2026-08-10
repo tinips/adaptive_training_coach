@@ -81,9 +81,9 @@ class UpdateOnboardingSchema(BaseModel):
         le=2008,
         description="The athlete's corrected four-digit birth year.",
     )
-    gender: Literal["MALE", "FEMALE", "OTHER_UNSPECIFIED"] | None = Field(
+    gender: Literal["MALE", "FEMALE"] | None = Field(
         default=None,
-        description="The athlete's competition category / biological sex.",
+        description="The athlete's biological sex.",
     )
     weight_kg: float | None = Field(
         default=None,

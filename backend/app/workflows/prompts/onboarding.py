@@ -131,7 +131,7 @@ def explicit_onboarding_change_tool_policy(
     )
 
 
-GOAL_EXTRACTION_CONTRACT_VERSION: Final = "1"
+GOAL_EXTRACTION_CONTRACT_VERSION: Final = "2"
 """Version of the static goal-extraction contract sent to the model."""
 
 GOAL_EXTRACTION_CONTRACT: Final = (
@@ -157,6 +157,10 @@ GOAL_EXTRACTION_CONTRACT: Final = (
     "An explicitly stated qualitative outcome such as finishing safely, without "
     "stopping, in a good time, or in a decent time is valid. Preserve that "
     "meaning concisely instead of requiring a specific finish time. "
+    "When the athlete explicitly gives both an outcome and a separate secondary "
+    "priority in the same sentence, keep them separate. For example, 'finish in "
+    "a decent time while maintaining muscle' means target_outcome is 'Finish in "
+    "a decent time' and secondary_priority is 'Maintain muscle'. "
     "secondary_priority is optional, "
     "must be explicitly stated, and must never be listed as missing. "
     f"{future_event_date_policy('goal_extraction')}A null event_date is "

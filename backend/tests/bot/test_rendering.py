@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from telegram import InlineKeyboardMarkup
+from telegram import InlineKeyboardMarkup, ReplyKeyboardMarkup
 
 from app.bot import keyboards, messages
 
@@ -23,9 +23,16 @@ def test_onboarding_keyboards_expose_only_supported_actions() -> None:
         ("Privacy & safety", "nav:v1:privacy"),
     ]
     assert _button_pairs(keyboards.goal_confirmation_keyboard()) == [
-        ("No, that\u2019s right", "ob:v1:goal:confirm"),
-        ("Yes, add something", "ob:v1:goal:add"),
-        ("Start again", "ob:v1:goal:restart"),
+        ("Continue", "ob:v1:goal:confirm"),
+        ("Cancel", "ob:v1:cancel"),
+    ]
+    assert _button_pairs(keyboards.profile_gender_keyboard()) == [
+        ("Male", "ob:v1:profile:gender:MALE"),
+        ("Female", "ob:v1:profile:gender:FEMALE"),
+        ("Cancel", "ob:v1:cancel"),
+    ]
+    assert _button_pairs(keyboards.goal_date_clarification_keyboard()) == [
+        ("Not yet", "ob:v1:goal:choice:NOT_YET"),
         ("Cancel", "ob:v1:cancel"),
     ]
     assert _button_pairs(keyboards.add_workout_keyboard()) == [
@@ -44,7 +51,6 @@ def test_callback_values_fit_telegram_limit() -> None:
         keyboards.profile_gender_keyboard(),
         keyboards.equipment_intake_keyboard(),
         keyboards.health_limitations_keyboard(),
-        keyboards.completed_onboarding_keyboard(),
         keyboards.add_workout_keyboard(),
     ]
     callbacks = [
@@ -52,6 +58,14 @@ def test_callback_values_fit_telegram_limit() -> None:
     ]
     assert callbacks
     assert max(len(value.encode("utf-8")) for value in callbacks) <= 64
+
+
+def test_completed_onboarding_keeps_profile_action_in_user_keyboard() -> None:
+    keyboard = keyboards.completed_onboarding_keyboard()
+
+    assert isinstance(keyboard, ReplyKeyboardMarkup)
+    assert keyboard.keyboard[0][0].text == "Change profile"
+    assert keyboard.is_persistent is True
 
 
 def test_import_and_profile_messages_do_not_reference_removed_features() -> None:

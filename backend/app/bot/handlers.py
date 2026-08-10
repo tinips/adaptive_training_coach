@@ -155,7 +155,10 @@ async def document_handler(
             reply_markup=response.keyboard,
         )
     except BadRequest:
-        await message.reply_text(response.text, reply_markup=response.keyboard)
+        await message.reply_text(
+            response.text,
+            reply_markup=response.user_keyboard or response.keyboard,
+        )
 
 
 async def global_error_handler(
@@ -165,7 +168,12 @@ async def global_error_handler(
     """Log a safe error code and hide all internal details from Telegram."""
 
     error_type = type(context.error).__name__ if context.error else "Unknown"
-    logger.error("Unhandled Telegram update error type=%s", error_type)
+    error_code = getattr(context.error, "code", None)
+    logger.error(
+        "Unhandled Telegram update error type=%s error_code=%s",
+        error_type,
+        error_code,
+    )
     if isinstance(update, Update):
         try:
             await _deliver(update, TelegramResponse(messages.GENERIC_ERROR))
@@ -234,4 +242,7 @@ async def _deliver(update: Update, response: TelegramResponse) -> None:
                 return
             logger.info("Telegram message edit unavailable; sending a new message")
 
-    await message.reply_text(response.text, reply_markup=reply_markup)
+    await message.reply_text(
+        response.text,
+        reply_markup=response.user_keyboard or reply_markup,
+    )

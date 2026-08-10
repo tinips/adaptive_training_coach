@@ -15,6 +15,7 @@ from app.bot.service import CoachBotApplicationService
 from app.domain.enums import OnboardingStatus, OnboardingStep, UserStatus
 from app.schemas.common import TelegramIdentity
 from app.schemas.onboarding_service import OnboardingResultKind, OnboardingServiceResult
+from app.schemas.profile_settings import ProfileSettingsResult, ProfileSettingsStep
 from app.services.onboarding import OnboardingService
 
 
@@ -104,6 +105,30 @@ async def test_health_callback_uses_only_deterministic_onboarding_method() -> No
 
 
 @pytest.mark.asyncio
+async def test_profile_settings_callbacks_strip_the_transport_prefix() -> None:
+    identity = _identity()
+    onboarding = SimpleNamespace(
+        open_profile_settings=AsyncMock(
+            return_value=ProfileSettingsResult(step=ProfileSettingsStep.MENU)
+        ),
+        choose_profile_settings=AsyncMock(
+            return_value=ProfileSettingsResult(step=ProfileSettingsStep.AVAILABILITY)
+        ),
+    )
+    facade = _facade(onboarding)
+
+    opened = await facade.handle_callback(identity, "ps:v1:open")
+    availability = await facade.handle_callback(identity, "ps:v1:section:availability")
+
+    onboarding.open_profile_settings.assert_awaited_once_with(identity)
+    onboarding.choose_profile_settings.assert_awaited_once_with(
+        identity, "section:availability"
+    )
+    assert opened.text == messages.PROFILE_SETTINGS_MENU
+    assert availability.text == messages.PROFILE_AVAILABILITY
+
+
+@pytest.mark.asyncio
 async def test_development_step_bypasses_global_agent_for_completed_accounts() -> None:
     identity = _identity()
     onboarding = SimpleNamespace(
@@ -173,6 +198,21 @@ async def test_context_steps_render_the_correct_prompt_and_controls() -> None:
     assert details.keyboard == keyboards.equipment_details_keyboard()
     assert health.text == messages.HEALTH_LIMITATIONS_INTAKE
     assert health.keyboard == keyboards.health_limitations_keyboard()
+
+
+@pytest.mark.asyncio
+async def test_goal_date_clarification_renders_date_choices() -> None:
+    response = await _facade(SimpleNamespace())._render_onboarding(
+        _identity(),
+        _result(
+            "goal_clarification",
+            OnboardingStep.GOAL_INTAKE,
+            answers={"_goal_clarification_field": "event_date"},
+        ),
+    )
+
+    assert response.text == "When is the event? Send YYYY-MM-DD, or choose Not yet."
+    assert response.keyboard == keyboards.goal_date_clarification_keyboard()
 
 
 @pytest.mark.asyncio
