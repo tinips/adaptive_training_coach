@@ -9,6 +9,7 @@ from typing import Protocol, cast
 from uuid import UUID
 
 from langchain_core.messages import HumanMessage
+from telegram import ReplyKeyboardMarkup
 
 from app.bot import keyboards, messages
 from app.bot.rendering import TelegramResponse
@@ -69,6 +70,31 @@ class CoachBotApplicationService:
     async def handle_agent_input(
         self, identity: TelegramIdentity, message: HumanMessage
     ) -> TelegramResponse:
+        before = await self._account_queries.lifecycle(identity)
+        response = await self._handle_agent_input(identity, message)
+        after = await self._account_queries.lifecycle(identity)
+        lifecycle_keyboard = self._keyboard_for_lifecycle(after)
+        first_label = lifecycle_keyboard.keyboard[0][0].text
+        lifecycle_changed = self._lifecycle_category(
+            before
+        ) != self._lifecycle_category(after)
+        requires_new_message = (
+            response.user_keyboard is not None
+            or response.clear_agent_thread
+            or first_label == keyboards.LABELS["start"]
+        )
+        return replace(
+            response,
+            user_keyboard=lifecycle_keyboard,
+            edit_existing=(False if requires_new_message else response.edit_existing),
+            refresh_user_keyboard=(
+                lifecycle_changed or after is None or response.user_keyboard is not None
+            ),
+        )
+
+    async def _handle_agent_input(
+        self, identity: TelegramIdentity, message: HumanMessage
+    ) -> TelegramResponse:
         event_type: TelegramEventType = (
             "callback"
             if message.additional_kwargs.get("telegram_event_type") == "callback"
@@ -76,38 +102,53 @@ class CoachBotApplicationService:
         )
         if not isinstance(message.content, str) or not message.content.strip():
             return TelegramResponse(messages.GENERIC_ERROR)
-        if event_type == "text" and message.content.startswith("/dev_step "):
+        content = message.content
+        if event_type == "text":
+            content = {
+                keyboards.LABELS["start"]: "/start",
+                keyboards.LABELS["resume_menu"]: "/start",
+                keyboards.LABELS["profile"]: "/profile",
+                keyboards.LABELS["delete"]: "/delete_me",
+            }.get(content, content)
+        if event_type == "text" and content.startswith("/dev_step "):
             return await self._render_onboarding(
                 identity,
                 await self._onboarding.seed_development_step(
-                    identity, message.content.removeprefix("/dev_step ").strip()
+                    identity, content.removeprefix("/dev_step ").strip()
                 ),
             )
-        if event_type == "text" and message.content == "/dev_reset":
+        if event_type == "text" and content == "/dev_reset":
             return await self._render_onboarding(
                 identity, await self._onboarding.reset_development_onboarding(identity)
             )
-        if event_type == "text" and message.content == "/start":
-            return await self._render_onboarding(
-                identity, await self._onboarding.start(identity)
-            )
+        deterministic_routes = {
+            "/start",
+            "/help",
+            "/profile",
+            "/add_workout",
+            "/cancel",
+            "/delete_me",
+        }
+        if event_type == "text" and content in deterministic_routes:
+            return await self._dispatch(identity, event_type, content)
         lifecycle = await self._account_queries.lifecycle(identity)
         if (
             lifecycle is None
             or lifecycle["status"] is UserStatus.ONBOARDING_IN_PROGRESS
         ):
-            return await self._dispatch(identity, event_type, message.content)
+            return await self._dispatch(identity, event_type, content)
         if (
-            lifecycle["status"] is UserStatus.ONBOARDING_COMPLETED
+            lifecycle["status"]
+            in {UserStatus.ONBOARDING_COMPLETED, UserStatus.PROFILE_COMPLETED}
             and event_type == "text"
-            and not message.content.startswith("/")
+            and not content.startswith("/")
         ):
-            if message.content == "Change profile":
+            if content == keyboards.LABELS["change_profile"]:
                 return self._render_profile_settings(
                     await self._onboarding.open_profile_settings(identity)
                 )
             result = await self._onboarding.submit_profile_settings_text(
-                identity, message.content
+                identity, content
             )
             return (
                 self._render_profile_settings(result)
@@ -118,7 +159,7 @@ class CoachBotApplicationService:
                 )
             )
         if self._agent_workspace is None:
-            return await self._dispatch(identity, event_type, message.content)
+            return await self._dispatch(identity, event_type, content)
         return await self._agent_workspace.invoke(
             thread_id=f"telegram:{identity.telegram_user_id}",
             message=message,
@@ -186,21 +227,69 @@ class CoachBotApplicationService:
         outcome = await self._apple_health.process_upload(
             identity=identity, document=document, download=download, progress=progress
         )
-        return TelegramResponse(
+        response = TelegramResponse(
             messages.apple_health_file_result(
                 activities_imported=outcome.activities_imported,
                 activities_updated=outcome.activities_updated,
                 activities_skipped=outcome.activities_skipped,
             )
         )
+        return replace(
+            response,
+            user_keyboard=await self._lifecycle_keyboard(identity),
+        )
+
+    async def _lifecycle_keyboard(
+        self, identity: TelegramIdentity
+    ) -> ReplyKeyboardMarkup:
+        lifecycle = await self._account_queries.lifecycle(identity)
+        return self._keyboard_for_lifecycle(lifecycle)
+
+    @staticmethod
+    def _keyboard_for_lifecycle(
+        lifecycle: dict[str, object] | None,
+    ) -> ReplyKeyboardMarkup:
+        if lifecycle is None:
+            return keyboards.start_keyboard()
+        if lifecycle["status"] in {
+            UserStatus.ONBOARDING_COMPLETED,
+            UserStatus.PROFILE_COMPLETED,
+        }:
+            return keyboards.completed_onboarding_keyboard()
+        return keyboards.onboarding_keyboard()
+
+    @staticmethod
+    def _lifecycle_category(lifecycle: dict[str, object] | None) -> str:
+        if lifecycle is None:
+            return "absent"
+        if lifecycle["status"] in {
+            UserStatus.ONBOARDING_COMPLETED,
+            UserStatus.PROFILE_COMPLETED,
+        }:
+            return "completed"
+        return "onboarding"
 
     async def handle_callback(
         self, identity: TelegramIdentity, callback_data: str
     ) -> TelegramResponse:
-        return replace(
-            await self._handle_callback(identity, callback_data),
-            edit_existing=True,
-        )
+        try:
+            response = await self._handle_callback(identity, callback_data)
+        except OnboardingApplicationError as exc:
+            if exc.code not in {"invalid_action", "stale_action"}:
+                raise
+            if callback_data.startswith("ob:v1:equipment:"):
+                response = await self._render_onboarding(
+                    identity,
+                    await self._onboarding.snapshot(identity),
+                )
+            elif callback_data.startswith("ps:v1:equipment:"):
+                state = await self._onboarding.profile_settings_snapshot(identity)
+                if state is None:
+                    state = await self._onboarding.open_profile_settings(identity)
+                response = self._render_profile_settings(state)
+            else:
+                raise
+        return replace(response, edit_existing=True)
 
     async def _handle_callback(
         self, identity: TelegramIdentity, callback_data: str
@@ -266,10 +355,7 @@ class CoachBotApplicationService:
             return await self._render_onboarding(identity, result)
         if callback_data.startswith("ob:v1:equipment:"):
             choice = callback_data.removeprefix("ob:v1:equipment:")
-            if choice == "skip":
-                result = await self._onboarding.skip_equipment_details(identity)
-            else:
-                result = await self._onboarding.choose_equipment(identity, choice)
+            result = await self._onboarding.choose_equipment(identity, choice)
             return await self._render_onboarding(identity, result)
         if callback_data.startswith("ob:v1:health:"):
             result = await self._onboarding.choose_health_limitations(
@@ -313,14 +399,40 @@ class CoachBotApplicationService:
 
     @staticmethod
     def _render_profile_settings(result: ProfileSettingsResult) -> TelegramResponse:
-        if result.step.value == "MENU":
+        if result.step.value == "EQUIPMENT" and result.equipment_review is not None:
+            review = result.equipment_review
+            text = messages.equipment_review(review)
+            if result.saved_field not in {None, "__closed__"}:
+                text = (
+                    f"{messages.PROFILE_SAVED.format(field=result.saved_field)}"
+                    f"\n\n{text}"
+                )
             return TelegramResponse(
-                messages.PROFILE_SETTINGS_MENU, keyboards.profile_settings_keyboard()
+                text,
+                keyboards.profile_equipment_keyboard(
+                    {str(item.id): item.display_name for item in review.options},
+                    {str(item.id) for item in review.options if item.selected},
+                ),
+            )
+        if result.step.value == "MENU":
+            if result.saved_field == "__closed__":
+                return TelegramResponse(messages.PROFILE_SETTINGS_CLOSED)
+            notices: list[str] = []
+            if result.equipment_summary is not None:
+                notices.append(messages.equipment_summary(result.equipment_summary))
+            if result.saved_field not in {None, "__closed__"}:
+                notices.append(messages.PROFILE_SAVED.format(field=result.saved_field))
+            notices.append(messages.PROFILE_SETTINGS_MENU)
+            return TelegramResponse(
+                "\n\n".join(notices),
+                keyboards.profile_settings_keyboard(),
             )
         prompts = {
+            "GOAL_MENU": messages.PROFILE_GOAL_MENU,
             "GOAL_MAIN": messages.PROFILE_GOAL_MAIN,
             "GOAL_OUTCOME": messages.PROFILE_GOAL_OUTCOME,
             "GOAL_DATE": messages.PROFILE_GOAL_DATE,
+            "GOAL_SECONDARY": messages.PROFILE_GOAL_SECONDARY,
             "AVAILABILITY": messages.PROFILE_AVAILABILITY,
             "HEALTH": messages.PROFILE_HEALTH,
             "PERSONAL_MENU": messages.PROFILE_PERSONAL,
@@ -330,25 +442,45 @@ class CoachBotApplicationService:
             "PERSONAL_HEIGHT": messages.PROFILE_HEIGHT,
         }
         keyboard = (
-            keyboards.profile_goal_date_keyboard()
-            if result.step.value == "GOAL_DATE"
+            keyboards.profile_goal_keyboard()
+            if result.step.value == "GOAL_MENU"
             else (
-                keyboards.profile_health_keyboard()
-                if result.step.value == "HEALTH"
+                keyboards.profile_goal_date_keyboard()
+                if result.step.value == "GOAL_DATE"
                 else (
-                    keyboards.profile_personal_keyboard()
-                    if result.step.value == "PERSONAL_MENU"
+                    keyboards.profile_goal_secondary_keyboard()
+                    if result.step.value == "GOAL_SECONDARY"
                     else (
-                        keyboards.profile_settings_gender_keyboard()
-                        if result.step.value == "PERSONAL_GENDER"
-                        else keyboards.profile_text_input_keyboard()
+                        keyboards.profile_health_keyboard()
+                        if result.step.value == "HEALTH"
+                        else (
+                            keyboards.profile_personal_keyboard()
+                            if result.step.value == "PERSONAL_MENU"
+                            else (
+                                keyboards.profile_settings_gender_keyboard()
+                                if result.step.value == "PERSONAL_GENDER"
+                                else (
+                                    keyboards.profile_goal_text_keyboard()
+                                    if result.step.value.startswith("GOAL_")
+                                    else keyboards.profile_settings_text_keyboard()
+                                )
+                            )
+                        )
                     )
                 )
             )
         )
-        return TelegramResponse(
-            prompts.get(result.step.value, messages.PROFILE_SETTINGS_MENU), keyboard
+        prompt = prompts.get(result.step.value, messages.PROFILE_SETTINGS_MENU)
+        prompt = messages.profile_setting_prompt(
+            result.step,
+            result.current_value,
+            prompt,
         )
+        if result.saved_field not in {None, "__closed__"}:
+            prompt = (
+                f"{messages.PROFILE_SAVED.format(field=result.saved_field)}\n\n{prompt}"
+            )
+        return TelegramResponse(prompt, keyboard)
 
     async def _render_onboarding(
         self, identity: TelegramIdentity, result: OnboardingServiceResult
@@ -427,10 +559,6 @@ class CoachBotApplicationService:
                     messages.AVAILABILITY_INTAKE,
                     keyboards.profile_text_input_keyboard(),
                 ),
-                OnboardingStep.EQUIPMENT_DETAILS_INTAKE: (
-                    messages.EQUIPMENT_DETAILS_INTAKE,
-                    keyboards.profile_text_input_keyboard(),
-                ),
                 OnboardingStep.HEALTH_LIMITATIONS_INTAKE: (
                     messages.HEALTH_LIMITATIONS_INTAKE,
                     keyboards.health_limitations_keyboard(),
@@ -447,18 +575,32 @@ class CoachBotApplicationService:
             result.kind == "equipment_recommendation"
             or result.kind == "equipment_intake"
         ):
+            if result.equipment_review is None:
+                return TelegramResponse(
+                    messages.EQUIPMENT_UNMATCHED,
+                    keyboards.health_limitations_keyboard(),
+                )
+            review = result.equipment_review
             return TelegramResponse(
-                messages.equipment_recommendation(
-                    cast(
-                        str | None, result.answers.get("equipment_recommendation_text")
-                    )
+                messages.equipment_review(review),
+                keyboards.equipment_intake_keyboard(
+                    {str(item.id): item.display_name for item in review.options},
+                    {str(item.id) for item in review.options if item.selected},
                 ),
-                keyboards.equipment_intake_keyboard(),
             )
-        if result.kind == "equipment_details_intake":
+        if result.kind == "equipment_unmatched":
             return TelegramResponse(
-                messages.EQUIPMENT_DETAILS_INTAKE,
-                keyboards.equipment_details_keyboard(),
+                f"{messages.EQUIPMENT_UNMATCHED}\n\n{messages.HEALTH_LIMITATIONS_INTAKE}",
+                keyboards.health_limitations_keyboard(),
+            )
+        if (
+            result.kind == "health_limitations_intake"
+            and result.equipment_summary is not None
+        ):
+            return TelegramResponse(
+                f"{messages.equipment_summary(result.equipment_summary)}\n\n"
+                f"{messages.HEALTH_LIMITATIONS_INTAKE}",
+                keyboards.health_limitations_keyboard(),
             )
         if result.kind == "onboarding_completed":
             return TelegramResponse(

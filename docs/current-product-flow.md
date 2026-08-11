@@ -2,18 +2,17 @@
 
 ## Supported onboarding boundary
 
-The English-only Telegram onboarding collects an athlete's basic profile before
-their confirmed goal, then collects the raw training context needed for a
-future adaptive profile:
+The English Telegram onboarding collects the athlete profile, confirmed goal,
+literal availability, deterministic equipment access, and literal training
+limitations:
 
 ```text
 Start -> consent -> basic profile -> conversational goal -> availability
-      -> equipment recommendation -> equipment -> training limitations -> complete
+      -> catalog equipment review -> training limitations -> complete
 ```
 
-The current milestone does not generate a training plan, normalize the new
-context into the historical availability/equipment/health tables, or provide
-medical diagnosis.
+The milestone does not generate a training plan, calculate feasibility, or
+provide medical diagnosis.
 
 ## Durable sequence
 
@@ -24,106 +23,94 @@ CONSENT
   -> PROFILE_GENDER_INTAKE
   -> PROFILE_WEIGHT_INTAKE
   -> PROFILE_HEIGHT_INTAKE
-  -> GOAL_INTAKE
-       -> clarification or addition (zero or more turns)
-       -> explicit goal confirmation
+  -> GOAL_INTAKE -> clarification -> explicit confirmation
   -> AVAILABILITY_INTAKE
   -> EQUIPMENT_RECOMMENDATION
-  -> EQUIPMENT_INTAKE
-       -> ALL_RECOMMENDED -> HEALTH_LIMITATIONS_INTAKE
-       -> Other -> EQUIPMENT_DETAILS_INTAKE -> HEALTH_LIMITATIONS_INTAKE
-  -> HEALTH_LIMITATIONS_INTAKE
-       -> NONE_REPORTED or free text -> COMPLETED
+  -> EQUIPMENT_INTAKE -> HEALTH_LIMITATIONS_INTAKE
+  -> NONE_REPORTED or free text -> COMPLETED
 ```
 
-The four basic profile values are deterministic: birth year, category, weight,
-and height. The goal is extracted into a structured draft by the focused goal
-LangGraph and is persisted only after the athlete confirms it.
+Availability and training-limitations free text use the compiled stateless
+LangGraph validation boundary and are stored literally. Equipment review is a
+fully deterministic database path and never invokes a model.
 
-Availability, equipment details, and training limitations are required raw-text
-answers. Each goes through a separate compiled LangGraph validator with a
-structured accept/retry result. The application stores the original text, not a
-model-derived interpretation.
+## Equipment flow
 
-## Screens and deterministic callbacks
+The resolver reads `main_goal`, `target_outcome`, and `secondary_priority`, then
+loads catalog rows for the relevant disciplines. An unmatched goal displays a
+short notice and advances safely to training limitations without writing
+athlete-equipment rows.
 
-| Screen | Athlete action | Durable effect |
-| --- | --- | --- |
-| Basic profile | Birth year text, category button, weight text, height text | Owned `athlete_profiles` row is upserted before goal intake. |
-| Goal confirmation | **No, that's right** | Upserts the canonical goal and moves to `AVAILABILITY_INTAKE`; onboarding is still active. |
-| Availability | Free text with days and approximate time | Saves literal `availability_text`, then requests an equipment recommendation. |
-| Equipment recommendation | Generated short essential list | Saves `equipment_recommendation_text` and shows the equipment choices. |
-| Equipment | **I have all the recommended equipment** | Saves the stable marker `ALL_RECOMMENDED`. |
-| Equipment | **Other / I have limitations** then free text | Saves the literal `equipment_text`. |
-| Training limitations | **None** | Saves the stable marker `NONE_REPORTED` and completes onboarding. |
-| Training limitations | **Describe limitations** then free text | Saves the literal `health_limitations_text` and completes onboarding. |
+The athlete checks every item or facility they can use and chooses Continue.
+The application replaces `athlete_equipment` only for the reviewed disciplines,
+then displays:
 
-The equipment and health callbacks only transition/checkpoint data. They never
-invoke a model. Callback data is state-bound, so an obsolete callback renders
-the athlete's current durable checkpoint instead of applying an old action.
+- whether the selected access can satisfy each discipline's essentials;
+- missing essentials and their valid alternatives;
+- missing recommended items.
 
-## Recommendation retry behavior
+Gaps are advisory and never block completion. Optional gaps are omitted. A goal
+change reopens the relevant review with matching global equipment preselected;
+ownership is not invalidated or revision-scoped. Old catalog/resource callback
+IDs rerender the current durable state rather than applying a stale selection.
 
-Availability is committed before the equipment-recommendation workflow runs.
-If recommendation generation fails, the session remains at
-`EQUIPMENT_RECOMMENDATION`, the availability text remains saved, and the bot
-asks the athlete to send any message to retry. No equipment answer is accepted
-until a recommendation is available.
+Equipment reviews and gap summaries are escaped HTML `<pre>` tables. Reviews
+are grouped by discipline and show selection, equipment, importance, and valid
+alternatives. Gap tables preserve the ability-to-start statement and show only
+missing essential and recommended items. `/profile` renders selected equipment
+with discipline and importance. Table cells are bounded with an ellipsis and
+every resulting Telegram message remains within the 4,096-character limit.
 
 ## Persistence
 
-`athlete_profiles` is the source of truth for the new raw context:
+`athlete_profiles.availability_text` and
+`athlete_profiles.health_limitations_text` retain the two literal context
+answers. `equipment_catalog` is static system knowledge and
+`athlete_equipment` is current athlete access. Every personal-data read and
+write is constrained by the athlete's `user_id`.
 
-| Column | Meaning |
-| --- | --- |
-| `availability_text` | Athlete's literal weekly availability answer. |
-| `equipment_recommendation_text` | Latest short goal-based equipment suggestion. |
-| `equipment_text` | Literal equipment answer or `ALL_RECOMMENDED`. |
-| `health_limitations_text` | Literal limitations answer or `NONE_REPORTED`. |
+Revision `0018_remove_obsolete_equipment` removed the obsolete equipment tables,
+goal revision, and raw equipment profile columns after the final guarded
+backfill. The pre-cleanup PostgreSQL backup is required to recover discarded raw
+text or interpretation history.
 
-All columns are nullable so existing athlete profiles remain compatible. The
-onboarding path does not write `availability_rules`, `equipment_access`, or
-`health_constraints`; deriving an updateable structured profile remains a later
-phase. Every read and update is constrained by the authenticated `user_id`.
+## Post-onboarding changes and privacy
 
-The Alembic migration also extends the persisted onboarding-step checks on
-`onboarding_sessions` and `llm_usage`.
+`Change profile` provides deterministic mini-flows for goal, availability,
+equipment, health, and personal details. Equipment callbacks never call the
+global agent or context workflow. Changing a goal opens the new relevant catalog
+review while preserving global access.
 
-## Conversational changes after completion
+`Profile` also displays the current training goal's main goal, target outcome,
+event date, secondary priority, and confirmed status.
+The deterministic Goal editor displays an explicit submenu for main goal,
+target outcome, event date, and secondary priority. Each button edits only its
+named field and shows the saved value before replacement. A secondary priority
+can be cleared with `None`. The original description remains internal onboarding
+provenance and is neither displayed nor editable. Goal status, record IDs,
+ownership, and timestamps are also system-managed. Revisions `0019` through
+`0021` evolve the durable profile-settings checkpoints for these controls.
 
-The global chat tool recognizes explicit changes to:
+The persistent reply keyboard follows account lifecycle state:
 
-- goal, target outcome, and event date;
-- age, birth year, category, weight, and height;
-- availability;
-- available equipment or equipment limitations;
-- injuries and physical/training limitations.
+- no account: `Start`;
+- active or cancelled onboarding: `Resume`, `Delete`;
+- completed profile: `Profile`, `Change profile`, then `Delete`.
 
-Availability, equipment, and limitation changes update only their matching raw
-text column. They do not normalize data or alter unmentioned fields. A goal
-change invalidates the old equipment answer, regenerates the equipment
-recommendation, reopens the session at `EQUIPMENT_INTAKE`, and immediately asks
-the athlete to review and re-answer their equipment context.
+Those exact labels route directly to existing deterministic actions without a
+model call. A successful deletion replaces the keyboard with `Start`. Profile
+edit prompts display the saved value for goals, outcome, event date,
+availability, training limitations, birth year, category, weight, and height.
+Equipment uses its selected-state table. Values are escaped and user-facing;
+long health or availability text is truncated only in the Telegram presentation
+with an explicit marker, while the stored value remains unchanged.
 
-Tool confirmations expose field names only. They never echo raw health text.
+Profile-edit text prompts use `Back / Done` with the `ps:v1:` settings contract.
+They never reuse onboarding's `Cancel` callback. Closing an edit clears pending
+settings state, confirms that profile settings are closed, and leaves onboarding
+completed.
 
-## LLM and privacy boundary
-
-Free-text goal extraction, raw-context validation, and equipment
-recommendation each use compiled stateless LangGraphs with Pydantic structured
-output. The raw health/limitation answer is never placed in service errors,
-LLM-usage records, workflow-observer metadata, or the global chat checkpoint.
-Active onboarding bypasses that persistent chat workspace entirely. A successful
-post-onboarding update removes its raw human input and raw tool-call arguments
-before the workspace checkpoint is saved, and it ends without a second provider
-turn. The recommendation workflow only receives confirmed goal fields and is
-limited by prompt and deterministic output checks to a short essential list; it
-cannot make a diagnosis or generate a plan.
-
-## Compatibility and cancellation
-
-Existing profiles continue to render with nullable raw-context values. A legacy
-session that already has a confirmed goal but still needs its mandatory profile
-continues to availability after the final height value. Cancellation and restart
-remain ownership-scoped: cancellation retains saved data, while restart clears
-only the onboarding session and returns it to consent.
+Raw health and availability text is not logged or retained in global-agent
+checkpoints. Tool confirmations name the updated field without echoing private
+content. Cancellation retains saved data; restart clears only the onboarding
+session.

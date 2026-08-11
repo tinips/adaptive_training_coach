@@ -1,154 +1,94 @@
-"""Ownership-scoped equipment knowledge and athlete-status persistence."""
+"""Ownership-scoped equipment catalog and athlete-access persistence."""
 
 from __future__ import annotations
 
 import uuid
-from collections.abc import Mapping
-from typing import cast
+from collections.abc import Collection
 
-from sqlalchemy import select
+from sqlalchemy import case, delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import (
-    AthleteGoalEquipmentInterpretation,
-    AthleteGoalEquipmentStatus,
-    EquipmentGoalType,
-    EquipmentResource,
-    EquipmentResourceRequirement,
-    EquipmentResourceSubstitution,
-    EquipmentStageWindow,
-)
-from app.domain.enums import AthleteEquipmentStatus
+from app.db.models import AthleteEquipment, EquipmentCatalog, User
+from app.domain.enums import Discipline
+from app.repositories.errors import OwnedRecordNotFoundError
 
 
 class EquipmentRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def goal_types(self) -> tuple[EquipmentGoalType, ...]:
-        rows = await self._session.scalars(
-            select(EquipmentGoalType).order_by(EquipmentGoalType.match_priority)
-        )
-        return tuple(rows)
-
-    async def requirements(
-        self, *, goal_type_id: uuid.UUID
-    ) -> tuple[tuple[EquipmentResourceRequirement, EquipmentResource], ...]:
-        rows = await self._session.execute(
-            select(EquipmentResourceRequirement, EquipmentResource)
-            .join(
-                EquipmentResource,
-                EquipmentResource.id == EquipmentResourceRequirement.resource_id,
-            )
-            .where(EquipmentResourceRequirement.goal_type_id == goal_type_id)
-            .order_by(EquipmentResourceRequirement.display_order)
-        )
-        return tuple(
-            cast(tuple[EquipmentResourceRequirement, EquipmentResource], row)
-            for row in rows.all()
-        )
-
-    async def stage_windows(
-        self, *, goal_type_id: uuid.UUID
-    ) -> tuple[EquipmentStageWindow, ...]:
-        rows = await self._session.scalars(
-            select(EquipmentStageWindow).where(
-                EquipmentStageWindow.goal_type_id == goal_type_id
-            )
-        )
-        return tuple(rows)
-
-    async def substitutions(
-        self, *, required_resource_ids: tuple[uuid.UUID, ...]
-    ) -> tuple[tuple[EquipmentResourceSubstitution, EquipmentResource], ...]:
-        if not required_resource_ids:
+    async def catalog_for_disciplines(
+        self, *, disciplines: Collection[Discipline]
+    ) -> tuple[EquipmentCatalog, ...]:
+        if not disciplines:
             return ()
-        rows = await self._session.execute(
-            select(EquipmentResourceSubstitution, EquipmentResource)
-            .join(
-                EquipmentResource,
-                EquipmentResource.id
-                == EquipmentResourceSubstitution.substitute_resource_id,
-            )
-            .where(
-                EquipmentResourceSubstitution.required_resource_id.in_(
-                    required_resource_ids
-                )
-            )
-        )
-        return tuple(
-            cast(tuple[EquipmentResourceSubstitution, EquipmentResource], row)
-            for row in rows.all()
-        )
-
-    async def replace_statuses(
-        self,
-        *,
-        user_id: uuid.UUID,
-        training_goal_id: uuid.UUID,
-        goal_revision: int,
-        statuses: Mapping[uuid.UUID, AthleteEquipmentStatus],
-    ) -> None:
-        existing = await self._session.scalars(
-            select(AthleteGoalEquipmentStatus).where(
-                AthleteGoalEquipmentStatus.user_id == user_id,
-                AthleteGoalEquipmentStatus.training_goal_id == training_goal_id,
-                AthleteGoalEquipmentStatus.goal_revision == goal_revision,
-            )
-        )
-        by_resource = {row.resource_id: row for row in existing}
-        for resource_id, status in statuses.items():
-            row = by_resource.get(resource_id)
-            if row is None:
-                self._session.add(
-                    AthleteGoalEquipmentStatus(
-                        user_id=user_id,
-                        training_goal_id=training_goal_id,
-                        goal_revision=goal_revision,
-                        resource_id=resource_id,
-                        status=status,
-                    )
-                )
-            else:
-                row.status = status
-        await self._session.flush()
-
-    async def statuses(
-        self, *, user_id: uuid.UUID, training_goal_id: uuid.UUID, goal_revision: int
-    ) -> tuple[AthleteGoalEquipmentStatus, ...]:
         rows = await self._session.scalars(
-            select(AthleteGoalEquipmentStatus).where(
-                AthleteGoalEquipmentStatus.user_id == user_id,
-                AthleteGoalEquipmentStatus.training_goal_id == training_goal_id,
-                AthleteGoalEquipmentStatus.goal_revision == goal_revision,
+            select(EquipmentCatalog)
+            .where(EquipmentCatalog.discipline.in_(tuple(disciplines)))
+            .order_by(
+                EquipmentCatalog.discipline,
+                case(
+                    (EquipmentCatalog.importance == "essential", 0),
+                    (EquipmentCatalog.importance == "recommended", 1),
+                    else_=2,
+                ),
+                EquipmentCatalog.display_name,
             )
         )
         return tuple(rows)
 
-    async def save_interpretation(
+    async def selected_catalog(
+        self, *, athlete_id: uuid.UUID
+    ) -> tuple[EquipmentCatalog, ...]:
+        await self._require_athlete(athlete_id)
+        rows = await self._session.scalars(
+            select(EquipmentCatalog)
+            .join(
+                AthleteEquipment,
+                AthleteEquipment.equipment_id == EquipmentCatalog.id,
+            )
+            .where(AthleteEquipment.athlete_id == athlete_id)
+            .order_by(EquipmentCatalog.discipline, EquipmentCatalog.display_name)
+        )
+        return tuple(rows)
+
+    async def replace_for_disciplines(
         self,
         *,
-        user_id: uuid.UUID,
-        training_goal_id: uuid.UUID,
-        goal_revision: int,
-        interpretation: dict[str, object],
-    ) -> None:
-        row = await self._session.scalar(
-            select(AthleteGoalEquipmentInterpretation).where(
-                AthleteGoalEquipmentInterpretation.user_id == user_id,
-                AthleteGoalEquipmentInterpretation.training_goal_id == training_goal_id,
-                AthleteGoalEquipmentInterpretation.goal_revision == goal_revision,
-            )
-        )
-        if row is None:
-            self._session.add(
-                AthleteGoalEquipmentInterpretation(
-                    user_id=user_id,
-                    training_goal_id=training_goal_id,
-                    goal_revision=goal_revision,
-                    interpretation=interpretation,
+        athlete_id: uuid.UUID,
+        disciplines: Collection[Discipline],
+        equipment_ids: Collection[uuid.UUID],
+    ) -> tuple[EquipmentCatalog, ...]:
+        """Replace only the reviewed disciplines, preserving unrelated access."""
+
+        await self._require_athlete(athlete_id)
+        catalog = await self.catalog_for_disciplines(disciplines=disciplines)
+        allowed = {item.id: item for item in catalog}
+        selected = set(equipment_ids)
+        if not selected.issubset(allowed):
+            raise ValueError("equipment selection is outside the reviewed catalog")
+
+        scoped_ids = tuple(allowed)
+        if scoped_ids:
+            await self._session.execute(
+                delete(AthleteEquipment).where(
+                    AthleteEquipment.athlete_id == athlete_id,
+                    AthleteEquipment.equipment_id.in_(scoped_ids),
                 )
             )
-        else:
-            row.interpretation = interpretation
+        for equipment_id in sorted(selected, key=str):
+            self._session.add(
+                AthleteEquipment(
+                    athlete_id=athlete_id,
+                    equipment_id=equipment_id,
+                )
+            )
         await self._session.flush()
+        return tuple(allowed[item] for item in sorted(selected, key=str))
+
+    async def _require_athlete(self, athlete_id: uuid.UUID) -> None:
+        if (
+            await self._session.scalar(select(User.id).where(User.id == athlete_id))
+            is None
+        ):
+            raise OwnedRecordNotFoundError("athlete not found")

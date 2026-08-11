@@ -24,6 +24,7 @@ from app.integrations.llm.models import (
     GoalExtractionOutput,
     GoalExtractionPatch,
 )
+from app.repositories.equipment import EquipmentRepository
 from app.repositories.onboarding import OnboardingRepository
 from app.repositories.profiles import ProfileRepository
 from app.repositories.users import UserRepository
@@ -33,6 +34,7 @@ from app.services.accounts import AccountQueryService, AccountService
 from app.services.onboarding import OnboardingService
 from app.services.profiles import ProfileService
 from app.workflows.telegram_orchestrator.workspace import TelegramAgentWorkspace
+from tests.equipment_seed import seed_equipment_catalog
 
 
 @dataclass
@@ -101,6 +103,8 @@ async def journey() -> AsyncIterator[
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
+    async with factory.begin() as session:
+        await seed_equipment_catalog(session)
     extractor = QueueGoalExtractor(
         [
             _extracted(
@@ -161,6 +165,12 @@ def _buttons(response: TelegramResponse) -> list[tuple[str, str]]:
     ]
 
 
+def _reply_buttons(response: TelegramResponse) -> list[list[str]]:
+    if response.user_keyboard is None:
+        return []
+    return [[button.text for button in row] for row in response.user_keyboard.keyboard]
+
+
 @pytest.mark.asyncio
 async def test_journey_collects_profile_goal_and_required_context_before_completion(
     journey: tuple[
@@ -193,12 +203,19 @@ async def test_journey_collects_profile_goal_and_required_context_before_complet
         athlete,
         "Tuesday and Thursday evenings, plus a longer Saturday run.",
     )
-    limitations = await bot.handle_callback(athlete, "ob:v1:equipment:all")
+    equipment_callback = next(
+        callback
+        for label, callback in _buttons(equipment)
+        if "Trail running shoes" in label
+    )
+    await bot.handle_callback(athlete, equipment_callback)
+    limitations = await bot.handle_callback(athlete, "ob:v1:equipment:done")
     completed = await bot.handle_callback(athlete, "ob:v1:health:none")
     displayed_profile = await bot.profile(athlete)
+    profile_button = await _agent_input(bot, "Profile")
 
     assert welcome.text == messages.WELCOME
-    assert consent.text == messages.CONSENT
+    assert consent.text == messages.SETUP_INTRODUCTION
     assert setup.text == messages.SETUP_INTRODUCTION
     assert intake.text == messages.GOAL_INTAKE
     assert ("Cancel", "ob:v1:cancel") in _buttons(intake)
@@ -210,11 +227,25 @@ async def test_journey_collects_profile_goal_and_required_context_before_complet
     assert weight.text == messages.PROFILE_WEIGHT_INTAKE
     assert height.text == messages.PROFILE_HEIGHT_INTAKE
     assert availability.text == messages.AVAILABILITY_INTAKE
-    assert "essential equipment" in equipment.text.casefold()
-    assert limitations.text == messages.HEALTH_LIMITATIONS_INTAKE
+    assert "essential means" in equipment.text.casefold()
+    assert messages.HEALTH_LIMITATIONS_INTAKE in limitations.text
     assert completed.text == messages.ONBOARDING_COMPLETED
     assert "Birth year: 1990" in displayed_profile.text
     assert "Category: Female" in displayed_profile.text
+    assert "Trail running shoes" in displayed_profile.text
+    assert "<pre>" in displayed_profile.text
+    assert "<b>Training goal</b>" in displayed_profile.text
+    assert "Main goal: Complete a marathon" in displayed_profile.text
+    assert "Target outcome: Finish safely" in displayed_profile.text
+    assert "Secondary priority: Maintain strength" in displayed_profile.text
+    assert "Event date: Not set" in displayed_profile.text
+    assert "Status: Confirmed" in displayed_profile.text
+    assert "Original description" not in displayed_profile.text
+    assert "Trail running shoes" in profile_button.text
+    assert _reply_buttons(profile_button) == [
+        ["Profile", "Change profile"],
+        ["Delete"],
+    ]
 
     async with factory() as session:
         user = await UserRepository(session).get_by_telegram_id(
@@ -230,6 +261,7 @@ async def test_journey_collects_profile_goal_and_required_context_before_complet
         assert goal.main_goal == "Complete a marathon"
         assert goal.target_outcome == "Finish safely"
         assert goal.secondary_priority == "Maintain strength"
+        original_description = goal.original_description
         profile = await ProfileRepository(session).get_athlete_profile(user_id=user.id)
         assert profile is not None
         assert profile.birth_year == 1990
@@ -239,16 +271,75 @@ async def test_journey_collects_profile_goal_and_required_context_before_complet
         assert profile.availability_text == (
             "Tuesday and Thursday evenings, plus a longer Saturday run."
         )
-        assert profile.equipment_recommendation_text is not None
-        assert profile.equipment_text == "ALL_RECOMMENDED"
         assert profile.health_limitations_text == "NONE_REPORTED"
+        selected_equipment = await EquipmentRepository(session).selected_catalog(
+            athlete_id=user.id
+        )
+        assert {item.equipment for item in selected_equipment} == {
+            "trail_running_shoes"
+        }
 
     back = await bot.handle_callback(athlete, "nav:v1:welcome")
     assert back.text == messages.WELCOME
 
-    correction = await _agent_input(bot, "change my height to 170")
-    assert "height has been updated" in correction.text.casefold()
-    assert global_model.invocations == 1
+    settings = await _agent_input(bot, "Change profile")
+    assert settings.text == messages.PROFILE_SETTINGS_MENU
+
+    goal_menu = await bot.handle_callback(athlete, "ps:v1:section:goal")
+    assert goal_menu.text == messages.PROFILE_GOAL_MENU
+    assert {label for label, _ in _buttons(goal_menu)} >= {
+        "Main goal",
+        "Target outcome",
+        "Event date",
+        "Secondary priority",
+    }
+    goal = await bot.handle_callback(athlete, "ps:v1:goal:main")
+    assert "Complete a marathon" in goal.text
+    await _agent_input(bot, "Complete a marathon")
+
+    await bot.handle_callback(athlete, "ps:v1:section:goal")
+    secondary = await bot.handle_callback(athlete, "ps:v1:goal:secondary")
+    assert "Maintain strength" in secondary.text
+    goal_saved = await _agent_input(bot, "Maintain mobility")
+    assert "Saved: Goal." in goal_saved.text
+    await bot.handle_callback(athlete, "ps:v1:back")
+
+    availability_current = await bot.handle_callback(
+        athlete, "ps:v1:section:availability"
+    )
+    assert "Tuesday and Thursday evenings, plus a longer Saturday run." in (
+        availability_current.text
+    )
+    availability_closed = await bot.handle_callback(athlete, "ps:v1:done")
+    assert availability_closed.text == messages.PROFILE_SETTINGS_CLOSED
+
+    equipment_current = await bot.handle_callback(athlete, "ps:v1:section:equipment")
+    assert "Have" in equipment_current.text
+    assert "Trail running shoes" in equipment_current.text
+    await bot.handle_callback(athlete, "ps:v1:back")
+
+    health_current = await bot.handle_callback(athlete, "ps:v1:section:health")
+    assert "None reported" in health_current.text
+    await bot.handle_callback(athlete, "ps:v1:done")
+
+    await bot.handle_callback(athlete, "ps:v1:section:personal")
+    birth_year_current = await bot.handle_callback(athlete, "ps:v1:personal:birth_year")
+    assert "1990" in birth_year_current.text
+    await bot.handle_callback(athlete, "ps:v1:back")
+    await bot.handle_callback(athlete, "ps:v1:section:personal")
+    category_current = await bot.handle_callback(athlete, "ps:v1:personal:gender")
+    assert "Female" in category_current.text
+    await bot.handle_callback(athlete, "ps:v1:back")
+    await bot.handle_callback(athlete, "ps:v1:section:personal")
+    weight_current = await bot.handle_callback(athlete, "ps:v1:personal:weight")
+    assert "62.5 kg" in weight_current.text
+    await bot.handle_callback(athlete, "ps:v1:back")
+    await bot.handle_callback(athlete, "ps:v1:section:personal")
+    height_current = await bot.handle_callback(athlete, "ps:v1:personal:height")
+    assert "168.0 cm" in height_current.text
+    correction = await _agent_input(bot, "170")
+    assert "height" in correction.text.casefold()
+    assert global_model.invocations == 0
 
     async with factory() as session:
         user = await UserRepository(session).get_by_telegram_id(
@@ -258,6 +349,10 @@ async def test_journey_collects_profile_goal_and_required_context_before_complet
         profile = await ProfileRepository(session).get_athlete_profile(user_id=user.id)
         assert profile is not None
         assert profile.height_cm == 170.0
+        goal = await ProfileRepository(session).get_training_goal(user_id=user.id)
+        assert goal is not None
+        assert goal.secondary_priority == "Maintain mobility"
+        assert goal.original_description == original_description
 
 
 async def _agent_input(
@@ -285,14 +380,15 @@ async def test_recreated_account_routes_goal_text_to_goal_workflow(
 ) -> None:
     bot, _, global_model = journey
 
-    await _agent_input(bot, "/start")
-    deletion_prompt = await _agent_input(bot, "/delete_me")
+    await _agent_input(bot, "Start")
+    deletion_prompt = await _agent_input(bot, "Delete")
     deleted = await _agent_input(
         bot,
         "acct:v1:delete:confirm",
         event_type="callback",
     )
-    restarted = await _agent_input(bot, "/start")
+    restarted = await _agent_input(bot, "Start")
+    resumed = await _agent_input(bot, "Resume")
     await _agent_input(bot, "nav:v1:consent", event_type="callback")
     await _agent_input(bot, "ob:v1:consent", event_type="callback")
     birth_year = await _agent_input(bot, "ob:v1:profile", event_type="callback")
@@ -311,7 +407,11 @@ async def test_recreated_account_routes_goal_text_to_goal_workflow(
 
     assert deletion_prompt.text == messages.DELETE_CONFIRM
     assert deleted.text == messages.DELETED
+    assert _reply_buttons(deleted) == [["Start"]]
+    assert deleted.edit_existing is False
     assert restarted.text == messages.WELCOME
+    assert _reply_buttons(restarted) == [["Resume"], ["Delete"]]
+    assert _reply_buttons(resumed) == [["Resume"], ["Delete"]]
     assert birth_year.text == messages.PROFILE_BIRTH_YEAR_INTAKE
     assert intake.text == messages.GOAL_INTAKE
     assert goal.text.startswith("Here\u2019s what I understood:")

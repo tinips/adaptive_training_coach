@@ -172,17 +172,6 @@ class UpdateOnboardingAgentSchema(BaseModel):
             "without summarising, translating, or normalising it."
         ),
     )
-    equipment_text: str | None = Field(
-        default=None,
-        min_length=1,
-        max_length=4096,
-        description=(
-            "The athlete's available equipment or equipment limitation exactly "
-            "as stated. Use ALL_RECOMMENDED only when the athlete explicitly "
-            "states that they have all recommended equipment; otherwise preserve "
-            "their supplied wording without rewriting it."
-        ),
-    )
     health_limitations_text: str | None = Field(
         default=None,
         min_length=1,
@@ -341,7 +330,7 @@ def _system_prompt() -> SystemMessage:
         tool_name="update_onboarding_data",
         supported_fields=(
             "goal, target outcome, event date, age, birth year, category, "
-            "weight, height, availability, equipment, and training limitations"
+            "weight, height, availability, and training limitations"
         ),
     )
     return SystemMessage(
@@ -351,13 +340,12 @@ def _system_prompt() -> SystemMessage:
             "on user intent.\n\n"
             "CRITICAL RULES:\n"
             f"{data_corrections_policy}"
-            "2. RAW CONTEXT UPDATES: Availability, equipment, and training "
-            "limitations can each be updated independently. For one of those "
+            "2. RAW CONTEXT UPDATES: Availability and training limitations can "
+            "each be updated independently. For one of those "
             "fields, send only the relevant value from the latest user message "
             "to 'update_onboarding_data' byte-for-byte: never summarise, "
-            "translate, infer, or alter it. Use equipment_text='ALL_RECOMMENDED' "
-            "only when the athlete explicitly says they have all recommended "
-            "equipment. Use health_limitations_text='NONE_REPORTED' only when "
+            "translate, infer, or alter it. Use "
+            "health_limitations_text='NONE_REPORTED' only when "
             "the athlete explicitly says they have no injuries or training "
             "limitations. Do not update any other field unless the athlete "
             "explicitly requested it.\n"

@@ -4,8 +4,8 @@ Adaptive Endurance Coach is a modular Python application for a Telegram-based
 endurance coach. The currently supported onboarding slice deterministically
 collects the athlete's birth year, competition category / biological sex,
 weight, and height, then records a confirmed athlete goal, raw weekly
-availability, equipment context, and training limitations. It stores that new
-context as literal profile text; deriving a normalized, updateable profile,
+availability, deterministic equipment access, and training limitations.
+Deriving a broader normalized, updateable profile,
 baseline selection, feasibility, and plan generation remain outside this phase.
 
 The interface is English-only. Goal answers may be written naturally in any
@@ -31,10 +31,10 @@ The only supported journey is:
 11. The user can confirm, add or change information, start again, or cancel.
 12. **No, that's right** writes the canonical goal and asks for weekly
     availability in free text (days and approximate time).
-13. A focused LangGraph validates the answer, stores it literally, and creates
-    a short goal-based essential-equipment recommendation.
-14. The athlete chooses **I have all the recommended equipment** or **Other /
-    I have limitations**. The latter is followed by a literal free-text answer.
+13. A focused LangGraph validates availability and stores it literally. A
+    deterministic resolver loads relevant discipline equipment from PostgreSQL.
+14. The athlete checks every catalog item or facility they can currently use.
+    Missing essentials are advisory and include valid alternatives.
 15. The athlete chooses **None** or **Describe limitations**. A literal answer
     is required when they describe limitations; only then does onboarding move
     to `ONBOARDING_COMPLETED`.
@@ -52,13 +52,12 @@ feasibility, or generate a plan.
 
 Commands, callbacks, and completed-profile chat routing use one global
 tool-calling LangGraph workspace. Active onboarding events bypass that workspace
-and go directly to the focused onboarding service, so raw availability,
-equipment, and limitation text is never written to global chat checkpoints. The
+and go directly to the focused onboarding service, so raw availability and
+limitation text is never written to global chat checkpoints. The
 sparse update tool supports `main_goal`, `target_outcome`, `event_date`, `age`,
-`birth_year`, `gender`, `weight_kg`, `height_cm`, `availability_text`,
-`equipment_text`, and `health_limitations_text` while preserving omitted values.
-A goal change regenerates the equipment recommendation and requires equipment
-review again.
+`birth_year`, `gender`, `weight_kg`, `height_cm`, `availability_text`, and
+`health_limitations_text` while preserving omitted values. A goal change opens
+the relevant deterministic catalog review with global access preselected.
 
 The durable onboarding states are:
 
@@ -73,7 +72,6 @@ The durable onboarding states are:
 - `AVAILABILITY_INTAKE`
 - `EQUIPMENT_RECOMMENDATION`
 - `EQUIPMENT_INTAKE`
-- `EQUIPMENT_DETAILS_INTAKE`
 - `HEALTH_LIMITATIONS_INTAKE`
 
 Cancellation is stored as an onboarding-session status. Restart returns only
@@ -128,23 +126,35 @@ intake, the final height submission
 `ProfileRepository.upsert_mandatory_athlete_profile` writes `birth_year`,
 `gender`, `weight_kg`, and `height_cm` for the owning `user_id`.
 
-The next three required onboarding responses are retained directly on that
-profile as nullable `TEXT` columns: `availability_text`,
-`equipment_recommendation_text`, `equipment_text`, and
-`health_limitations_text`. Raw availability, equipment, and limitation text is
-validated with a compiled LangGraph but is persisted verbatim. Buttons persist
-the stable markers `ALL_RECOMMENDED` and `NONE_REPORTED`. The legacy normalized
-availability, equipment, and health tables are intentionally not written by
-this flow.
+The two free-text context responses are retained directly on that profile as
+nullable `TEXT` columns: `availability_text` and `health_limitations_text`.
+Equipment is represented by static `equipment_catalog` rows and global
+`athlete_equipment` selections. Availability and limitation text is validated
+with the compiled LangGraph boundary and persisted verbatim; the health button
+persists `NONE_REPORTED`.
+Telegram renders catalog reviews, advisory gaps, and selected profile equipment
+as escaped, bounded `<pre>` tables instead of raw text lists. The persistent
+reply keyboard is lifecycle-aware: `Start` before an account exists,
+`Resume`/`Delete` during active or cancelled onboarding, and
+`Profile`/`Change profile` plus `Delete` after completion. These labels route
+deterministically without a model call. Every profile edit prompt also shows the
+current saved value, including readable dates and measurement units; oversized
+free text is truncated only for display.
+The `Profile` action includes the canonical training goal: main goal, target
+outcome, event date, secondary priority, and status. The
+deterministic Goal settings menu provides separate controls for main goal,
+target outcome, event date, and secondary priority. Original description stays
+internal as immutable onboarding provenance; status and technical identity/audit
+columns also remain application-managed.
 For a completed athlete, `update_onboarding_data` delegates through
 `OnboardingService`, which validates the sparse payload and routes profile
 fields to `athlete_profiles` and goal fields to `training_goals`. Each
 repository update is constrained by `user_id` and dynamically includes only
 the allowlisted supplied columns, preserving every omitted value and advancing
-`updated_at` only on the affected table. Availability, equipment, and
-limitations updates affect only their matching raw column. A changed goal clears
-the old equipment answer, regenerates the recommendation, and reopens the
-equipment-review checkpoint.
+`updated_at` only on the affected table. Availability and limitation updates
+affect only their matching raw column. Equipment changes use the deterministic
+profile-settings checklist. A changed goal reopens the catalog review without
+deleting the athlete's global access.
 
 ## Architecture
 
@@ -280,7 +290,11 @@ Put the key in `APP_ENCRYPTION_KEY`. Never commit `.env`.
 ## Run with Docker Compose
 
 Set `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`, and
-`APP_ENCRYPTION_KEY`, then run:
+`APP_ENCRYPTION_KEY`, then run. For a private bot, also set
+`TELEGRAM_ALLOWED_USER_IDS` to a comma-separated list containing your Telegram
+numeric user ID; the application ignores every Telegram user not listed before
+their updates reach application services. An empty value therefore disables
+Telegram access until an ID is configured.
 
 ```powershell
 docker compose up --build

@@ -12,6 +12,7 @@ from app.domain.enums import (
     OnboardingStep,
     UserStatus,
 )
+from app.schemas.equipment import EquipmentReview, EquipmentSuggestionSummary
 
 OnboardingResultKind = Literal[
     "step",
@@ -32,7 +33,7 @@ OnboardingResultKind = Literal[
     "availability_intake",
     "equipment_recommendation",
     "equipment_intake",
-    "equipment_details_intake",
+    "equipment_unmatched",
     "health_limitations_intake",
     "context_validation_error",
     "profile_validation_error",
@@ -56,3 +57,5 @@ class OnboardingServiceResult(BaseModel):
     confirmation: str | None = Field(default=None, max_length=1000)
     updated_fields: tuple[str, ...] = ()
     created: bool = False
+    equipment_review: EquipmentReview | None = None
+    equipment_summary: EquipmentSuggestionSummary | None = None

@@ -195,14 +195,14 @@ def test_telegram_orchestrator_prompt_preserves_correction_routing_contract() ->
     assert "route the latest Telegram event into EXACTLY ONE tool call" in prompt
     assert (
         "goal, target outcome, event date, age, birth year, category, weight, "
-        "height, availability, equipment, and training limitations"
+        "height, availability, and training limitations"
     ) in prompt
     assert (
-        "Availability, equipment, and training limitations can each be updated "
+        "Availability and training limitations can each be updated "
         "independently." in prompt
     )
     assert "send only the relevant value from the latest user message" in prompt
-    assert "equipment_text='ALL_RECOMMENDED'" in prompt
+    assert "equipment_text" not in prompt
     assert "health_limitations_text='NONE_REPORTED'" in prompt
     assert (
         "Never quote, restate, summarise, or otherwise expose health_limitations_text"
@@ -213,17 +213,14 @@ def test_telegram_orchestrator_prompt_preserves_correction_routing_contract() ->
 
 def test_global_update_schema_preserves_raw_context_values() -> None:
     availability = "Mon, Wed, Fri: 45 min"
-    equipment = "I have a treadmill but no dumbbells"
     limitations = "Avoid hard downhill runs"
 
     validated = UpdateOnboardingAgentSchema(
         availability_text=availability,
-        equipment_text=equipment,
         health_limitations_text=limitations,
     )
 
     assert validated.availability_text == availability
-    assert validated.equipment_text == equipment
     assert validated.health_limitations_text == limitations
 
 

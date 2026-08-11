@@ -30,7 +30,6 @@ class OnboardingStep(StrEnum):
     AVAILABILITY_INTAKE = "AVAILABILITY_INTAKE"
     EQUIPMENT_RECOMMENDATION = "EQUIPMENT_RECOMMENDATION"
     EQUIPMENT_INTAKE = "EQUIPMENT_INTAKE"
-    EQUIPMENT_DETAILS_INTAKE = "EQUIPMENT_DETAILS_INTAKE"
     HEALTH_LIMITATIONS_INTAKE = "HEALTH_LIMITATIONS_INTAKE"
 
 
@@ -165,45 +164,23 @@ class TrainingGoalStatus(StrEnum):
     CONFIRMED = "CONFIRMED"
 
 
-class EquipmentResourceCategory(StrEnum):
-    EQUIPMENT = "EQUIPMENT"
-    FACILITY_ACCESS = "FACILITY_ACCESS"
-    TRAINING_RESOURCE = "TRAINING_RESOURCE"
+class EquipmentImportance(StrEnum):
+    """Static catalog importance, independent of athlete or training state."""
 
-
-class EquipmentPriority(StrEnum):
-    ESSENTIAL = "Essential"
-    RECOMMENDED = "Recommended"
-    OPTIONAL = "Optional"
-
-
-class EquipmentTrainingStage(StrEnum):
-    START = "START"
-    BASE = "BASE"
-    BUILD = "BUILD"
-    RACE_SPECIFIC = "RACE_SPECIFIC"
-    RACE = "RACE"
-
-
-class EquipmentSubstitutionQuality(StrEnum):
-    FULL = "FULL"
-    PARTIAL = "PARTIAL"
-    FITNESS_ONLY = "FITNESS_ONLY"
-    NONE = "NONE"
-
-
-class AthleteEquipmentStatus(StrEnum):
-    AVAILABLE = "AVAILABLE"
-    UNAVAILABLE = "UNAVAILABLE"
+    ESSENTIAL = "essential"
+    RECOMMENDED = "recommended"
+    OPTIONAL = "optional"
 
 
 class ProfileSettingsStep(StrEnum):
     """Persisted, deterministic post-onboarding profile edit states."""
 
     MENU = "MENU"
+    GOAL_MENU = "GOAL_MENU"
     GOAL_MAIN = "GOAL_MAIN"
     GOAL_OUTCOME = "GOAL_OUTCOME"
     GOAL_DATE = "GOAL_DATE"
+    GOAL_SECONDARY = "GOAL_SECONDARY"
     AVAILABILITY = "AVAILABILITY"
     EQUIPMENT = "EQUIPMENT"
     HEALTH = "HEALTH"

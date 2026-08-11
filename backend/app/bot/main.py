@@ -12,7 +12,7 @@ from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import Application, Defaults
 
-from app.bot.handlers import BOT_SERVICE_KEY
+from app.bot.handlers import ALLOWED_USER_IDS_KEY, BOT_SERVICE_KEY
 from app.bot.router import register_handlers
 from app.bot.service import CoachBotApplicationService
 from app.bot.service_protocol import CoachBotService
@@ -145,6 +145,9 @@ def create_application(
 
     application = builder.build()
     application.bot_data[BOT_SERVICE_KEY] = service
+    application.bot_data[ALLOWED_USER_IDS_KEY] = frozenset(
+        runtime_settings.telegram_allowed_user_ids
+    )
     register_handlers(application, runtime_settings)
     return application
 

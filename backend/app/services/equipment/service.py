@@ -1,151 +1,190 @@
-"""Database-driven recommendation and Telegram-safe rendering."""
+"""Deterministic discipline resolution and equipment matching."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import date
+import re
+from collections.abc import Collection
 from uuid import UUID
 
-from app.db.models import EquipmentStageWindow
-from app.domain.enums import EquipmentPriority, EquipmentTrainingStage
+from app.db.models import EquipmentCatalog
+from app.domain.enums import Discipline, EquipmentImportance
 from app.repositories.equipment import EquipmentRepository
+from app.schemas.equipment import (
+    EquipmentOption,
+    EquipmentReview,
+    EquipmentSuggestionSummary,
+    MissingEssential,
+    MissingRecommended,
+)
 
-_ORDER = {
-    EquipmentTrainingStage.START: 0,
-    EquipmentTrainingStage.BASE: 1,
-    EquipmentTrainingStage.BUILD: 2,
-    EquipmentTrainingStage.RACE_SPECIFIC: 3,
-    EquipmentTrainingStage.RACE: 4,
-}
-_LABELS = {
-    EquipmentTrainingStage.START: "Start now",
-    EquipmentTrainingStage.BASE: "Base training",
-    EquipmentTrainingStage.BUILD: "Build training",
-    EquipmentTrainingStage.RACE_SPECIFIC: "Race-specific prep",
-    EquipmentTrainingStage.RACE: "Race day",
-}
-
-
-@dataclass(frozen=True, slots=True)
-class RecommendedResource:
-    resource_id: UUID
-    name: str
-    priority: EquipmentPriority
-    required_stage: EquipmentTrainingStage
-    condition_text: str | None
-
-
-@dataclass(frozen=True, slots=True)
-class EquipmentRecommendation:
-    text: str
-    resources: tuple[RecommendedResource, ...]
-    substitutions: tuple[str, ...]
+_MULTISPORT_ALIASES: tuple[tuple[re.Pattern[str], tuple[Discipline, ...]], ...] = (
+    (
+        re.compile(r"\b(?:triathlon|ironman|70[.]3)\b", re.IGNORECASE),
+        (Discipline.RUNNING, Discipline.CYCLING, Discipline.SWIMMING),
+    ),
+    (
+        re.compile(r"\bduathlon\b", re.IGNORECASE),
+        (Discipline.RUNNING, Discipline.CYCLING),
+    ),
+)
+_DISCIPLINE_ALIASES: tuple[tuple[Discipline, re.Pattern[str]], ...] = (
+    (
+        Discipline.RUNNING,
+        re.compile(
+            r"\b(?:run|running|runner|5\s?k|10\s?k|half marathon|marathon|"
+            r"trail race)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        Discipline.CYCLING,
+        re.compile(
+            r"\b(?:cycl(?:e|ing|ist)|bike|biking|ride|riding|gran fondo)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        Discipline.SWIMMING,
+        re.compile(r"\b(?:swim|swimming|pool|open water)\b", re.IGNORECASE),
+    ),
+    (
+        Discipline.HIKING,
+        re.compile(r"\b(?:hike|hiking|trek|trekking)\b", re.IGNORECASE),
+    ),
+    (
+        Discipline.STRENGTH,
+        re.compile(
+            r"\b(?:strength|gym|weights?|resistance|calisthenics)\b",
+            re.IGNORECASE,
+        ),
+    ),
+)
 
 
 class EquipmentRecommendationService:
-    async def recommend(
+    @staticmethod
+    def resolve_disciplines(
+        *, main_goal: str, target_outcome: str, secondary_priority: str | None
+    ) -> tuple[Discipline, ...]:
+        text = " ".join(
+            item for item in (main_goal, target_outcome, secondary_priority) if item
+        )
+        found: list[Discipline] = []
+        for pattern, disciplines in _MULTISPORT_ALIASES:
+            if pattern.search(text):
+                found.extend(disciplines)
+        for discipline, pattern in _DISCIPLINE_ALIASES:
+            if pattern.search(text):
+                found.append(discipline)
+        return tuple(dict.fromkeys(found))
+
+    async def review(
         self,
         *,
         repository: EquipmentRepository,
+        athlete_id: UUID,
         main_goal: str,
         target_outcome: str,
-        event_date: date | None,
-        today: date,
-    ) -> EquipmentRecommendation | None:
-        haystack = f"{main_goal} {target_outcome}".casefold()
-        goal_type = next(
-            (
-                item
-                for item in await repository.goal_types()
-                if any(term.casefold() in haystack for term in item.match_terms)
-            ),
-            None,
+        secondary_priority: str | None,
+    ) -> EquipmentReview | None:
+        disciplines = self.resolve_disciplines(
+            main_goal=main_goal,
+            target_outcome=target_outcome,
+            secondary_priority=secondary_priority,
         )
-        if goal_type is None:
+        if not disciplines:
             return None
-        current_stage = self._resolve_stage(
-            await repository.stage_windows(goal_type_id=goal_type.id), event_date, today
-        )
-        rows = await repository.requirements(goal_type_id=goal_type.id)
-        resources = tuple(
-            RecommendedResource(
-                resource_id=resource.id,
-                name=resource.display_name,
-                priority=requirement.priority,
-                required_stage=requirement.required_stage,
-                condition_text=requirement.condition_text,
-            )
-            for requirement, resource in rows
-        )
-        substitutions = await repository.substitutions(
-            required_resource_ids=tuple(item.resource_id for item in resources)
-        )
-        notes = tuple(
-            f"{substitute.display_name}: "
-            f"{substitution.quality.value.replace('_', ' ').lower()} substitute"
-            for substitution, substitute in substitutions
-        )
-        return EquipmentRecommendation(
-            text=self.render(
-                resources=resources, current_stage=current_stage, substitutions=notes
+        catalog = await repository.catalog_for_disciplines(disciplines=disciplines)
+        if not catalog:
+            return None
+        selected_ids = {
+            item.id for item in await repository.selected_catalog(athlete_id=athlete_id)
+        }
+        by_key = {(item.discipline, item.equipment): item for item in catalog}
+        return EquipmentReview(
+            disciplines=disciplines,
+            options=tuple(
+                EquipmentOption(
+                    id=item.id,
+                    discipline=item.discipline,
+                    equipment=item.equipment,
+                    display_name=item.display_name,
+                    importance=item.importance,
+                    substitutions=tuple(
+                        by_key[(item.discipline, key)].display_name
+                        for key in item.substitutions
+                        if (item.discipline, key) in by_key
+                    ),
+                    selected=item.id in selected_ids,
+                )
+                for item in catalog
             ),
-            resources=resources,
-            substitutions=notes,
         )
 
-    @staticmethod
-    def _resolve_stage(
-        windows: tuple[EquipmentStageWindow, ...], event_date: date | None, today: date
-    ) -> EquipmentTrainingStage:
-        if event_date is None:
-            return EquipmentTrainingStage.START
-        days = (event_date - today).days
-        for window in windows:
-            if window.minimum_days_until_event <= days and (
-                window.maximum_days_until_event is None
-                or days <= window.maximum_days_until_event
-            ):
-                return window.stage
-        return EquipmentTrainingStage.START
-
-    @staticmethod
-    def render(
+    async def save_and_summarize(
+        self,
         *,
-        resources: tuple[RecommendedResource, ...],
-        current_stage: EquipmentTrainingStage,
-        substitutions: tuple[str, ...],
-    ) -> str:
-        rows = [
-            (
-                item.name,
-                item.priority.value,
-                _LABELS[item.required_stage]
-                + (
-                    " (now)"
-                    if _ORDER[item.required_stage] <= _ORDER[current_stage]
-                    else ""
-                ),
-            )
-            for item in resources
-        ]
-        width = max(len("Equipment"), *(len(row[0]) for row in rows))
-        output = [
-            f"{'Equipment':<{width}}  Importance  When needed",
-            f"{'-' * width}  ----------  ------------------",
-        ]
-        output.extend(
-            f"{name:<{width}}  {priority:<11} {stage}" for name, priority, stage in rows
+        repository: EquipmentRepository,
+        athlete_id: UUID,
+        review: EquipmentReview,
+        selected_ids: Collection[UUID],
+    ) -> EquipmentSuggestionSummary:
+        selected = await repository.replace_for_disciplines(
+            athlete_id=athlete_id,
+            disciplines=review.disciplines,
+            equipment_ids=selected_ids,
         )
-        conditions = [
-            f"{item.name}: {item.condition_text}"
-            for item in resources
-            if item.condition_text
-        ]
-        if conditions:
-            output.extend(["", "Conditions: " + "; ".join(conditions)])
-        if substitutions:
-            output.extend(["Alternatives: " + "; ".join(substitutions)])
-        text = "\n".join(output)
-        if len(text) > 3500:
-            raise ValueError("equipment table exceeds Telegram message capacity")
-        return text
+        catalog = await repository.catalog_for_disciplines(
+            disciplines=review.disciplines
+        )
+        return self.summarize(catalog=catalog, selected=selected)
+
+    @staticmethod
+    def summarize(
+        *,
+        catalog: Collection[EquipmentCatalog],
+        selected: Collection[EquipmentCatalog],
+    ) -> EquipmentSuggestionSummary:
+        selected_keys = {(item.discipline, item.equipment) for item in selected}
+        by_key = {(item.discipline, item.equipment): item for item in catalog}
+
+        def satisfied(item: EquipmentCatalog) -> bool:
+            return (item.discipline, item.equipment) in selected_keys or any(
+                (item.discipline, substitute) in selected_keys
+                for substitute in item.substitutions
+            )
+
+        missing_essentials: list[MissingEssential] = []
+        missing_recommended: list[MissingRecommended] = []
+        for item in catalog:
+            if satisfied(item):
+                continue
+            if item.importance is EquipmentImportance.ESSENTIAL:
+                missing_essentials.append(
+                    MissingEssential(
+                        discipline=item.discipline,
+                        display_name=item.display_name,
+                        substitutions=tuple(
+                            by_key[(item.discipline, key)].display_name
+                            for key in item.substitutions
+                            if (item.discipline, key) in by_key
+                        ),
+                    )
+                )
+            elif item.importance is EquipmentImportance.RECOMMENDED:
+                missing_recommended.append(
+                    MissingRecommended(
+                        discipline=item.discipline,
+                        display_name=item.display_name,
+                        substitutions=tuple(
+                            by_key[(item.discipline, key)].display_name
+                            for key in item.substitutions
+                            if (item.discipline, key) in by_key
+                        ),
+                    )
+                )
+        return EquipmentSuggestionSummary(
+            can_start=not missing_essentials,
+            missing_essentials=tuple(missing_essentials),
+            missing_recommended=tuple(missing_recommended),
+        )

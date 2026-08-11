@@ -12,11 +12,18 @@ from langchain_core.messages import HumanMessage
 
 from app.bot import keyboards, messages
 from app.bot.service import CoachBotApplicationService
-from app.domain.enums import OnboardingStatus, OnboardingStep, UserStatus
+from app.domain.enums import (
+    Discipline,
+    EquipmentImportance,
+    OnboardingStatus,
+    OnboardingStep,
+    UserStatus,
+)
 from app.schemas.common import TelegramIdentity
+from app.schemas.equipment import EquipmentOption, EquipmentReview
 from app.schemas.onboarding_service import OnboardingResultKind, OnboardingServiceResult
 from app.schemas.profile_settings import ProfileSettingsResult, ProfileSettingsStep
-from app.services.onboarding import OnboardingService
+from app.services.onboarding import OnboardingApplicationError, OnboardingService
 
 
 def _identity() -> TelegramIdentity:
@@ -33,6 +40,7 @@ def _result(
     step: OnboardingStep,
     *,
     answers: dict[str, str] | None = None,
+    equipment_review: EquipmentReview | None = None,
 ) -> OnboardingServiceResult:
     return OnboardingServiceResult(
         kind=kind,
@@ -41,6 +49,7 @@ def _result(
         onboarding_status=OnboardingStatus.ACTIVE,
         current_step=step,
         answers=answers or {},
+        equipment_review=equipment_review,
     )
 
 
@@ -50,10 +59,18 @@ def _facade(
     account_queries: object | None = None,
     agent_workspace: object | None = None,
 ) -> CoachBotApplicationService:
+    default_queries = SimpleNamespace(
+        lifecycle=AsyncMock(
+            return_value={
+                "user_id": uuid4(),
+                "status": UserStatus.ONBOARDING_COMPLETED,
+            }
+        )
+    )
     return CoachBotApplicationService(
         onboarding=cast(OnboardingService, onboarding),
         profiles=SimpleNamespace(),
-        account_queries=cast(object, account_queries or SimpleNamespace()),
+        account_queries=cast(object, account_queries or default_queries),
         accounts=SimpleNamespace(),
         agent_workspace=cast(object, agent_workspace),
     )
@@ -73,12 +90,51 @@ async def test_equipment_callback_uses_only_deterministic_onboarding_method() ->
 
     response = await _facade(onboarding).handle_callback(
         identity,
-        "ob:v1:equipment:all",
+        "ob:v1:equipment:done",
     )
 
-    onboarding.choose_equipment.assert_awaited_once_with(identity, "all")
+    onboarding.choose_equipment.assert_awaited_once_with(identity, "done")
     assert response.text == messages.HEALTH_LIMITATIONS_INTAKE
     assert response.keyboard == keyboards.health_limitations_keyboard()
+    assert response.edit_existing is True
+
+
+@pytest.mark.asyncio
+async def test_stale_equipment_uuid_rerenders_current_durable_review() -> None:
+    identity = _identity()
+    review = EquipmentReview(
+        disciplines=(Discipline.CYCLING,),
+        options=(
+            EquipmentOption(
+                id=uuid4(),
+                discipline=Discipline.CYCLING,
+                equipment="stationary_bike",
+                display_name="Stationary bike",
+                importance=EquipmentImportance.OPTIONAL,
+                selected=True,
+            ),
+        ),
+    )
+    onboarding = SimpleNamespace(
+        choose_equipment=AsyncMock(
+            side_effect=OnboardingApplicationError("invalid_action")
+        ),
+        snapshot=AsyncMock(
+            return_value=_result(
+                "equipment_intake",
+                OnboardingStep.EQUIPMENT_INTAKE,
+                equipment_review=review,
+            )
+        ),
+    )
+
+    response = await _facade(onboarding).handle_callback(
+        identity,
+        f"ob:v1:equipment:{uuid4()}",
+    )
+
+    onboarding.snapshot.assert_awaited_once_with(identity)
+    assert "Stationary bike" in response.text
     assert response.edit_existing is True
 
 
@@ -125,7 +181,30 @@ async def test_profile_settings_callbacks_strip_the_transport_prefix() -> None:
         identity, "section:availability"
     )
     assert opened.text == messages.PROFILE_SETTINGS_MENU
-    assert availability.text == messages.PROFILE_AVAILABILITY
+    assert "Current availability" in availability.text
+    assert "Not set" in availability.text
+    assert availability.text.endswith(messages.PROFILE_AVAILABILITY)
+    assert availability.keyboard == keyboards.profile_settings_text_keyboard()
+
+
+@pytest.mark.asyncio
+async def test_profile_settings_done_closes_without_onboarding_cancel() -> None:
+    identity = _identity()
+    onboarding = SimpleNamespace(
+        choose_profile_settings=AsyncMock(
+            return_value=ProfileSettingsResult(
+                step=ProfileSettingsStep.MENU,
+                saved_field="__closed__",
+            )
+        )
+    )
+
+    response = await _facade(onboarding).handle_callback(identity, "ps:v1:done")
+
+    onboarding.choose_profile_settings.assert_awaited_once_with(identity, "done")
+    assert response.text == messages.PROFILE_SETTINGS_CLOSED
+    assert response.keyboard is None
+    assert response.edit_existing is True
 
 
 @pytest.mark.asyncio
@@ -160,22 +239,27 @@ async def test_context_steps_render_the_correct_prompt_and_controls() -> None:
     equipment = await facade._render_onboarding(
         identity,
         _result(
-            "equipment_recommendation",
+            "equipment_intake",
             OnboardingStep.EQUIPMENT_INTAKE,
-            answers={
-                "equipment_recommendation_text": (
-                    "Equipment      Importance  When needed\n"
-                    "-------------  ----------  ---------------------\n"
-                    "Running shoes  Essential   Start now — every run"
-                )
-            },
+            equipment_review=EquipmentReview(
+                disciplines=(Discipline.RUNNING,),
+                options=(
+                    EquipmentOption(
+                        id=uuid4(),
+                        discipline=Discipline.RUNNING,
+                        equipment="running_shoes",
+                        display_name="Running shoes",
+                        importance=EquipmentImportance.ESSENTIAL,
+                    ),
+                ),
+            ),
         ),
     )
     details = await facade._render_onboarding(
         identity,
         _result(
-            "equipment_details_intake",
-            OnboardingStep.EQUIPMENT_DETAILS_INTAKE,
+            "health_limitations_intake",
+            OnboardingStep.HEALTH_LIMITATIONS_INTAKE,
         ),
     )
     health = await facade._render_onboarding(
@@ -190,12 +274,11 @@ async def test_context_steps_render_the_correct_prompt_and_controls() -> None:
     assert "swim at a pool" in availability.text
     assert "ride for up to two hours" in availability.text
     assert availability.keyboard == keyboards.profile_text_input_keyboard()
-    assert "<pre>" in equipment.text
-    assert "Equipment      Importance  When needed" in equipment.text
-    assert "Running shoes  Essential   Start now" in equipment.text
-    assert equipment.keyboard == keyboards.equipment_intake_keyboard()
-    assert details.text == messages.EQUIPMENT_DETAILS_INTAKE
-    assert details.keyboard == keyboards.equipment_details_keyboard()
+    assert "Running shoes" in equipment.text
+    assert "Essential" in equipment.text
+    assert equipment.keyboard is not None
+    assert details.text == messages.HEALTH_LIMITATIONS_INTAKE
+    assert details.keyboard == keyboards.health_limitations_keyboard()
     assert health.text == messages.HEALTH_LIMITATIONS_INTAKE
     assert health.keyboard == keyboards.health_limitations_keyboard()
 
@@ -221,14 +304,14 @@ async def test_context_validation_error_repeats_the_relevant_prompt() -> None:
         _identity(),
         _result(
             "context_validation_error",
-            OnboardingStep.EQUIPMENT_DETAILS_INTAKE,
+            OnboardingStep.HEALTH_LIMITATIONS_INTAKE,
         ),
     )
 
     assert response.text == (
-        f"{messages.CONTEXT_VALIDATION_ERROR}\n\n{messages.EQUIPMENT_DETAILS_INTAKE}"
+        f"{messages.CONTEXT_VALIDATION_ERROR}\n\n{messages.HEALTH_LIMITATIONS_INTAKE}"
     )
-    assert response.keyboard == keyboards.profile_text_input_keyboard()
+    assert response.keyboard == keyboards.health_limitations_keyboard()
 
 
 @pytest.mark.asyncio

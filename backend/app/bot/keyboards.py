@@ -44,8 +44,6 @@ LABELS = {
     "goal_pace": "Improve my pace",
     "goal_consistency": "Run consistently",
     "goal_something_else": "Something else",
-    "equipment_all": "I have all the recommended equipment",
-    "equipment_other": "Other / I have limitations",
     "health_none": "None",
     "gender_male": "Male",
     "gender_female": "Female",
@@ -62,6 +60,11 @@ LABELS = {
     "view_profile": "View profile",
     "add_workout": "Add workout",
     "help": "Help",
+    "start": "Start",
+    "resume_menu": "Resume",
+    "profile": "Profile",
+    "change_profile": "Change profile",
+    "delete": "Delete",
 }
 
 
@@ -126,6 +129,12 @@ def profile_text_input_keyboard() -> InlineKeyboardMarkup:
     return _rows([[(LABELS["cancel"], "ob:v1:cancel")]])
 
 
+def profile_settings_text_keyboard() -> InlineKeyboardMarkup:
+    """Leave profile editing without invoking the onboarding cancellation flow."""
+
+    return _rows([[("Back / Done", "ps:v1:done")]])
+
+
 def profile_gender_keyboard() -> InlineKeyboardMarkup:
     """Build the deterministic competitive-category choices."""
 
@@ -148,14 +157,14 @@ def equipment_intake_keyboard(
     if not resources:
         return _rows(
             [
-                [(LABELS["equipment_other"], "ob:v1:equipment:done")],
+                [("Continue", "ob:v1:equipment:done")],
                 [(LABELS["cancel"], "ob:v1:cancel")],
             ]
         )
     rows = [
         [
             (
-                ("✓ " if resource_id in selected else "○ ") + name,
+                ("[x] " if resource_id in selected else "[ ] ") + name,
                 f"ob:v1:equipment:{resource_id}",
             )
         ]
@@ -167,22 +176,34 @@ def equipment_intake_keyboard(
     return _rows(rows)
 
 
-def equipment_details_keyboard() -> InlineKeyboardMarkup:
-    """Allow optional equipment clarification to be skipped deterministically."""
+def start_keyboard() -> ReplyKeyboardMarkup:
+    """Show the only valid account action before an account exists."""
 
-    return _rows(
+    return _reply_rows([[LABELS["start"]]])
+
+
+def onboarding_keyboard() -> ReplyKeyboardMarkup:
+    """Keep resume and deletion available while onboarding is incomplete."""
+
+    return _reply_rows([[LABELS["resume_menu"]], [LABELS["delete"]]])
+
+
+def completed_onboarding_keyboard() -> ReplyKeyboardMarkup:
+    """Expose the durable completed-account actions."""
+
+    return _reply_rows(
         [
-            [("Skip", "ob:v1:equipment:skip")],
-            [(LABELS["cancel"], "ob:v1:cancel")],
+            [LABELS["profile"], LABELS["change_profile"]],
+            [LABELS["delete"]],
         ]
     )
 
 
-def completed_onboarding_keyboard() -> ReplyKeyboardMarkup:
-    """Keep the completed-athlete settings entry point in the input keyboard."""
+def _reply_rows(rows: Sequence[Sequence[str]]) -> ReplyKeyboardMarkup:
+    """Build one persistent Telegram reply keyboard."""
 
     return ReplyKeyboardMarkup(
-        [["Change profile"]],
+        [list(row) for row in rows],
         resize_keyboard=True,
         is_persistent=True,
     )
@@ -201,8 +222,33 @@ def profile_settings_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def profile_goal_keyboard() -> InlineKeyboardMarkup:
+    return _rows(
+        [
+            [("Main goal", "ps:v1:goal:main")],
+            [("Target outcome", "ps:v1:goal:outcome")],
+            [("Event date", "ps:v1:goal:date")],
+            [("Secondary priority", "ps:v1:goal:secondary")],
+            [("Back", "ps:v1:goal:back")],
+        ]
+    )
+
+
+def profile_goal_text_keyboard() -> InlineKeyboardMarkup:
+    return _rows([[("Back", "ps:v1:goal:back")]])
+
+
 def profile_goal_date_keyboard() -> InlineKeyboardMarkup:
-    return _rows([[("Not yet", "ps:v1:goal:no-date")], [("Back / Done", "ps:v1:done")]])
+    return _rows([[("Not yet", "ps:v1:goal:no-date")], [("Back", "ps:v1:goal:back")]])
+
+
+def profile_goal_secondary_keyboard() -> InlineKeyboardMarkup:
+    return _rows(
+        [
+            [("None", "ps:v1:goal:no-secondary")],
+            [("Back", "ps:v1:goal:back")],
+        ]
+    )
 
 
 def profile_health_keyboard() -> InlineKeyboardMarkup:
@@ -240,7 +286,7 @@ def profile_equipment_keyboard(
     resources: dict[str, str], selected: set[str]
 ) -> InlineKeyboardMarkup:
     rows = [
-        [(("✓ " if key in selected else "○ ") + value, f"ps:v1:equipment:{key}")]
+        [(("[x] " if key in selected else "[ ] ") + value, f"ps:v1:equipment:{key}")]
         for key, value in resources.items()
     ]
     rows.extend(

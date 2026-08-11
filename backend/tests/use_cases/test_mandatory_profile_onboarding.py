@@ -189,7 +189,6 @@ async def test_development_steps_seed_only_the_requesting_users_onboarding_state
         assert (
             first_context.availability_text == "Weekdays one hour; weekends two hours."
         )
-        assert first_context.equipment_text == "ALL_RECOMMENDED"
         assert first_context.health_limitations_text == "NONE_REPORTED"
         assert first_goal is not None
         assert other_context is not None

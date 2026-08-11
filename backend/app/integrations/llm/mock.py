@@ -82,16 +82,6 @@ class DeterministicFakeOnboardingModel:
                 output = schema.model_validate(
                     {"accepted": not needs_clarification},
                 )
-            elif _is_equipment_recommendation_schema(schema):
-                if needs_clarification:
-                    return StructuredModelResponse(
-                        output={"items": []},
-                        prompt_tokens=8,
-                        completion_tokens=12,
-                    )
-                output = schema.model_validate(
-                    {"items": _fake_equipment_recommendation(messages)},
-                )
             else:
                 output = schema.model_validate(
                     _fake_goal_output(
@@ -223,111 +213,6 @@ def _is_free_text_validation_schema(schema: StructuredOutputSchema) -> bool:
     return set(schema.model_fields) == {"accepted"}
 
 
-def _is_equipment_recommendation_schema(schema: StructuredOutputSchema) -> bool:
-    """Recognize the isolated recommender without importing workflow modules."""
-
-    return set(schema.model_fields) == {"items"}
-
-
-def _fake_equipment_recommendation(messages: list[BaseMessage]) -> list[dict[str, str]]:
-    """Produce a stable, conservative mock recommendation from prompt context."""
-
-    context = " ".join(
-        message.content for message in messages if isinstance(message.content, str)
-    ).casefold()
-    if "triathlon" in context:
-        return [
-            {
-                "equipment_name": "Roadworthy bike",
-                "importance": "Essential",
-                "when_needed": "Start now — first rides",
-            },
-            {
-                "equipment_name": "Helmet",
-                "importance": "Essential",
-                "when_needed": "Start now — every ride",
-            },
-            {
-                "equipment_name": "Swim goggles",
-                "importance": "Essential",
-                "when_needed": "Start now — swim sessions",
-            },
-            {
-                "equipment_name": "Running shoes",
-                "importance": "Essential",
-                "when_needed": "Start now — run sessions",
-            },
-            {
-                "equipment_name": "Basic repair kit",
-                "importance": "Recommended",
-                "when_needed": "Base training — longer rides",
-            },
-        ]
-    if "cycl" in context or "bike" in context:
-        return [
-            {
-                "equipment_name": "Roadworthy bicycle",
-                "importance": "Essential",
-                "when_needed": "Start now — first rides",
-            },
-            {
-                "equipment_name": "Helmet",
-                "importance": "Essential",
-                "when_needed": "Start now — every ride",
-            },
-            {
-                "equipment_name": "Front and rear lights",
-                "importance": "Recommended",
-                "when_needed": "Base training — lower-light rides",
-            },
-            {
-                "equipment_name": "Basic repair kit",
-                "importance": "Recommended",
-                "when_needed": "Base training — longer rides",
-            },
-        ]
-    if "swim" in context:
-        return [
-            {
-                "equipment_name": "Swimwear",
-                "importance": "Essential",
-                "when_needed": "Start now — pool sessions",
-            },
-            {
-                "equipment_name": "Goggles",
-                "importance": "Essential",
-                "when_needed": "Start now — pool sessions",
-            },
-            {
-                "equipment_name": "Swim cap",
-                "importance": "Recommended",
-                "when_needed": "Base training — regular swims",
-            },
-            {
-                "equipment_name": "Pool bag or towel",
-                "importance": "Optional",
-                "when_needed": "Start now — pool visits",
-            },
-        ]
-    return [
-        {
-            "equipment_name": "Running shoes",
-            "importance": "Essential",
-            "when_needed": "Start now — every run",
-        },
-        {
-            "equipment_name": "Training clothing",
-            "importance": "Recommended",
-            "when_needed": "Start now — regular sessions",
-        },
-        {
-            "equipment_name": "Water bottle",
-            "importance": "Recommended",
-            "when_needed": "Base training — longer sessions",
-        },
-    ]
-
-
 def _fake_onboarding_update(user_text: str) -> dict[str, object]:
     folded = user_text.casefold()
     if "ironman 70.3" in folded and "decent time" in folded:
@@ -360,12 +245,6 @@ def _fake_onboarding_update(user_text: str) -> dict[str, object]:
     availability = _literal_value_after_label(user_text, "availability")
     if availability is not None:
         payload["availability_text"] = availability
-    if "all the recommended equipment" in folded:
-        payload["equipment_text"] = "ALL_RECOMMENDED"
-    else:
-        equipment = _literal_value_after_label(user_text, "equipment")
-        if equipment is not None:
-            payload["equipment_text"] = equipment
     if re.search(
         r"\b(?:no|none)\b[^.\n]*(?:injur|limitation|restriction)",
         folded,

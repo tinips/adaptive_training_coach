@@ -19,6 +19,7 @@ from app.schemas.training_import import TelegramDocumentUpload
 
 logger = logging.getLogger(__name__)
 BOT_SERVICE_KEY = "coach_bot_service"
+ALLOWED_USER_IDS_KEY = "telegram_allowed_user_ids"
 
 
 async def start_handler(
@@ -77,6 +78,8 @@ async def callback_handler(
     if query is None or query.data is None:
         return
     await query.answer()
+    if not _authorized(update, context):
+        return
     identity = _identity(update)
     if identity is None:
         return
@@ -96,7 +99,12 @@ async def text_handler(
 ) -> None:
     message = update.effective_message
     identity = _identity(update)
-    if message is None or message.text is None or identity is None:
+    if (
+        message is None
+        or message.text is None
+        or identity is None
+        or not _authorized(update, context)
+    ):
         return
     response = await _service(context).handle_agent_input(
         identity,
@@ -117,7 +125,12 @@ async def document_handler(
     message = update.effective_message
     identity = _identity(update)
     document = message.document if message is not None else None
-    if message is None or identity is None or document is None:
+    if (
+        message is None
+        or identity is None
+        or document is None
+        or not _authorized(update, context)
+    ):
         return
     status_message = await message.reply_text(
         messages.TRAINING_FILE_PROGRESS["validating_file"]
@@ -186,6 +199,8 @@ async def _agent_delegate(
     context: ContextTypes.DEFAULT_TYPE,
     content: str,
 ) -> None:
+    if not _authorized(update, context):
+        return
     identity = _identity(update)
     if identity is None:
         return
@@ -209,6 +224,18 @@ def _identity(update: Update) -> TelegramIdentity | None:
         first_name=user.first_name,
         language_code=user.language_code or "en",
     )
+
+
+def _authorized(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Allow Telegram traffic only from the configured user allowlist."""
+
+    user = update.effective_user
+    if user is None:
+        return False
+    allowed = context.application.bot_data.get(ALLOWED_USER_IDS_KEY)
+    # Test-only contexts that do not construct the production application have
+    # no security configuration.  The real application always sets this key.
+    return allowed is None or user.id in allowed
 
 
 def _service(context: ContextTypes.DEFAULT_TYPE) -> CoachBotService:
@@ -244,5 +271,5 @@ async def _deliver(update: Update, response: TelegramResponse) -> None:
 
     await message.reply_text(
         response.text,
-        reply_markup=response.user_keyboard or reply_markup,
+        reply_markup=reply_markup or response.user_keyboard,
     )

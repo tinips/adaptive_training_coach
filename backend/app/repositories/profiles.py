@@ -19,8 +19,6 @@ from app.repositories.errors import OwnedRecordNotFoundError
 @dataclass(frozen=True, slots=True)
 class AthleteProfileContext:
     availability_text: str | None
-    equipment_recommendation_text: str | None
-    equipment_text: str | None
     health_limitations_text: str | None
 
 
@@ -52,8 +50,6 @@ class ProfileRepository:
             return None
         return AthleteProfileContext(
             availability_text=profile.availability_text,
-            equipment_recommendation_text=profile.equipment_recommendation_text,
-            equipment_text=profile.equipment_text,
             health_limitations_text=profile.health_limitations_text,
         )
 
@@ -104,8 +100,6 @@ class ProfileRepository:
             payload,
             {
                 "availability_text",
-                "equipment_recommendation_text",
-                "equipment_text",
                 "health_limitations_text",
             },
         )
@@ -130,7 +124,12 @@ class ProfileRepository:
         self, *, user_id: uuid.UUID, payload: Mapping[str, object]
     ) -> TrainingGoal:
         if not payload or not set(payload).issubset(
-            {"main_goal", "target_outcome", "event_date"}
+            {
+                "main_goal",
+                "target_outcome",
+                "event_date",
+                "secondary_priority",
+            }
         ):
             raise ValueError("unsupported training goal update field")
         goal = await self._session.scalar(
@@ -141,16 +140,6 @@ class ProfileRepository:
         )
         if goal is None:
             raise OwnedRecordNotFoundError("training goal not found")
-        await self._session.flush()
-        return goal
-
-    async def increment_equipment_context_revision(
-        self, *, user_id: uuid.UUID
-    ) -> TrainingGoal:
-        goal = await self.get_training_goal(user_id=user_id)
-        if goal is None:
-            raise OwnedRecordNotFoundError("training goal not found")
-        goal.equipment_context_revision += 1
         await self._session.flush()
         return goal
 

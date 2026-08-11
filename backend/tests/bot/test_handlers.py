@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, call
 
 import pytest
 from telegram import Update
@@ -78,6 +78,34 @@ async def test_start_handler_delegates_identity_to_service() -> None:
         messages.WELCOME,
         reply_markup=keyboards.welcome_keyboard(),
     )
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_refresh_preserves_inline_controls_without_extra_message() -> (
+    None
+):
+    inline = keyboards.welcome_keyboard()
+    reply = keyboards.onboarding_keyboard()
+    service = SimpleNamespace(
+        handle_agent_input=AsyncMock(
+            return_value=TelegramResponse(
+                messages.WELCOME,
+                inline,
+                user_keyboard=reply,
+                refresh_user_keyboard=True,
+            )
+        ),
+    )
+    update = _update()
+
+    await handlers.start_handler(
+        cast(Update, update),
+        cast(ContextTypes.DEFAULT_TYPE, _context(service)),
+    )
+
+    assert update.effective_message.reply_text.await_args_list == [
+        call(messages.WELCOME, reply_markup=inline),
+    ]
 
 
 @pytest.mark.asyncio

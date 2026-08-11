@@ -7,6 +7,12 @@ from datetime import date, datetime
 from html import escape
 from typing import Any
 
+from app.domain.enums import ProfileSettingsStep
+from app.schemas.equipment import EquipmentReview, EquipmentSuggestionSummary
+
+TELEGRAM_MESSAGE_LIMIT = 4096
+_TRUNCATED_MARKER = "\u2026 [truncated for Telegram]"
+
 GENERIC_ERROR = (
     "Something went wrong. Your saved progress is safe. Please try again in a moment."
 )
@@ -79,6 +85,7 @@ HELP = (
     "This product is not medical advice and must not be used for emergencies. "
     "No training plan is generated in this version."
 )
+ACCOUNT_ACTIONS = "Account actions"
 PROFILE_INCOMPLETE = (
     "Your athlete profile is not complete yet. Resume onboarding to continue from "
     "your saved step."
@@ -94,7 +101,6 @@ _ONBOARDING_FIELD_LABELS = {
     "weight_kg": "weight",
     "height_cm": "height",
     "availability_text": "availability",
-    "equipment_text": "equipment",
     "health_limitations_text": "training limitations",
 }
 ONBOARDING_MODIFICATION_FALLBACK = "Your athlete data has been updated."
@@ -138,14 +144,9 @@ PROFILE_HEIGHT_INTAKE = (
 AVAILABILITY_INTAKE = (
     "Tell me about your weekly training availability in your own words.\n\n"
     "Include the days you can train, roughly how much time you have, and any places "
-    "or facilities you can use if relevant. For example: "
-    "'I can ride for up to two hours on the weekend.' "
+    "or facilities you can use if relevant. \nFor example: "
+    "'I can ride for up to two hours on the weekend. "
     "I can swim at a pool on Wednesday and Friday, and I can cycle only on weekends."
-)
-EQUIPMENT_DETAILS_INTAKE = (
-    "Anything else about your equipment or access we should know?\n\n"
-    "Example: 'I have an MTB, can use a gym bike, and can only access the pool "
-    "on weekends.'"
 )
 HEALTH_LIMITATIONS_INTAKE = (
     "Write any current or past injuries, discomfort, or physical limitations that "
@@ -154,33 +155,97 @@ HEALTH_LIMITATIONS_INTAKE = (
 CONTEXT_VALIDATION_ERROR = (
     "Please send a short answer for this part of your athlete profile."
 )
-EQUIPMENT_RECOMMENDATION_RETRY = (
-    "Your availability has been saved, but I could not prepare the equipment "
-    "suggestion just now. Send any message to retry."
+EQUIPMENT_UNMATCHED = (
+    "I do not have a tailored equipment catalog for that goal yet, so equipment "
+    "will not block your onboarding."
 )
 
 
-def equipment_recommendation(recommendation: str | None) -> str:
-    """Render the saved, goal-specific equipment suggestion safely."""
+def equipment_review(review: EquipmentReview) -> str:
+    """Render deterministic catalog importance before selection."""
 
-    suggestion = escape(recommendation or "the basic equipment for your goal")
-    return (
-        "Based on your goal, here is the essential equipment to consider, plus "
-        "useful extras:\n\n"
-        f"<pre>{suggestion}</pre>\n\n"
-        "Which of these can you currently use? "
-        "Select every item that is available to you."
+    sections: list[str] = []
+    for discipline in review.disciplines:
+        rows = [
+            (
+                "[x]" if item.selected else "[ ]",
+                item.display_name,
+                item.importance.value.title(),
+                ", ".join(item.substitutions) or "\u2014",
+            )
+            for item in review.options
+            if item.discipline is discipline
+        ]
+        if rows:
+            sections.append(
+                f"<b>{escape(discipline.value.title())}</b>\n"
+                + _html_pre_table(
+                    ("Have", "Equipment", "Importance", "Alternatives"),
+                    rows,
+                    (4, 24, 11, 25),
+                )
+            )
+    message = (
+        "Select every item or facility you can currently use. Essential means "
+        "needed to train the discipline; a listed alternative can satisfy it.\n\n"
+        + "\n\n".join(sections)
     )
+    return _assert_telegram_length(message)
+
+
+def equipment_summary(summary: EquipmentSuggestionSummary) -> str:
+    """Render the compact, non-blocking gap summary."""
+
+    status = (
+        "You have access to the essentials needed to start."
+        if summary.can_start
+        else "You can continue, but there are equipment gaps to address."
+    )
+    rows = [
+        (
+            "Essential",
+            item.discipline.value.title(),
+            item.display_name,
+            ", ".join(item.substitutions) or "\u2014",
+        )
+        for item in summary.missing_essentials
+    ]
+    rows.extend(
+        (
+            "Recommended",
+            item.discipline.value.title(),
+            item.display_name,
+            ", ".join(item.substitutions) or "\u2014",
+        )
+        for item in summary.missing_recommended
+    )
+    if not rows:
+        return status
+    message = (
+        status
+        + "\n\n"
+        + _html_pre_table(
+            ("Gap", "Discipline", "Equipment", "Alternatives"),
+            rows,
+            (11, 10, 22, 24),
+        )
+    )
+    return _assert_telegram_length(message)
 
 
 ONBOARDING_COMPLETED = (
     "Your onboarding is complete. You can change your profile settings at any time."
 )
 PROFILE_SETTINGS_MENU = "Choose a profile setting to change."
+PROFILE_SETTINGS_CLOSED = "Done. Your profile settings are closed."
 PROFILE_SETTINGS_UNPROMPTED = "Use Change profile to choose what you want to update."
+PROFILE_GOAL_MENU = "Choose the training goal field to change."
 PROFILE_GOAL_MAIN = "What is your training goal?"
 PROFILE_GOAL_OUTCOME = "What would success or the outcome look like?"
 PROFILE_GOAL_DATE = "When is the event? Send YYYY-MM-DD, or choose Not yet."
+PROFILE_GOAL_SECONDARY = (
+    "What secondary priority should this goal preserve, or choose None?"
+)
 PROFILE_AVAILABILITY = "Describe your weekly training availability."
 PROFILE_HEALTH = "Write any training limitations, or choose None."
 PROFILE_PERSONAL = "Choose the personal detail to change."
@@ -402,24 +467,225 @@ def validation_error(code: str) -> str:
 def persisted_profile(profile: Mapping[str, Any]) -> str:
     """Render the current mandatory athlete profile."""
 
-    lines = [
-        "Your saved athlete profile:",
-        "",
-        f"Birth year: {_display(profile.get('birth_year'))}",
-        f"Category: {_display(profile.get('gender'))}",
-        f"Weight: {_optional_metric(profile.get('weight_kg'), 'kg')}",
-        f"Height: {_optional_metric(profile.get('height_cm'), 'cm')}",
+    equipment = profile.get("equipment_access")
+    training_goal = profile.get("training_goal")
+    free_text_values = [
+        value
+        for key in ("availability_text", "health_limitations_text")
+        if isinstance((value := profile.get(key)), str) and value
     ]
-    for label, key in (
-        ("Availability", "availability_text"),
-        ("Equipment recommendation", "equipment_recommendation_text"),
-        ("Equipment", "equipment_text"),
-        ("Training limitations", "health_limitations_text"),
-    ):
-        value = profile.get(key)
-        if isinstance(value, str) and value:
-            lines.append(f"{label}: {_display_free_text(value)}")
-    return "\n".join(lines)
+    if isinstance(training_goal, Mapping):
+        free_text_values.extend(
+            value
+            for key in (
+                "main_goal",
+                "target_outcome",
+                "secondary_priority",
+            )
+            if isinstance((value := training_goal.get(key)), str) and value
+        )
+
+    def render(free_text_cap: int | None) -> str:
+        lines = [
+            "Your saved athlete profile:",
+            "",
+            f"Birth year: {_display(profile.get('birth_year'))}",
+            f"Category: {_display(profile.get('gender'))}",
+            f"Weight: {_optional_metric(profile.get('weight_kg'), 'kg')}",
+            f"Height: {_optional_metric(profile.get('height_cm'), 'cm')}",
+        ]
+        for label, key in (
+            ("Availability", "availability_text"),
+            ("Training limitations", "health_limitations_text"),
+        ):
+            value = profile.get(key)
+            if isinstance(value, str) and value:
+                lines.append(f"{label}: {_profile_free_text(value, free_text_cap)}")
+        if isinstance(training_goal, Mapping):
+            lines.extend(["", "<b>Training goal</b>"])
+            for label, key in (
+                ("Main goal", "main_goal"),
+                ("Target outcome", "target_outcome"),
+                ("Secondary priority", "secondary_priority"),
+            ):
+                value = training_goal.get(key)
+                rendered = (
+                    _profile_free_text(value, free_text_cap)
+                    if isinstance(value, str) and value
+                    else "Not set"
+                )
+                lines.append(f"{label}: {rendered}")
+            lines.append(
+                f"Event date: {_readable_date(training_goal.get('event_date'))}"
+            )
+            lines.append(f"Status: {_plain_display(training_goal.get('status'))}")
+        if isinstance(equipment, (list, tuple)) and equipment:
+            rows: list[tuple[str, str, str]] = []
+            for item in equipment:
+                if isinstance(item, Mapping):
+                    rows.append(
+                        (
+                            _plain_display(item.get("discipline")),
+                            str(item.get("display_name") or "Not set"),
+                            _plain_display(item.get("importance")),
+                        )
+                    )
+                else:
+                    rows.append(("Not set", str(item), "Not set"))
+            lines.extend(
+                [
+                    "",
+                    "<b>Equipment access</b>",
+                    _html_pre_table(
+                        ("Discipline", "Equipment", "Importance"),
+                        rows,
+                        (11, 27, 11),
+                    ),
+                ]
+            )
+        else:
+            lines.extend(["", "Equipment access: Not set"])
+        return "\n".join(lines)
+
+    message = render(None)
+    if len(message) <= TELEGRAM_MESSAGE_LIMIT:
+        return message
+    low, high = 0, max(map(len, free_text_values), default=0)
+    while low < high:
+        midpoint = (low + high + 1) // 2
+        if len(render(midpoint)) <= TELEGRAM_MESSAGE_LIMIT:
+            low = midpoint
+        else:
+            high = midpoint - 1
+    return _assert_telegram_length(render(low))
+
+
+def _profile_free_text(value: str, cap: int | None) -> str:
+    if value == "NONE_REPORTED":
+        return "None reported"
+    if cap is not None and len(value) > cap:
+        return escape(value[:cap] + _TRUNCATED_MARKER)
+    return escape(value)
+
+
+def profile_setting_prompt(
+    step: ProfileSettingsStep,
+    current_value: str | int | float | None,
+    prompt: str,
+) -> str:
+    """Add the saved value to an edit prompt without changing stored data."""
+
+    labels = {
+        ProfileSettingsStep.GOAL_MAIN: "Current goal",
+        ProfileSettingsStep.GOAL_OUTCOME: "Current outcome",
+        ProfileSettingsStep.GOAL_DATE: "Current event date",
+        ProfileSettingsStep.GOAL_SECONDARY: "Current secondary priority",
+        ProfileSettingsStep.AVAILABILITY: "Current availability",
+        ProfileSettingsStep.HEALTH: "Current training limitations",
+        ProfileSettingsStep.PERSONAL_BIRTH_YEAR: "Current birth year",
+        ProfileSettingsStep.PERSONAL_GENDER: "Current category",
+        ProfileSettingsStep.PERSONAL_WEIGHT: "Current weight",
+        ProfileSettingsStep.PERSONAL_HEIGHT: "Current height",
+    }
+    label = labels.get(step)
+    if label is None:
+        return prompt
+    display = _profile_setting_value(step, current_value)
+    prefix = f"<b>{escape(label)}:</b>\n<pre>"
+    suffix = f"</pre>\n\n{prompt}"
+    budget = TELEGRAM_MESSAGE_LIMIT - len(prefix) - len(suffix)
+    rendered = escape(display)
+    if len(rendered) > budget:
+        rendered = _escaped_prefix(display, budget - len(_TRUNCATED_MARKER))
+        rendered += escape(_TRUNCATED_MARKER)
+    return _assert_telegram_length(prefix + rendered + suffix)
+
+
+def _profile_setting_value(
+    step: ProfileSettingsStep, value: str | int | float | None
+) -> str:
+    if value is None or value == "":
+        return "Not set"
+    if step is ProfileSettingsStep.GOAL_DATE:
+        try:
+            parsed = date.fromisoformat(str(value))
+        except ValueError:
+            return "Not set"
+        return f"{parsed.strftime('%B %d, %Y')} ({parsed.isoformat()})"
+    if step is ProfileSettingsStep.PERSONAL_WEIGHT:
+        return f"{value} kg"
+    if step is ProfileSettingsStep.PERSONAL_HEIGHT:
+        return f"{value} cm"
+    if step is ProfileSettingsStep.PERSONAL_GENDER:
+        return _plain_display(value)
+    if step is ProfileSettingsStep.HEALTH and str(value) == "NONE_REPORTED":
+        return "None reported"
+    return str(value)
+
+
+def _readable_date(value: Any) -> str:
+    if isinstance(value, datetime):
+        value = value.date()
+    if isinstance(value, date):
+        return f"{value.strftime('%B %d, %Y')} ({value.isoformat()})"
+    if isinstance(value, str):
+        try:
+            parsed = date.fromisoformat(value)
+        except ValueError:
+            return "Not set"
+        return f"{parsed.strftime('%B %d, %Y')} ({parsed.isoformat()})"
+    return "Not set"
+
+
+def _html_pre_table(
+    headers: Sequence[str],
+    rows: Sequence[Sequence[str]],
+    widths: Sequence[int],
+) -> str:
+    normalized = [
+        [_table_cell(value, width) for value, width in zip(row, widths, strict=True)]
+        for row in (headers, *rows)
+    ]
+    lines = [
+        "  ".join(value.ljust(width) for value, width in zip(row, widths, strict=True))
+        for row in normalized
+    ]
+    separator = "  ".join("-" * width for width in widths)
+    lines.insert(1, separator)
+    return f"<pre>{escape(chr(10).join(lines))}</pre>"
+
+
+def _table_cell(value: Any, width: int) -> str:
+    cleaned = " ".join(str(value).split())
+    if len(cleaned) <= width:
+        return cleaned
+    return cleaned[: max(0, width - 1)] + "\u2026"
+
+
+def _plain_display(value: Any) -> str:
+    if value is None or value == "":
+        return "Not set"
+    raw = getattr(value, "value", value)
+    return str(raw).replace("_", " ").title()
+
+
+def _escaped_prefix(value: str, budget: int) -> str:
+    if budget <= 0:
+        return ""
+    low, high = 0, len(value)
+    while low < high:
+        midpoint = (low + high + 1) // 2
+        if len(escape(value[:midpoint])) <= budget:
+            low = midpoint
+        else:
+            high = midpoint - 1
+    return escape(value[:low])
+
+
+def _assert_telegram_length(message: str) -> str:
+    if len(message) > TELEGRAM_MESSAGE_LIMIT:
+        raise ValueError("Telegram message exceeds 4,096 characters")
+    return message
 
 
 def _html_page(

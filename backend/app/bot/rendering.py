@@ -26,3 +26,4 @@ class TelegramResponse:
     edit_existing: bool = False
     button_rows: tuple[tuple[TelegramButtonSpec, ...], ...] = ()
     clear_agent_thread: bool = False
+    refresh_user_keyboard: bool = False

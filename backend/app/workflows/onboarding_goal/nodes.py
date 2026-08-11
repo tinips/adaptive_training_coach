@@ -114,17 +114,6 @@ class UpdateOnboardingSchema(BaseModel):
             "without summarising, translating, or normalising it."
         ),
     )
-    equipment_text: str | None = Field(
-        default=None,
-        min_length=1,
-        max_length=4096,
-        description=(
-            "The athlete's available equipment or equipment limitation exactly "
-            "as stated. Use ALL_RECOMMENDED only when the athlete explicitly "
-            "states that they have all recommended equipment; otherwise preserve "
-            "their supplied wording without rewriting it."
-        ),
-    )
     health_limitations_text: str | None = Field(
         default=None,
         min_length=1,
@@ -311,7 +300,7 @@ def build_onboarding_modification_messages(user_text: str) -> list[BaseMessage]:
         tool_name="update_onboarding_data",
         supported_fields=(
             "main goal, target outcome, event date, age, birth year, gender, "
-            "weight, height, availability, equipment, and training limitations"
+            "weight, height, availability, and training limitations"
         ),
     )
     return [
@@ -320,13 +309,11 @@ def build_onboarding_modification_messages(user_text: str) -> list[BaseMessage]:
                 f"{change_policy}Today's date is: "
                 f"{current_date}. "
                 f"{future_event_date_policy('onboarding_modification')}"
-                "Availability, equipment, and training limitations can each be "
-                "updated independently. For availability_text, equipment_text, or "
-                "health_limitations_text, copy only the relevant user-supplied "
+                "Availability and training limitations can each be updated "
+                "independently. For availability_text or health_limitations_text, "
+                "copy only the relevant user-supplied "
                 "value from the latest request byte-for-byte. Never summarise, "
                 "translate, infer, trim, or otherwise rewrite it. Use "
-                "equipment_text='ALL_RECOMMENDED' only if the athlete explicitly "
-                "states that they have all recommended equipment. Use "
                 "health_limitations_text='NONE_REPORTED' only if the athlete "
                 "explicitly states that they have no injuries or training "
                 "limitations. Do not change related profile or goal fields unless "

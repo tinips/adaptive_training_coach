@@ -33,17 +33,14 @@ from app.integrations.llm.models import (
 from app.repositories.onboarding import OnboardingRepository
 from app.repositories.profiles import ProfileRepository
 from app.schemas.common import TelegramIdentity
-from app.schemas.onboarding_context import (
-    EquipmentRecommendationGoalContext,
-    EquipmentRecommendationWorkflowResult,
-    FreeTextValidationWorkflowResult,
-)
+from app.schemas.onboarding_context import FreeTextValidationWorkflowResult
 from app.schemas.onboarding_goal import (
     GoalExtractionWorkflowResult,
     OnboardingModificationWorkflowResult,
     OnboardingUpdateHandler,
 )
 from app.services.onboarding import OnboardingApplicationError, OnboardingService
+from tests.equipment_seed import seed_equipment_catalog
 
 
 @pytest_asyncio.fixture
@@ -54,6 +51,8 @@ async def goal_database() -> AsyncIterator[
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
+    async with factory.begin() as session:
+        await seed_equipment_catalog(session)
     yield engine, factory
     await engine.dispose()
 
@@ -104,22 +103,14 @@ class QueueContextWorkflow:
     """Deterministic LangGraph boundary substitute for service-flow tests."""
 
     validations: list[FreeTextValidationWorkflowResult] = field(default_factory=list)
-    recommendations: list[EquipmentRecommendationWorkflowResult] = field(
-        default_factory=list,
-    )
     validation_calls: list[tuple[OnboardingStep, str]] = field(default_factory=list)
-    recommendation_calls: list[EquipmentRecommendationGoalContext] = field(
-        default_factory=list,
-    )
 
     async def validate_free_text(
         self,
         *,
         step: OnboardingStep,
         user_text: str,
-        goal_context: EquipmentRecommendationGoalContext | None = None,
     ) -> FreeTextValidationWorkflowResult:
-        del goal_context
         self.validation_calls.append((step, user_text))
         if self.validations:
             return self.validations.pop(0)
@@ -130,35 +121,10 @@ class QueueContextWorkflow:
         *,
         step: OnboardingStep,
         user_text: str,
-        goal_context: EquipmentRecommendationGoalContext | None = None,
     ) -> FreeTextValidationWorkflowResult:
         return await self.validate_free_text(
             step=step,
             user_text=user_text,
-            goal_context=goal_context,
-        )
-
-    async def recommend_equipment(
-        self,
-        *,
-        main_goal: str | None,
-        target_outcome: str | None,
-        event_date: date | None,
-        secondary_priority: str | None,
-    ) -> EquipmentRecommendationWorkflowResult:
-        self.recommendation_calls.append(
-            EquipmentRecommendationGoalContext(
-                main_goal=main_goal,
-                target_outcome=target_outcome,
-                event_date=event_date,
-                secondary_priority=secondary_priority,
-            )
-        )
-        if self.recommendations:
-            return self.recommendations.pop(0)
-        return EquipmentRecommendationWorkflowResult(
-            outcome="recommended",
-            recommendation="Running shoes, suitable clothing, and a watch or timer.",
         )
 
 
@@ -544,20 +510,7 @@ async def test_confirmation_persists_goal_then_requires_context_before_completio
             )
         ]
     )
-    context = QueueContextWorkflow(
-        recommendations=[
-            EquipmentRecommendationWorkflowResult(
-                outcome="recommended",
-                recommendation=(
-                    "Road-running shoes, weather-appropriate clothing, and a timer."
-                ),
-            ),
-            EquipmentRecommendationWorkflowResult(
-                outcome="recommended",
-                recommendation="Triathlon-specific essentials for the revised goal.",
-            ),
-        ]
-    )
+    context = QueueContextWorkflow()
     onboarding = service(factory, extractor, context)
     athlete = identity(6206)
     await start_goal(onboarding, athlete)
@@ -569,7 +522,7 @@ async def test_confirmation_persists_goal_then_requires_context_before_completio
         athlete,
         "Tuesday and Thursday after work, plus a longer Saturday session.",
     )
-    limitations = await onboarding.choose_equipment(athlete, "all")
+    limitations = await onboarding.choose_equipment(athlete, "done")
     completed = await onboarding.choose_health_limitations(athlete, "none")
 
     assert draft.kind == "goal_confirmation"
@@ -604,10 +557,6 @@ async def test_confirmation_persists_goal_then_requires_context_before_completio
         assert profile_context.availability_text == (
             "Tuesday and Thursday after work, plus a longer Saturday session."
         )
-        assert profile_context.equipment_recommendation_text == (
-            "Road-running shoes, weather-appropriate clothing, and a timer."
-        )
-        assert profile_context.equipment_text == "ALL_RECOMMENDED"
         assert profile_context.health_limitations_text == "NONE_REPORTED"
 
     updated = await onboarding.update_onboarding_data(
@@ -637,10 +586,6 @@ async def test_confirmation_persists_goal_then_requires_context_before_completio
             user_id=completed.user_id,
         )
         assert profile_context is not None
-        assert profile_context.equipment_recommendation_text == (
-            "Triathlon-specific essentials for the revised goal."
-        )
-        assert profile_context.equipment_text is None
         onboarding_state = await OnboardingRepository(session).require_for_user(
             user_id=completed.user_id,
         )
@@ -649,7 +594,7 @@ async def test_confirmation_persists_goal_then_requires_context_before_completio
 
 
 @pytest.mark.asyncio
-async def test_completed_athlete_goal_modification_uses_owned_service_update(
+async def test_completed_athlete_requires_explicit_profile_settings_flow(
     goal_database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
 ) -> None:
     _, factory = goal_database
@@ -669,18 +614,7 @@ async def test_completed_athlete_goal_modification_uses_owned_service_update(
             }
         ],
     )
-    context = QueueContextWorkflow(
-        recommendations=[
-            EquipmentRecommendationWorkflowResult(
-                outcome="recommended",
-                recommendation="Shoes and a timer for marathon preparation.",
-            ),
-            EquipmentRecommendationWorkflowResult(
-                outcome="recommended",
-                recommendation="Swim, bike, run essentials for Ironman preparation.",
-            ),
-        ]
-    )
+    context = QueueContextWorkflow()
     onboarding = service(factory, extractor, context)
     athlete = identity(6210)
     await start_goal(onboarding, athlete)
@@ -690,37 +624,12 @@ async def test_completed_athlete_goal_modification_uses_owned_service_update(
     )
     await onboarding.confirm_goal(athlete)
     await onboarding.handle_text(athlete, "Tuesday, Thursday, and Sunday mornings.")
-    await onboarding.choose_equipment(athlete, "all")
-    completed = await onboarding.choose_health_limitations(athlete, "none")
+    await onboarding.choose_equipment(athlete, "done")
+    await onboarding.choose_health_limitations(athlete, "none")
 
     request = "change my goal to finish my ironman 70.3 in a decent time"
-    result = await onboarding.handle_text(athlete, request)
-
-    assert result.kind == "equipment_intake"
-    assert result.current_step is OnboardingStep.EQUIPMENT_INTAKE
-    assert result.onboarding_status is OnboardingStatus.ACTIVE
-    assert result.user_status is UserStatus.ONBOARDING_IN_PROGRESS
-    assert extractor.modification_calls == [(completed.user_id, request)]
-    async with factory() as session:
-        goal = await ProfileRepository(session).get_training_goal(
-            user_id=completed.user_id
-        )
-        assert goal is not None
-        assert goal.main_goal == "Finish an Ironman 70.3"
-        assert goal.target_outcome == "Finish in a decent time"
-        assert goal.original_description == (
-            "I want to complete a marathon and finish safely."
-        )
-        profile = await ProfileRepository(session).get_athlete_profile(
-            user_id=completed.user_id
-        )
-        assert profile is not None
-        assert profile.age == 35
-        assert profile.weight_kg == 75.25
-        assert profile.equipment_recommendation_text == (
-            "Swim, bike, run essentials for Ironman preparation."
-        )
-        assert profile.equipment_text is None
+    with pytest.raises(OnboardingApplicationError, match="profile_settings_required"):
+        await onboarding.handle_text(athlete, request)
 
 
 @pytest.mark.asyncio
@@ -736,14 +645,7 @@ async def test_other_equipment_and_described_limitations_retain_literal_text(
             )
         ]
     )
-    context = QueueContextWorkflow(
-        recommendations=[
-            EquipmentRecommendationWorkflowResult(
-                outcome="recommended",
-                recommendation="Trail shoes, hydration, and weather layers.",
-            )
-        ]
-    )
+    context = QueueContextWorkflow()
     onboarding = service(factory, extractor, context)
     athlete = identity(6211)
     await start_goal(onboarding, athlete)
@@ -756,25 +658,17 @@ async def test_other_equipment_and_described_limitations_retain_literal_text(
     availability_text = "  Tuesday evenings; Saturday 2 hours; Sunday recovery.  "
     equipment = await onboarding.handle_text(athlete, availability_text)
     validation_count_before_callbacks = len(context.validation_calls)
-    recommendation_count_before_callbacks = len(context.recommendation_calls)
-    equipment_details = await onboarding.choose_equipment(athlete, "other")
-    equipment_text = "  I have trail shoes and a bottle, but no poles.\n"
-    health = await onboarding.handle_text(athlete, equipment_text)
-    describe = await onboarding.choose_health_limitations(athlete, "describe")
+    health = await onboarding.choose_equipment(athlete, "done")
     health_text = "  Recovering from a previous ankle sprain; avoid steep descents.  "
     completed = await onboarding.handle_text(athlete, health_text)
 
     assert confirmed.kind == "availability_intake"
     assert equipment.kind == "equipment_intake"
-    assert equipment_details.kind == "equipment_details_intake"
     assert health.kind == "health_limitations_intake"
-    assert describe.kind == "health_limitations_intake"
     assert completed.kind == "onboarding_completed"
     # Deterministic callbacks did not call either LangGraph method.
     assert validation_count_before_callbacks == 1
-    assert recommendation_count_before_callbacks == 1
-    assert len(context.validation_calls) == 3
-    assert len(context.recommendation_calls) == 1
+    assert len(context.validation_calls) == 2
 
     async with factory() as session:
         profile_context = await ProfileRepository(session).get_athlete_profile_context(
@@ -782,15 +676,11 @@ async def test_other_equipment_and_described_limitations_retain_literal_text(
         )
         assert profile_context is not None
         assert profile_context.availability_text == availability_text
-        assert profile_context.equipment_recommendation_text == (
-            "Trail shoes, hydration, and weather layers."
-        )
-        assert profile_context.equipment_text == equipment_text
         assert profile_context.health_limitations_text == health_text
 
 
 @pytest.mark.asyncio
-async def test_recommendation_failure_keeps_availability_and_can_resume_and_retry(
+async def test_equipment_review_is_deterministic_and_resumes_without_provider(
     goal_database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
 ) -> None:
     _, factory = goal_database
@@ -802,18 +692,7 @@ async def test_recommendation_failure_keeps_availability_and_can_resume_and_retr
             )
         ]
     )
-    context = QueueContextWorkflow(
-        recommendations=[
-            EquipmentRecommendationWorkflowResult(
-                outcome="provider_error",
-                error_code="temporary_provider_failure",
-            ),
-            EquipmentRecommendationWorkflowResult(
-                outcome="recommended",
-                recommendation="Shoes, comfortable kit, and hydration for long runs.",
-            ),
-        ]
-    )
+    context = QueueContextWorkflow()
     onboarding = service(factory, extractor, context)
     athlete = identity(6212)
     await start_goal(onboarding, athlete)
@@ -826,27 +705,20 @@ async def test_recommendation_failure_keeps_availability_and_can_resume_and_retr
     availability_text = "Monday and Wednesday for 45 minutes, Sunday long run."
     failed = await onboarding.handle_text(athlete, availability_text)
     resumed = await onboarding.start(athlete)
-    retried = await onboarding.handle_text(athlete, "Please retry the suggestion.")
-
-    assert failed.kind == "equipment_recommendation"
-    assert failed.error_code == "temporary_provider_failure"
-    assert failed.current_step is OnboardingStep.EQUIPMENT_RECOMMENDATION
-    assert resumed.kind == "equipment_recommendation"
-    assert resumed.current_step is OnboardingStep.EQUIPMENT_RECOMMENDATION
-    assert retried.kind == "equipment_intake"
-    assert retried.current_step is OnboardingStep.EQUIPMENT_INTAKE
+    assert failed.kind == "equipment_intake"
+    assert failed.error_code is None
+    assert failed.current_step is OnboardingStep.EQUIPMENT_INTAKE
+    assert resumed.kind == "equipment_intake"
+    assert resumed.current_step is OnboardingStep.EQUIPMENT_INTAKE
+    assert resumed.equipment_review is not None
     assert len(context.validation_calls) == 1
-    assert len(context.recommendation_calls) == 2
 
     async with factory() as session:
         profile_context = await ProfileRepository(session).get_athlete_profile_context(
-            user_id=retried.user_id,
+            user_id=resumed.user_id,
         )
         assert profile_context is not None
         assert profile_context.availability_text == availability_text
-        assert profile_context.equipment_recommendation_text == (
-            "Shoes, comfortable kit, and hydration for long runs."
-        )
 
 
 @pytest.mark.asyncio
@@ -912,36 +784,25 @@ async def test_stale_context_callbacks_cannot_skip_the_required_free_text_step(
     confirmed = await onboarding.confirm_goal(athlete)
 
     with pytest.raises(OnboardingApplicationError, match="stale_action"):
-        await onboarding.choose_equipment(athlete, "all")
+        await onboarding.choose_equipment(athlete, "done")
     with pytest.raises(OnboardingApplicationError, match="stale_action"):
         await onboarding.choose_health_limitations(athlete, "none")
 
     assert confirmed.current_step is OnboardingStep.AVAILABILITY_INTAKE
     assert context.validation_calls == []
-    assert context.recommendation_calls == []
 
 
 @pytest.mark.asyncio
-async def test_completed_chat_edit_updates_only_raw_context_fields(
+async def test_completed_chat_edit_requires_explicit_profile_settings_flow(
     goal_database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
 ) -> None:
     _, factory = goal_database
-    availability_text = "Monday before work and Saturday afternoon."
-    equipment_text = "I only have a treadmill and resistance bands."
-    health_text = "Avoid impact while my calf settles."
     extractor = QueueGoalExtractor(
         [
             extracted(
                 main_goal="Build a consistent running habit",
                 target_outcome="Run three times a week",
             )
-        ],
-        modification_updates=[
-            {
-                "availability_text": availability_text,
-                "equipment_text": equipment_text,
-                "health_limitations_text": health_text,
-            }
         ],
     )
     context = QueueContextWorkflow()
@@ -954,23 +815,11 @@ async def test_completed_chat_edit_updates_only_raw_context_fields(
     )
     await onboarding.confirm_goal(athlete)
     await onboarding.handle_text(athlete, "Tuesday, Thursday, and Saturday.")
-    await onboarding.choose_equipment(athlete, "all")
-    completed = await onboarding.choose_health_limitations(athlete, "none")
+    await onboarding.choose_equipment(athlete, "done")
+    await onboarding.choose_health_limitations(athlete, "none")
 
-    result = await onboarding.handle_text(
-        athlete,
-        "Update my availability, equipment, and training limitations.",
-    )
-
-    assert result.kind == "onboarding_modification"
-    assert result.onboarding_status is OnboardingStatus.COMPLETED
-    assert result.current_step is OnboardingStep.HEALTH_LIMITATIONS_INTAKE
-    assert len(context.recommendation_calls) == 1
-    async with factory() as session:
-        profile_context = await ProfileRepository(session).get_athlete_profile_context(
-            user_id=completed.user_id,
+    with pytest.raises(OnboardingApplicationError, match="profile_settings_required"):
+        await onboarding.handle_text(
+            athlete,
+            "Update my availability and training limitations.",
         )
-        assert profile_context is not None
-        assert profile_context.availability_text == availability_text
-        assert profile_context.equipment_text == equipment_text
-        assert profile_context.health_limitations_text == health_text

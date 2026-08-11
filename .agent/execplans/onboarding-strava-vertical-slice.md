@@ -1911,3 +1911,106 @@ personalisation.
   back to `Change profile`; do not call the global onboarding-update path.
 - [x] Preserve the completed lifecycle while equipment editing preloads and
   replaces goal-revision-scoped availability statuses.
+
+## 2026-08-11 equipment catalog redesign — Release A
+
+- [x] Add revision `0017_equipment_catalog` with deterministic catalog IDs,
+  five-discipline reference data, JSON substitutions, global athlete access,
+  current-revision `AVAILABLE` backfill, and stale-session normalization.
+- [x] Switch the ORM, repository, onboarding, profile settings, `/profile`, and
+  Telegram checklist to `equipment_catalog` and `athlete_equipment`.
+- [x] Replace event/stage/revision matching with bounded deterministic goal-to-
+  discipline aliases and substitution-aware, non-blocking gap summaries.
+- [x] Remove equipment recommendation and interpretation from the LangGraph/LLM
+  contracts, raw update tools, mocks, and the equipment-details intake state.
+- [x] Add focused resolver, substitution, catalog-integrity, replacement,
+  isolation, migration-backfill, session-normalization, resume, and stale-
+  callback regressions.
+- [x] Keep the obsolete `0014` tables and raw profile columns physically present
+  for Release A rollback compatibility while removing their active ORM/runtime
+  use.
+- [x] Validate Release A with `201 passed, 3 skipped`, Ruff, format, mypy,
+  populated PostgreSQL `0016 -> 0017`, a fresh migration chain, rebuilt healthy
+  API/bot containers, and the local health endpoint. The three skipped tests
+  require explicit live-agent execution.
+- [x] Perform Release B backup and mixed-version verification, then add the
+  separately authorized destructive cleanup migration. This is intentionally
+  not part of Release A.
+
+## 2026-08-11 equipment cleanup — Release B
+
+- [x] Verify current explicit-available source counts and unmatched codes, then
+  create and validate the pre-cleanup PostgreSQL custom-format backup outside
+  the repository.
+- [x] Add guarded revision `0018_remove_obsolete_equipment`: rerun and verify the
+  final backfill, abort on unknown source codes, normalize obsolete details
+  checkpoints, tighten step checks, and remove all obsolete tables and columns.
+- [x] Validate both a restored populated `0017 -> 0018` database and a fresh
+  migration chain through `0018`; both retain the 26-row catalog and no obsolete
+  equipment storage.
+- [x] Validate the final state with `202 passed, 3 skipped`, Ruff, format, mypy,
+  Alembic head `0018`, rebuilt healthy API/bot containers, and `/ready`.
+
+## 2026-08-11 Telegram equipment and profile UI
+
+- [x] Keep equipment substitutions and recommendation gaps structured through
+  the application boundary, then render grouped escaped HTML `<pre>` tables for
+  onboarding, profile settings, gap summaries, and `/profile`.
+- [x] Bound table cells with ellipses and enforce Telegram's 4,096-character
+  message limit; truncate only oversized current-value presentation with an
+  explicit marker.
+- [x] Add lifecycle reply keyboards for absent, onboarding/cancelled, completed,
+  and deleted accounts, with exact deterministic routes for `Start`, `Resume`,
+  `Profile`, `Change profile`, and `Delete`.
+- [x] Populate typed current values for every editable field and reconstruct
+  those values when profile-settings sessions resume. Equipment displays its
+  selected state as the current value.
+- [x] Add focused renderer and full-journey regressions for table structure,
+  escaping, substitutions, message length, lifecycle menus, deterministic
+  button routing, deletion reset, and current-value presentation.
+- [x] Validate with `207 passed, 3 skipped`, Ruff, format, mypy, Alembic head
+  `0018`, rebuilt healthy API/bot containers, and `/ready`. The skipped tests
+  require explicit live-agent credentials.
+- [x] Fix the discovered profile-edit navigation collision: text edit prompts
+  now emit `ps:v1:done` instead of onboarding's `ob:v1:cancel`, and every
+  `Back / Done` action renders an explicit closed-state confirmation.
+
+## 2026-08-11 complete training-goal profile controls
+
+- [x] Add the canonical goal's main goal, outcome, event date, secondary
+  priority, original description, and status to the owned `/profile` view.
+- [x] Extend the deterministic Goal editor through secondary priority and
+  original description, including saved-value presentation and an explicit
+  `None` action for the optional secondary priority.
+- [x] Keep the single `CONFIRMED` status and technical ID, ownership, and audit
+  fields system-managed rather than exposing unsafe edits.
+- [x] Add migration `0019_expand_goal_settings` for the two durable settings
+  states and validate PostgreSQL `0018 -> 0019 -> 0018 -> 0019`.
+- [x] Validate with `209 passed, 3 skipped`, Ruff, format, mypy, migration head
+  `0019_expand_goal_settings`, rebuilt API/bot containers, and `/ready`. The
+  skipped tests remain the credential-gated live-agent checks.
+- [x] Replace the undiscoverable sequential Goal flow with an explicit submenu
+  for main goal, target outcome, event date, secondary priority, and original
+  description. Each action now edits only the selected field and returns through
+  deterministic `ps:v1:goal:*` callbacks.
+- [x] Add and round-trip migration `0020_add_goal_menu` for the durable submenu
+  state.
+- [x] Validate the submenu release with `210 passed, 3 skipped`, Ruff, format,
+  mypy, migration head `0020_add_goal_menu`, rebuilt API/bot containers, and
+  `/ready`.
+- [x] Correct the goal-setting boundary: keep `original_description` visible as
+  immutable onboarding provenance, remove its UI/repository update path, and add
+  migration `0021_remove_goal_description` to normalize any active description
+  editor back to the Goal menu.
+- [x] Validate the correction with `210 passed, 3 skipped`, static checks,
+  migration round-trip through head `0021_remove_goal_description`, and rebuilt
+  healthy runtime containers.
+- [x] Remove `original_description` from the `/profile` presentation boundary;
+  retain it only as internal immutable onboarding provenance.
+
+## 2026-08-11 Telegram private-user allowlist
+
+- [x] Add `TELEGRAM_ALLOWED_USER_IDS` parsing and enforce it before commands,
+  text, callbacks, and document uploads reach application services. An empty
+  allowlist in the production application denies all Telegram users.
+- [x] Document the setting and validate the Telegram handler/application tests.
