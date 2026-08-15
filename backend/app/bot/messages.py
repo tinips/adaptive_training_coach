@@ -8,7 +8,7 @@ from html import escape
 from typing import Any
 
 from app.domain.enums import ProfileSettingsStep
-from app.schemas.equipment import EquipmentReview, EquipmentSuggestionSummary
+from app.schemas.capabilities import CapabilityReview, GoalExecutionAssessment
 
 TELEGRAM_MESSAGE_LIMIT = 4096
 _TRUNCATED_MARKER = "\u2026 [truncated for Telegram]"
@@ -152,6 +152,11 @@ HEALTH_LIMITATIONS_INTAKE = (
     "Write any current or past injuries, discomfort, or physical limitations that "
     "should influence training, or choose None. This is not medical advice."
 )
+TRAINING_HISTORY_IMPORT = (
+    "Optional: import your workout history so future coaching can use your actual "
+    "training data. Send an Apple Health export ZIP or a TCX workout file, or "
+    "choose Skip for now. Only workout data is imported."
+)
 CONTEXT_VALIDATION_ERROR = (
     "Please send a short answer for this part of your athlete profile."
 )
@@ -159,76 +164,54 @@ EQUIPMENT_UNMATCHED = (
     "I do not have a tailored equipment catalog for that goal yet, so equipment "
     "will not block your onboarding."
 )
+GOAL_CLASSIFICATION_REQUIRED = (
+    "Before Equipment & access, I need to classify your existing goal with the "
+    "new training catalog. Send any message to continue; your saved goal and "
+    "availability will be preserved."
+)
 
 
-def equipment_review(review: EquipmentReview) -> str:
-    """Render deterministic catalog importance before selection."""
+def equipment_review(review: CapabilityReview) -> str:
+    """Render goal-scoped equipment and access capability choices."""
 
-    sections: list[str] = []
-    for discipline in review.disciplines:
-        rows = [
-            (
-                "[x]" if item.selected else "[ ]",
-                item.display_name,
-                item.importance.value.title(),
-                ", ".join(item.substitutions) or "\u2014",
-            )
-            for item in review.options
-            if item.discipline is discipline
-        ]
-        if rows:
-            sections.append(
-                f"<b>{escape(discipline.value.title())}</b>\n"
-                + _html_pre_table(
-                    ("Have", "Equipment", "Importance", "Alternatives"),
-                    rows,
-                    (4, 24, 11, 25),
-                )
-            )
+    contexts = ", ".join(item.display_name for item in review.contexts)
+    rows = [
+        (
+            "[x]" if item.selected else "[ ]",
+            item.display_name,
+            item.kind.value.title(),
+            "/".join(role.value.title() for role in item.execution_roles),
+        )
+        for item in review.options
+    ]
     message = (
-        "Select every item or facility you can currently use. Essential means "
-        "needed to train the discipline; a listed alternative can satisfy it.\n\n"
-        + "\n\n".join(sections)
+        "Select every resource you can currently use. These choices are relevant "
+        f"to: {escape(contexts)}.\n\n"
+        + _html_pre_table(
+            ("Have", "Resource", "Type", "Role"),
+            rows,
+            (4, 25, 10, 20),
+        )
     )
     return _assert_telegram_length(message)
 
 
-def equipment_summary(summary: EquipmentSuggestionSummary) -> str:
-    """Render the compact, non-blocking gap summary."""
+def equipment_summary(summary: GoalExecutionAssessment) -> str:
+    """Render the compact deterministic execution assessment."""
 
-    status = (
-        "You have access to the essentials needed to start."
-        if summary.can_start
-        else "You can continue, but there are equipment gaps to address."
-    )
     rows = [
         (
-            "Essential",
-            item.discipline.value.title(),
-            item.display_name,
-            ", ".join(item.substitutions) or "\u2014",
+            item.target_display_name,
+            item.status.value.replace("_", " ").title(),
+            item.default_execution or "\u2014",
+            ", ".join(item.missing_required) or "\u2014",
         )
-        for item in summary.missing_essentials
+        for item in summary.contexts
     ]
-    rows.extend(
-        (
-            "Recommended",
-            item.discipline.value.title(),
-            item.display_name,
-            ", ".join(item.substitutions) or "\u2014",
-        )
-        for item in summary.missing_recommended
-    )
-    if not rows:
-        return status
-    message = (
-        status
-        + "\n\n"
-        + _html_pre_table(
-            ("Gap", "Discipline", "Equipment", "Alternatives"),
-            rows,
-            (11, 10, 22, 24),
-        )
+    message = "Equipment & access summary\n\n" + _html_pre_table(
+        ("Context", "Status", "Execution", "Missing"),
+        rows,
+        (18, 23, 18, 22),
     )
     return _assert_telegram_length(message)
 
@@ -245,6 +228,9 @@ PROFILE_GOAL_OUTCOME = "What would success or the outcome look like?"
 PROFILE_GOAL_DATE = "When is the event? Send YYYY-MM-DD, or choose Not yet."
 PROFILE_GOAL_SECONDARY = (
     "What secondary priority should this goal preserve, or choose None?"
+)
+PROFILE_GOAL_CLASSIFICATION_FAILED = (
+    "I could not safely expand that goal type. Nothing was changed. You can retry."
 )
 PROFILE_AVAILABILITY = "Describe your weekly training availability."
 PROFILE_HEALTH = "Write any training limitations, or choose None."
@@ -297,6 +283,19 @@ def goal_confirmation(answers: Mapping[str, Any]) -> str:
     target_outcome = escape(str(draft.get("target_outcome") or "Not specified"))
     secondary = escape(str(draft.get("secondary_priority") or "Not specified"))
     raw_date = draft.get("event_date")
+    raw_primary = draft.get("primary_template")
+    raw_supporting = draft.get("supporting_template")
+    primary = (
+        escape(str(raw_primary.get("display_name") or raw_primary.get("code")))
+        if isinstance(raw_primary, Mapping)
+        else "Not classified"
+    )
+    supporting = (
+        escape(str(raw_supporting.get("display_name") or raw_supporting.get("code")))
+        if isinstance(raw_supporting, Mapping)
+        and raw_supporting.get("decision") not in {"NONE", "UNSUPPORTED"}
+        else "Not classified"
+    )
     event_date = "Not set"
     if isinstance(raw_date, str):
         try:
@@ -306,10 +305,34 @@ def goal_confirmation(answers: Mapping[str, Any]) -> str:
     return (
         "Here\u2019s what I understood:\n\n"
         f"Main goal\n{main_goal}\n\n"
+        f"Understood as\n{primary}\n\n"
         f"Event date\n{event_date}\n\n"
         f"Target outcome\n{target_outcome}\n\n"
         f"Secondary priority\n{secondary}\n\n"
+        f"Supporting type\n{supporting}\n\n"
         "To change anything just write."
+    )
+
+
+def profile_goal_classification_confirmation(
+    pending: Mapping[str, Any],
+) -> str:
+    raw_candidate = pending.get("classification_candidate")
+    candidate = raw_candidate if isinstance(raw_candidate, Mapping) else {}
+    proposed = escape(str(pending.get("proposed_text") or "Not specified"))
+    canonical = escape(
+        str(candidate.get("display_name") or candidate.get("code") or "Not classified")
+    )
+    field = (
+        "Main goal"
+        if pending.get("classification_field") == "primary"
+        else "Secondary priority"
+    )
+    return (
+        f"Confirm the new {field.casefold()}:\n\n"
+        f"Your wording\n{proposed}\n\n"
+        f"Understood as\n{canonical}\n\n"
+        "If this is a new type, confirming may expand the shared training catalog."
     )
 
 
@@ -349,6 +372,10 @@ VALIDATION_ERRORS: dict[str, str] = {
     ),
     "training_file_import_cancelled": (
         "The training-file import was cancelled. The temporary upload was deleted."
+    ),
+    "training_file_no_workouts": (
+        "That file did not contain any supported workouts. Try another file or "
+        "choose Skip for now."
     ),
     "import_interrupted": (
         "A previous training-file import was interrupted. Send the file again."
@@ -421,6 +448,51 @@ def apple_health_file_result(
         "Your training history was updated.",
     ]
     return "\n".join(lines)
+
+
+def training_file_result(
+    *,
+    file_format: object,
+    activities_imported: int,
+    activities_updated: int,
+    activities_skipped: int,
+) -> str:
+    if getattr(file_format, "value", file_format) == "TCX":
+        heading = "TCX workout imported"
+    else:
+        heading = "Apple Health history imported"
+    return "\n".join(
+        [
+            heading,
+            "",
+            f"Activities imported: {activities_imported}",
+            f"Activities updated: {activities_updated}",
+            f"Activities skipped: {activities_skipped}",
+            "",
+            "Your training history was updated.",
+        ]
+    )
+
+
+def onboarding_history_imported(
+    *,
+    file_format: object,
+    activities_imported: int,
+    activities_updated: int,
+    activities_skipped: int,
+) -> str:
+    return "\n".join(
+        [
+            training_file_result(
+                file_format=file_format,
+                activities_imported=activities_imported,
+                activities_updated=activities_updated,
+                activities_skipped=activities_skipped,
+            ),
+            "",
+            ONBOARDING_COMPLETED,
+        ]
+    )
 
 
 def tcx_workout_result(
@@ -505,8 +577,10 @@ def persisted_profile(profile: Mapping[str, Any]) -> str:
             lines.extend(["", "<b>Training goal</b>"])
             for label, key in (
                 ("Main goal", "main_goal"),
+                ("Primary template", "primary_template"),
                 ("Target outcome", "target_outcome"),
                 ("Secondary priority", "secondary_priority"),
+                ("Supporting template", "supporting_template"),
             ):
                 value = training_goal.get(key)
                 rendered = (
@@ -525,9 +599,9 @@ def persisted_profile(profile: Mapping[str, Any]) -> str:
                 if isinstance(item, Mapping):
                     rows.append(
                         (
-                            _plain_display(item.get("discipline")),
+                            _plain_display(item.get("kind")),
                             str(item.get("display_name") or "Not set"),
-                            _plain_display(item.get("importance")),
+                            str(item.get("code") or "Not set"),
                         )
                     )
                 else:
@@ -535,9 +609,9 @@ def persisted_profile(profile: Mapping[str, Any]) -> str:
             lines.extend(
                 [
                     "",
-                    "<b>Equipment access</b>",
+                    "<b>Equipment &amp; access</b>",
                     _html_pre_table(
-                        ("Discipline", "Equipment", "Importance"),
+                        ("Type", "Resource", "Code"),
                         rows,
                         (11, 27, 11),
                     ),

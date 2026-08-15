@@ -13,14 +13,20 @@ from langchain_core.messages import HumanMessage
 from app.bot import keyboards, messages
 from app.bot.service import CoachBotApplicationService
 from app.domain.enums import (
-    Discipline,
-    EquipmentImportance,
+    CapabilityImportance,
+    CapabilityKind,
+    ExecutionOptionRole,
+    GoalContextRole,
     OnboardingStatus,
     OnboardingStep,
     UserStatus,
 )
+from app.schemas.capabilities import (
+    CapabilityOption,
+    CapabilityReview,
+    CapabilityReviewContext,
+)
 from app.schemas.common import TelegramIdentity
-from app.schemas.equipment import EquipmentOption, EquipmentReview
 from app.schemas.onboarding_service import OnboardingResultKind, OnboardingServiceResult
 from app.schemas.profile_settings import ProfileSettingsResult, ProfileSettingsStep
 from app.services.onboarding import OnboardingApplicationError, OnboardingService
@@ -40,7 +46,7 @@ def _result(
     step: OnboardingStep,
     *,
     answers: dict[str, str] | None = None,
-    equipment_review: EquipmentReview | None = None,
+    capability_review: CapabilityReview | None = None,
 ) -> OnboardingServiceResult:
     return OnboardingServiceResult(
         kind=kind,
@@ -49,7 +55,7 @@ def _result(
         onboarding_status=OnboardingStatus.ACTIVE,
         current_step=step,
         answers=answers or {},
-        equipment_review=equipment_review,
+        capability_review=capability_review,
     )
 
 
@@ -102,15 +108,23 @@ async def test_equipment_callback_uses_only_deterministic_onboarding_method() ->
 @pytest.mark.asyncio
 async def test_stale_equipment_uuid_rerenders_current_durable_review() -> None:
     identity = _identity()
-    review = EquipmentReview(
-        disciplines=(Discipline.CYCLING,),
+    review = CapabilityReview(
+        contexts=(
+            CapabilityReviewContext(
+                code="cycling_road",
+                display_name="Road cycling",
+                role=GoalContextRole.TARGET,
+            ),
+        ),
         options=(
-            EquipmentOption(
+            CapabilityOption(
                 id=uuid4(),
-                discipline=Discipline.CYCLING,
-                equipment="stationary_bike",
+                code="stationary_bike",
                 display_name="Stationary bike",
-                importance=EquipmentImportance.OPTIONAL,
+                kind=CapabilityKind.EQUIPMENT,
+                importance=CapabilityImportance.REQUIRED,
+                execution_roles=(ExecutionOptionRole.SUBSTITUTE,),
+                target_context_codes=("cycling_road",),
                 selected=True,
             ),
         ),
@@ -123,7 +137,7 @@ async def test_stale_equipment_uuid_rerenders_current_durable_review() -> None:
             return_value=_result(
                 "equipment_intake",
                 OnboardingStep.EQUIPMENT_INTAKE,
-                equipment_review=review,
+                capability_review=review,
             )
         ),
     )
@@ -241,15 +255,23 @@ async def test_context_steps_render_the_correct_prompt_and_controls() -> None:
         _result(
             "equipment_intake",
             OnboardingStep.EQUIPMENT_INTAKE,
-            equipment_review=EquipmentReview(
-                disciplines=(Discipline.RUNNING,),
+            capability_review=CapabilityReview(
+                contexts=(
+                    CapabilityReviewContext(
+                        code="running_road",
+                        display_name="Road running",
+                        role=GoalContextRole.TARGET,
+                    ),
+                ),
                 options=(
-                    EquipmentOption(
+                    CapabilityOption(
                         id=uuid4(),
-                        discipline=Discipline.RUNNING,
-                        equipment="running_shoes",
+                        code="running_shoes",
                         display_name="Running shoes",
-                        importance=EquipmentImportance.ESSENTIAL,
+                        kind=CapabilityKind.EQUIPMENT,
+                        importance=CapabilityImportance.REQUIRED,
+                        execution_roles=(ExecutionOptionRole.PREFERRED,),
+                        target_context_codes=("running_road",),
                     ),
                 ),
             ),
@@ -275,7 +297,7 @@ async def test_context_steps_render_the_correct_prompt_and_controls() -> None:
     assert "ride for up to two hours" in availability.text
     assert availability.keyboard == keyboards.profile_text_input_keyboard()
     assert "Running shoes" in equipment.text
-    assert "Essential" in equipment.text
+    assert "Equipment" in equipment.text
     assert equipment.keyboard is not None
     assert details.text == messages.HEALTH_LIMITATIONS_INTAKE
     assert details.keyboard == keyboards.health_limitations_keyboard()

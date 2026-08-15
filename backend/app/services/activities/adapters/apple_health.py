@@ -7,7 +7,10 @@ from collections.abc import Mapping
 from app.domain.enums import ActivitySource, SwimmingEnvironment
 from app.integrations.apple_health.models import ParsedWorkout
 from app.schemas.workouts import PoolSwimmingDetailsData
-from app.services.activities.contracts import ActivityImportData
+from app.services.activities.contracts import (
+    ActivityImportData,
+    HeartRateObservationData,
+)
 from app.services.activities.normalization import swimming_environment, workout_title
 
 
@@ -18,6 +21,12 @@ def from_apple_health(workout: ParsedWorkout) -> ActivityImportData:
         "source_name": workout.source_name,
         "source_version": workout.source_version,
         "device": workout.device,
+        "creation_date": (
+            workout.creation_date.isoformat()
+            if workout.creation_date is not None
+            else None
+        ),
+        "workout_statistics": [dict(item) for item in workout.workout_statistics],
     }
     parsed_metadata = getattr(workout, "source_metadata", None)
     if isinstance(parsed_metadata, Mapping):
@@ -37,9 +46,7 @@ def from_apple_health(workout: ParsedWorkout) -> ActivityImportData:
     )
     return ActivityImportData(
         source=ActivitySource.APPLE_HEALTH,
-        # Apple exports do not expose a stable workout ID. The shared
-        # normalizer creates the deterministic exact-value fingerprint.
-        external_id=None,
+        external_id=workout.source_record_key,
         discipline=workout.discipline,
         raw_sport=workout.source_workout_type,
         raw_sub_sport=raw_sub_sport,
@@ -54,6 +61,18 @@ def from_apple_health(workout: ParsedWorkout) -> ActivityImportData:
         swimming_environment=environment,
         pool_details=pool_details,
         source_metadata=source_metadata,
+        heart_rate_observations=tuple(
+            HeartRateObservationData(
+                source=ActivitySource.APPLE_HEALTH,
+                source_record_key=item.source_record_key,
+                source_name=item.source_name,
+                started_at=item.started_at,
+                ended_at=item.ended_at,
+                beats_per_minute=item.beats_per_minute,
+                temporal_quality=item.temporal_quality,
+            )
+            for item in workout.observations
+        ),
     )
 
 

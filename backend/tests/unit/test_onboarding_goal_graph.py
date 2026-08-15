@@ -17,6 +17,7 @@ from app.domain.enums import OnboardingStep
 from app.integrations.llm.models import (
     GoalExtractionOutput,
     GoalExtractionPatch,
+    GoalTemplateSummary,
     StructuredModelResponse,
     StructuredOutputSchema,
 )
@@ -86,7 +87,6 @@ class StructuredGoalModel:
 def test_update_onboarding_schema_is_sparse_described_and_runtime_hidden() -> None:
     validated = UpdateOnboardingSchema()
     assert validated.model_dump(exclude={"runtime"}) == {
-        "main_goal": None,
         "target_outcome": None,
         "age": None,
         "birth_year": None,
@@ -101,7 +101,6 @@ def test_update_onboarding_schema_is_sparse_described_and_runtime_hidden() -> No
     schema = update_onboarding_data.tool_call_schema.model_json_schema()
     properties = schema["properties"]
     assert set(properties) == {
-        "main_goal",
         "target_outcome",
         "age",
         "birth_year",
@@ -139,17 +138,44 @@ def test_goal_extraction_prompt_uses_versioned_static_contract() -> None:
         action="UPDATE_EXISTING_GOAL",
         user_text="without stopping",
         existing_draft=None,
+        goal_catalog=(),
         current_date="2026-08-03",
     )
 
-    assert GOAL_EXTRACTION_CONTRACT_VERSION == "2"
+    assert GOAL_EXTRACTION_CONTRACT_VERSION == "4"
     assert "Today's date is" not in GOAL_EXTRACTION_CONTRACT
     assert "Current persisted draft" not in GOAL_EXTRACTION_CONTRACT
     assert str(messages[0].content) == (
         f"{GOAL_EXTRACTION_CONTRACT}Today's date is: 2026-08-03. "
-        "Operation: UPDATE_EXISTING_GOAL. Current persisted draft: null"
+        "Operation: UPDATE_EXISTING_GOAL. Current persisted draft: null. "
+        "ACTIVE goal template catalog: []"
     )
     assert str(messages[1].content) == "without stopping"
+
+
+def test_goal_prompt_distinguishes_catalog_type_from_candidate_decision() -> None:
+    messages = build_goal_messages(
+        action="CREATE_GOAL",
+        user_text="I am preparing for an Ironman 70.3.",
+        existing_draft=None,
+        goal_catalog=(
+            GoalTemplateSummary(
+                code="TRIATHLON_HALF_DISTANCE",
+                kind="PRIMARY",
+                display_name="Half-distance triathlon",
+                description="Prepare for a half-distance triathlon.",
+            ),
+        ),
+        current_date="2026-08-12",
+    )
+
+    prompt = str(messages[0].content)
+    assert (
+        'ACTIVE goal template catalog: [{"code":"TRIATHLON_HALF_DISTANCE",'
+        '"template_type":"PRIMARY","display_name":"Half-distance triathlon",'
+        '"description":"Prepare for a half-distance triathlon."}]'
+    ) in prompt
+    assert '"kind":"PRIMARY"' not in prompt
 
 
 def test_goal_extraction_contract_keeps_json_fields_and_all_statuses() -> None:
@@ -157,7 +183,8 @@ def test_goal_extraction_contract_keeps_json_fields_and_all_statuses() -> None:
         "Return exactly one flat JSON object matching the requested schema and no "
         "prose.",
         "main_goal, event_date, target_outcome, secondary_priority, "
-        "missing_fields, ambiguous_fields, and message_status.",
+        "primary_template, supporting_template, missing_fields, ambiguous_fields, "
+        "and message_status.",
         "Use COMPLETE only when main_goal and target_outcome are known",
         "target_outcome is 'Finish in a decent time' and secondary_priority is "
         "'Maintain muscle'.",
@@ -304,6 +331,104 @@ async def test_compiled_goal_graph_rejects_malformed_structured_result() -> None
             "user_text": "The race is next March.",
             "existing_draft": None,
             "current_date": "2026-08-03",
+        }
+    )
+
+    assert result["outcome"] == "fallback_required"
+    assert result["error_code"] == "malformed_structured_output"
+
+
+@pytest.mark.asyncio
+async def test_goal_graph_normalizes_copied_active_catalog_rows() -> None:
+    primary = GoalTemplateSummary(
+        code="TRIATHLON_HALF_DISTANCE",
+        kind="PRIMARY",
+        display_name="Half-distance triathlon",
+        description="Prepare for a half-distance triathlon.",
+    )
+    supporting = GoalTemplateSummary(
+        code="MUSCLE_RETENTION",
+        kind="SUPPORTING",
+        display_name="Maintain muscle",
+        description="Preserve muscle while pursuing the primary goal.",
+    )
+    model = StructuredGoalModel(
+        StructuredModelResponse(
+            output={
+                "main_goal": "Prepare for an Ironman 70.3",
+                "event_date": None,
+                "target_outcome": "Finish in a decent time",
+                "secondary_priority": "Maintain muscle",
+                "primary_template": primary.model_dump(mode="json"),
+                "supporting_template": supporting.model_dump(mode="json"),
+                "missing_fields": [],
+                "ambiguous_fields": [],
+                "message_status": "COMPLETE",
+            }
+        )
+    )
+    graph = build_goal_extraction_graph(model=model)
+
+    result = await graph.ainvoke(
+        {
+            "user_id": uuid4(),
+            "action": "CREATE_GOAL",
+            "user_text": (
+                "I am preparing for an Ironman 70.3. I want to finish in a "
+                "decent time while maintaining muscle."
+            ),
+            "existing_draft": None,
+            "goal_catalog": (primary, supporting),
+            "current_date": "2026-08-12",
+        }
+    )
+
+    patch = result["goal_patch"]
+    assert result["outcome"] == "extracted"
+    assert patch.primary_template is not None
+    assert patch.primary_template.decision == "USE_EXISTING"
+    assert patch.primary_template.code == "TRIATHLON_HALF_DISTANCE"
+    assert patch.supporting_template is not None
+    assert patch.supporting_template.decision == "USE_EXISTING"
+    assert patch.supporting_template.code == "MUSCLE_RETENTION"
+
+
+@pytest.mark.asyncio
+async def test_goal_graph_rejects_catalog_row_that_does_not_match_snapshot() -> None:
+    primary = GoalTemplateSummary(
+        code="TRIATHLON_HALF_DISTANCE",
+        kind="PRIMARY",
+        display_name="Half-distance triathlon",
+        description="Prepare for a half-distance triathlon.",
+    )
+    model = StructuredGoalModel(
+        StructuredModelResponse(
+            output={
+                "main_goal": "Prepare for an Ironman 70.3",
+                "event_date": None,
+                "target_outcome": "Finish in a decent time",
+                "secondary_priority": None,
+                "primary_template": {
+                    **primary.model_dump(mode="json"),
+                    "description": "A modified definition.",
+                },
+                "supporting_template": None,
+                "missing_fields": [],
+                "ambiguous_fields": [],
+                "message_status": "COMPLETE",
+            }
+        )
+    )
+    graph = build_goal_extraction_graph(model=model)
+
+    result = await graph.ainvoke(
+        {
+            "user_id": uuid4(),
+            "action": "CREATE_GOAL",
+            "user_text": "I am preparing for an Ironman 70.3.",
+            "existing_draft": None,
+            "goal_catalog": (primary,),
+            "current_date": "2026-08-12",
         }
     )
 
@@ -478,7 +603,6 @@ async def test_onboarding_modification_calls_tool_updates_state_and_confirms() -
     updater = AsyncMock(
         return_value=UpdatedOnboardingData(
             updated_fields={
-                "main_goal": "Finish an Ironman 70.3",
                 "target_outcome": "Finish in a decent time",
             }
         )
@@ -492,7 +616,6 @@ async def test_onboarding_modification_calls_tool_updates_state_and_confirms() -
                     {
                         "name": "update_onboarding_data",
                         "args": {
-                            "main_goal": "Finish an Ironman 70.3",
                             "target_outcome": "Finish in a decent time",
                             "age": None,
                         },
@@ -509,9 +632,9 @@ async def test_onboarding_modification_calls_tool_updates_state_and_confirms() -
         {
             "user_id": user_id,
             "action": "MODIFY_ONBOARDING_DATA",
-            "user_text": ("change my goal to finish my ironman 70.3 in a decent time"),
+            "user_text": "change my target outcome to finish in a decent time",
             "messages": build_onboarding_modification_messages(
-                "change my goal to finish my ironman 70.3 in a decent time"
+                "change my target outcome to finish in a decent time"
             ),
             "onboarding_updater": updater,
             "onboarding_updated": False,
@@ -522,10 +645,9 @@ async def test_onboarding_modification_calls_tool_updates_state_and_confirms() -
     updater.assert_awaited_once_with(
         user_id=user_id,
         payload={
-            "main_goal": "Finish an Ironman 70.3",
             "target_outcome": "Finish in a decent time",
         },
     )
     assert result["onboarding_updated"] is True
     assert result["outcome"] == "onboarding_modified"
-    assert result["updated_fields"] == ["main_goal", "target_outcome"]
+    assert result["updated_fields"] == ["target_outcome"]

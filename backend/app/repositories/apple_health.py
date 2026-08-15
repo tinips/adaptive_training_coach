@@ -19,6 +19,7 @@ from app.domain.enums import (
     ActivitySource,
     AppleHealthImportStatus,
     TrainingFileFormat,
+    TrainingImportContext,
 )
 from app.integrations.apple_health.models import ParsedWorkout
 from app.repositories.activities import TrainingActivityRepository
@@ -41,6 +42,8 @@ class AppleHealthRepository:
         telegram_file_unique_id: str,
         display_filename: str,
         file_format: TrainingFileFormat = TrainingFileFormat.APPLE_HEALTH_ZIP,
+        context: TrainingImportContext = TrainingImportContext.POST_ONBOARDING,
+        onboarding_session_id: uuid.UUID | None = None,
     ) -> tuple[AppleHealthImportJob, bool]:
         if telegram_update_id is not None:
             existing = await self._session.scalar(
@@ -63,6 +66,8 @@ class AppleHealthRepository:
             telegram_file_unique_id=telegram_file_unique_id,
             display_filename=display_filename[:255],
             file_format=file_format,
+            context=context,
+            onboarding_session_id=onboarding_session_id,
         )
         try:
             async with self._session.begin_nested():
@@ -252,6 +257,29 @@ class AppleHealthRepository:
             .limit(1)
         )
         return result.scalar_one_or_none()
+
+    async def imported_workout_count_for_hash(
+        self,
+        *,
+        user_id: uuid.UUID,
+        file_sha256: str,
+    ) -> int:
+        """Count active owned workouts still represented by an imported file."""
+
+        count = await self._session.scalar(
+            select(func.count(Workout.id.distinct()))
+            .join(
+                ActivitySourceLink,
+                ActivitySourceLink.workout_id == Workout.id,
+            )
+            .where(
+                Workout.athlete_id == user_id,
+                ActivitySourceLink.user_id == user_id,
+                ActivitySourceLink.file_sha256 == file_sha256,
+                ActivitySourceLink.deleted_at.is_(None),
+            )
+        )
+        return int(count or 0)
 
     async def mark_processing(
         self,

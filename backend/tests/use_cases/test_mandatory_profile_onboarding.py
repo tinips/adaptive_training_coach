@@ -8,12 +8,26 @@ from uuid import UUID
 
 import pytest
 import pytest_asyncio
+from catalog_seed import seed_training_catalog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.config import Settings
 from app.db.base import Base
-from app.domain.enums import AthleteGender, OnboardingStatus, OnboardingStep, UserStatus
-from app.integrations.llm.models import GoalExtractionAction, GoalExtractionOutput
+from app.db.models import AppleHealthImportJob
+from app.domain.enums import (
+    AppleHealthImportStatus,
+    AthleteGender,
+    OnboardingStatus,
+    OnboardingStep,
+    TrainingFileFormat,
+    TrainingImportContext,
+    UserStatus,
+)
+from app.integrations.llm.models import (
+    GoalExtractionAction,
+    GoalExtractionOutput,
+    GoalTemplateSummary,
+)
 from app.repositories.onboarding import OnboardingRepository
 from app.repositories.profiles import ProfileRepository
 from app.repositories.users import UserRepository
@@ -33,9 +47,10 @@ class NeverGoalExtractor:
         action: GoalExtractionAction,
         user_text: str,
         existing_draft: GoalExtractionOutput | None,
+        goal_catalog: tuple[GoalTemplateSummary, ...],
         current_date: str,
     ) -> GoalExtractionWorkflowResult:
-        del user_id, action, user_text, existing_draft, current_date
+        del user_id, action, user_text, existing_draft, goal_catalog, current_date
         self.calls += 1
         raise AssertionError("Mandatory profile intake must not invoke the LLM")
 
@@ -46,6 +61,8 @@ async def profile_database() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
+    async with factory.begin() as session:
+        await seed_training_catalog(session)
     yield factory
     await engine.dispose()
 
@@ -160,12 +177,18 @@ async def test_development_steps_seed_only_the_requesting_users_onboarding_state
     availability = await service.seed_development_step(identity, "availability")
     equipment = await service.seed_development_step(identity, "equipment")
     limitations = await service.seed_development_step(identity, "limitations")
+    history = await service.seed_development_step(identity, "history")
+    skipped = await service.skip_training_history(identity)
     completed = await service.seed_development_step(identity, "completed")
     await service.seed_development_step(other_identity, "availability")
 
     assert availability.current_step is OnboardingStep.AVAILABILITY_INTAKE
     assert equipment.current_step is OnboardingStep.EQUIPMENT_RECOMMENDATION
     assert limitations.current_step is OnboardingStep.HEALTH_LIMITATIONS_INTAKE
+    assert history.current_step is OnboardingStep.TRAINING_HISTORY_IMPORT
+    assert history.onboarding_status is OnboardingStatus.ACTIVE
+    assert skipped.onboarding_status is OnboardingStatus.COMPLETED
+    assert skipped.user_status is UserStatus.ONBOARDING_COMPLETED
     assert completed.onboarding_status is OnboardingStatus.COMPLETED
     assert completed.user_status is UserStatus.ONBOARDING_COMPLETED
 
@@ -199,3 +222,32 @@ async def test_development_steps_seed_only_the_requesting_users_onboarding_state
     assert reset.current_step is OnboardingStep.CONSENT
     assert reset.onboarding_status is OnboardingStatus.ACTIVE
     assert reset.user_status is UserStatus.ONBOARDING_IN_PROGRESS
+
+
+@pytest.mark.asyncio
+async def test_history_skip_is_rejected_while_an_import_is_active(
+    profile_database: async_sessionmaker[AsyncSession],
+) -> None:
+    identity = _identity()
+    service = OnboardingService(
+        session_factory=profile_database,
+        goal_extractor=NeverGoalExtractor(),
+        settings=Settings(environment="development", llm_mode="mock"),
+    )
+    history = await service.seed_development_step(identity, "history")
+    async with profile_database.begin() as session:
+        session.add(
+            AppleHealthImportJob(
+                user_id=history.user_id,
+                context=TrainingImportContext.ONBOARDING_HISTORY,
+                onboarding_session_id=None,
+                telegram_file_id="active",
+                telegram_file_unique_id="active-unique",
+                display_filename="history.zip",
+                file_format=TrainingFileFormat.APPLE_HEALTH_ZIP,
+                status=AppleHealthImportStatus.PROCESSING,
+            )
+        )
+
+    with pytest.raises(OnboardingApplicationError, match="import_already_active"):
+        await service.skip_training_history(identity)

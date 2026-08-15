@@ -22,15 +22,23 @@ from sqlalchemy.ext.asyncio import (
 from app.config import Settings
 from app.db.base import Base
 from app.db.models import (
+    ActivitySourceLink,
     AppleHealthImportJob,
     CyclingWorkoutDetails,
+    OnboardingSession,
+    SwimmingWorkoutDetails,
     Workout,
+    WorkoutHeartRateObservation,
 )
 from app.domain.enums import (
     ActivitySource,
     AppleHealthImportStatus,
     Discipline,
+    OnboardingStatus,
+    OnboardingStep,
+    SwimmingEnvironment,
     TrainingFileFormat,
+    TrainingImportContext,
     UserStatus,
 )
 from app.repositories.users import UserRepository
@@ -140,11 +148,41 @@ def write_apple_zip(path: Path) -> Path:
     duration="60" durationUnit="min" totalDistance="25"
     totalDistanceUnit="km" totalEnergyBurned="500"
     totalEnergyBurnedUnit="kcal" sourceName="Synthetic Watch"
-    startDate="{start}" endDate="2026-07-25 09:00:00 +0000"/>
+    creationDate="2026-07-25 09:01:00 +0000"
+    startDate="{start}" endDate="2026-07-25 09:00:00 +0000">
+    <WorkoutStatistics type="HKQuantityTypeIdentifierActiveEnergyBurned"
+      startDate="{start}" endDate="2026-07-25 09:00:00 +0000"
+      sum="500" unit="kcal"/>
+  </Workout>
   <Record type="HKQuantityTypeIdentifierHeartRate"
     sourceName="Synthetic Watch" unit="count/min" value="142"
     startDate="{start}" endDate="{start}"/>
 </HealthData>"""
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("apple_health_export/export.xml", xml)
+    return path
+
+
+def write_empty_apple_zip(path: Path) -> Path:
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "apple_health_export/export.xml",
+            "<HealthData><Record type='ignored'/></HealthData>",
+        )
+    return path
+
+
+def write_unknown_swim_zip(path: Path) -> Path:
+    xml = """<HealthData>
+      <Workout workoutActivityType="HKWorkoutActivityTypeSwimming"
+        duration="30" durationUnit="min" sourceName="Synthetic Watch"
+        startDate="2026-07-26 08:00:00 +0000"
+        endDate="2026-07-26 08:30:00 +0000">
+        <WorkoutStatistics type="HKQuantityTypeIdentifierDistanceSwimming"
+          startDate="2026-07-26 08:00:00 +0000"
+          endDate="2026-07-26 08:30:00 +0000" sum="1000" unit="m"/>
+      </Workout>
+    </HealthData>"""
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("apple_health_export/export.xml", xml)
     return path
@@ -268,6 +306,202 @@ async def test_existing_athlete_apple_history_import_stays_available(
         assert workout.source is ActivitySource.APPLE_HEALTH
         assert isinstance(workout.cycling_details, CyclingWorkoutDetails)
         assert workout.cycling_details.distance_meters == 25_000
+        observations = tuple(
+            (
+                await session.scalars(
+                    select(WorkoutHeartRateObservation).where(
+                        WorkoutHeartRateObservation.user_id == user_id,
+                        WorkoutHeartRateObservation.workout_id == workout.id,
+                    )
+                )
+            ).all()
+        )
+        assert len(observations) == 1
+        assert observations[0].beats_per_minute == 142
+        link = await session.scalar(
+            select(ActivitySourceLink).where(
+                ActivitySourceLink.user_id == user_id,
+                ActivitySourceLink.workout_id == workout.id,
+            )
+        )
+        assert link is not None
+        assert link.external_id == workout.external_id
+        assert not link.external_id.startswith("fingerprint:")
+        assert link.source_metadata_jsonb is not None
+        assert link.source_metadata_jsonb["creation_date"] == (
+            "2026-07-25T09:01:00+00:00"
+        )
+        assert link.source_metadata_jsonb["workout_statistics"] == [
+            {
+                "type": "HKQuantityTypeIdentifierActiveEnergyBurned",
+                "startDate": "2026-07-25 08:00:00 +0000",
+                "endDate": "2026-07-25 09:00:00 +0000",
+                "sum": "500",
+                "unit": "kcal",
+            }
+        ]
+
+
+@pytest.mark.asyncio
+async def test_unknown_swimming_environment_remains_a_swim(
+    persistence: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
+    tmp_path: Path,
+) -> None:
+    _, factory = persistence
+    owner = identity(9108)
+    await stage_user(factory, owner=owner)
+
+    outcome, _ = await upload(
+        service(factory, temp_dir=tmp_path / "temporary"),
+        owner=owner,
+        source=write_unknown_swim_zip(tmp_path / "unknown-swim.zip"),
+        update_id=108,
+    )
+
+    assert outcome.status is AppleHealthImportStatus.SUCCEEDED
+    async with factory() as session:
+        workout = await session.get(Workout, outcome.activity_id)
+        assert workout is not None
+        assert workout.discipline is Discipline.SWIMMING
+        assert isinstance(workout.swimming_details, SwimmingWorkoutDetails)
+        assert (
+            workout.swimming_details.swimming_environment is SwimmingEnvironment.UNKNOWN
+        )
+
+
+@pytest.mark.asyncio
+async def test_exact_apple_reimport_keeps_workout_and_observation_counts_stable(
+    persistence: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
+    tmp_path: Path,
+) -> None:
+    _, factory = persistence
+    owner = identity(9109)
+    user_id = await stage_user(factory, owner=owner)
+    import_service = service(factory, temp_dir=tmp_path / "temporary")
+    source = write_apple_zip(tmp_path / "same-history.zip")
+
+    first, _ = await upload(import_service, owner=owner, source=source, update_id=109)
+    duplicate, _ = await upload(
+        import_service, owner=owner, source=source, update_id=110
+    )
+
+    assert first.status is AppleHealthImportStatus.SUCCEEDED
+    assert duplicate.status is AppleHealthImportStatus.SUCCEEDED
+    assert duplicate.exact_file_duplicate is True
+    async with factory() as session:
+        workout_count = await session.scalar(
+            select(func.count())
+            .select_from(Workout)
+            .where(Workout.athlete_id == user_id)
+        )
+        observation_count = await session.scalar(
+            select(func.count())
+            .select_from(WorkoutHeartRateObservation)
+            .where(WorkoutHeartRateObservation.user_id == user_id)
+        )
+        assert workout_count == 1
+        assert observation_count == 1
+
+
+@pytest.mark.asyncio
+async def test_onboarding_history_import_completes_atomically(
+    persistence: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
+    tmp_path: Path,
+) -> None:
+    _, factory = persistence
+    owner = identity(9110)
+    user_id = await stage_user(
+        factory,
+        owner=owner,
+        status=UserStatus.ONBOARDING_IN_PROGRESS,
+    )
+    async with factory.begin() as session:
+        session.add(
+            OnboardingSession(
+                user_id=user_id,
+                status=OnboardingStatus.ACTIVE,
+                current_step=OnboardingStep.TRAINING_HISTORY_IMPORT,
+                answers={"consent": True},
+            )
+        )
+
+    outcome, _ = await upload(
+        service(factory, temp_dir=tmp_path / "temporary"),
+        owner=owner,
+        source=write_apple_zip(tmp_path / "onboarding-history.zip"),
+        update_id=110,
+    )
+
+    assert outcome.status is AppleHealthImportStatus.SUCCEEDED
+    assert outcome.context is TrainingImportContext.ONBOARDING_HISTORY
+    assert outcome.completed_onboarding is True
+    async with factory() as session:
+        persisted_user = await UserRepository(session).require_by_id(user_id)
+        onboarding = await session.scalar(
+            select(OnboardingSession).where(OnboardingSession.user_id == user_id)
+        )
+        job = await session.scalar(
+            select(AppleHealthImportJob).where(
+                AppleHealthImportJob.id == outcome.job_id,
+                AppleHealthImportJob.user_id == user_id,
+            )
+        )
+        assert persisted_user.status is UserStatus.ONBOARDING_COMPLETED
+        assert onboarding is not None
+        assert onboarding.status is OnboardingStatus.COMPLETED
+        assert onboarding.current_step is OnboardingStep.TRAINING_HISTORY_IMPORT
+        assert job is not None
+        assert job.context is TrainingImportContext.ONBOARDING_HISTORY
+        assert job.onboarding_session_id == onboarding.id
+
+
+@pytest.mark.asyncio
+async def test_zero_workout_archive_keeps_onboarding_active(
+    persistence: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
+    tmp_path: Path,
+) -> None:
+    _, factory = persistence
+    owner = identity(9111)
+    user_id = await stage_user(
+        factory,
+        owner=owner,
+        status=UserStatus.ONBOARDING_IN_PROGRESS,
+    )
+    async with factory.begin() as session:
+        session.add(
+            OnboardingSession(
+                user_id=user_id,
+                status=OnboardingStatus.ACTIVE,
+                current_step=OnboardingStep.TRAINING_HISTORY_IMPORT,
+                answers={},
+            )
+        )
+
+    outcome, _ = await upload(
+        service(factory, temp_dir=tmp_path / "temporary"),
+        owner=owner,
+        source=write_empty_apple_zip(tmp_path / "empty-history.zip"),
+        update_id=111,
+    )
+
+    assert outcome.status is AppleHealthImportStatus.FAILED
+    assert outcome.safe_error_code == "training_file_no_workouts"
+    assert outcome.completed_onboarding is False
+    async with factory() as session:
+        persisted_user = await UserRepository(session).require_by_id(user_id)
+        onboarding = await session.scalar(
+            select(OnboardingSession).where(OnboardingSession.user_id == user_id)
+        )
+        workout_count = await session.scalar(
+            select(func.count())
+            .select_from(Workout)
+            .where(Workout.athlete_id == user_id)
+        )
+        assert persisted_user.status is UserStatus.ONBOARDING_IN_PROGRESS
+        assert onboarding is not None
+        assert onboarding.status is OnboardingStatus.ACTIVE
+        assert onboarding.current_step is OnboardingStep.TRAINING_HISTORY_IMPORT
+        assert workout_count == 0
 
 
 @pytest.mark.asyncio

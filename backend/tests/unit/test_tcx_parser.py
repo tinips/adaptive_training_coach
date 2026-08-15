@@ -140,6 +140,12 @@ def test_trackpoints_supply_measured_hr_cadence_route_and_derived_metrics(
     assert result.average_heart_rate == 150
     assert result.max_heart_rate == 160
     assert result.heart_rate_records_matched == 3
+    assert len(result.heart_rate_observations) == 3
+    assert {item.timestamp.isoformat() for item in result.heart_rate_observations} == {
+        "2026-07-27T06:00:00+00:00",
+        "2026-07-27T06:05:00+00:00",
+        "2026-07-27T06:10:00+00:00",
+    }
     assert result.average_cadence == 85
     assert result.cadence_sample_count == 2
     assert result.max_cadence == 90

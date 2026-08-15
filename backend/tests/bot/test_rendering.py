@@ -8,15 +8,21 @@ from datetime import date
 from telegram import InlineKeyboardMarkup, ReplyKeyboardMarkup
 
 from app.bot import keyboards, messages
-from app.domain.enums import Discipline, EquipmentImportance, ProfileSettingsStep
-from app.schemas.equipment import (
-    EquipmentOption,
-    EquipmentReview,
-    EquipmentSuggestionSummary,
-    MissingEssential,
-    MissingRecommended,
+from app.domain.enums import (
+    CapabilityImportance,
+    CapabilityKind,
+    ContextAssessmentStatus,
+    ExecutionOptionRole,
+    GoalContextRole,
+    ProfileSettingsStep,
 )
-from tests.equipment_seed import CATALOG
+from app.schemas.capabilities import (
+    CapabilityOption,
+    CapabilityReview,
+    CapabilityReviewContext,
+    ContextExecutionAssessment,
+    GoalExecutionAssessment,
+)
 
 
 def _button_pairs(markup: InlineKeyboardMarkup) -> list[tuple[str, str]]:
@@ -97,33 +103,38 @@ def test_lifecycle_reply_keyboards_expose_exact_account_actions() -> None:
 
 def test_equipment_messages_render_escaped_bounded_tables() -> None:
     item_id = uuid.uuid4()
-    review = EquipmentReview(
-        disciplines=(Discipline.CYCLING,),
+    review = CapabilityReview(
+        contexts=(
+            CapabilityReviewContext(
+                code="cycling_road",
+                display_name="Road cycling",
+                role=GoalContextRole.TARGET,
+            ),
+        ),
         options=(
-            EquipmentOption(
+            CapabilityOption(
                 id=item_id,
-                discipline=Discipline.CYCLING,
-                equipment="bike",
+                code="bike",
                 display_name="Bike <all-purpose>",
-                importance=EquipmentImportance.ESSENTIAL,
-                substitutions=("Mountain bike", "Stationary bike"),
+                kind=CapabilityKind.EQUIPMENT,
+                importance=CapabilityImportance.REQUIRED,
+                execution_roles=(
+                    ExecutionOptionRole.PREFERRED,
+                    ExecutionOptionRole.SUBSTITUTE,
+                ),
+                target_context_codes=("cycling_road",),
                 selected=True,
             ),
         ),
     )
-    summary = EquipmentSuggestionSummary(
-        can_start=False,
-        missing_essentials=(
-            MissingEssential(
-                discipline=Discipline.CYCLING,
-                display_name="Bike <all-purpose>",
-                substitutions=("Stationary bike",),
-            ),
-        ),
-        missing_recommended=(
-            MissingRecommended(
-                discipline=Discipline.CYCLING,
-                display_name="Road bike",
+    summary = GoalExecutionAssessment(
+        contexts=(
+            ContextExecutionAssessment(
+                target_context="cycling_road",
+                target_display_name="Road cycling",
+                status=ContextAssessmentStatus.LIMITED,
+                missing_required=("Bike <all-purpose>",),
+                missing_recommended=("Road bike",),
             ),
         ),
     )
@@ -133,51 +144,12 @@ def test_equipment_messages_render_escaped_bounded_tables() -> None:
 
     assert "<pre>" in review_message
     assert "Have" in review_message
-    assert "Alternatives" in review_message
+    assert "Resource" in review_message
     assert "Bike &lt;all-purpose&gt;" in review_message
-    assert "Essential" in summary_message
-    assert "Recommended" in summary_message
+    assert "Limited" in summary_message
+    assert "Bike &lt;all-purpose&gt;" in summary_message
     assert len(review_message) <= messages.TELEGRAM_MESSAGE_LIMIT
     assert len(summary_message) <= messages.TELEGRAM_MESSAGE_LIMIT
-
-
-def test_full_seed_catalog_review_fits_one_telegram_message() -> None:
-    display_by_key = {
-        (discipline, equipment): display_name
-        for discipline, equipment, display_name, _, _ in CATALOG
-    }
-    review = EquipmentReview(
-        disciplines=tuple(
-            dict.fromkeys(discipline for discipline, _, _, _, _ in CATALOG)
-        ),
-        options=tuple(
-            EquipmentOption(
-                id=uuid.UUID(int=index + 1),
-                discipline=discipline,
-                equipment=equipment,
-                display_name=display_name,
-                importance=importance,
-                substitutions=tuple(
-                    display_by_key[(discipline, key)] for key in substitutions
-                ),
-                selected=index % 2 == 0,
-            )
-            for index, (
-                discipline,
-                equipment,
-                display_name,
-                importance,
-                substitutions,
-            ) in enumerate(CATALOG)
-        ),
-    )
-
-    rendered = messages.equipment_review(review)
-
-    assert all(
-        discipline.value.title() in rendered for discipline in review.disciplines
-    )
-    assert len(rendered) <= messages.TELEGRAM_MESSAGE_LIMIT
 
 
 def test_profile_setting_current_values_are_readable_escaped_and_bounded() -> None:
@@ -244,16 +216,16 @@ def test_profile_equipment_table_and_long_context_fit_telegram() -> None:
             },
             "equipment_access": (
                 {
-                    "discipline": Discipline.RUNNING,
+                    "kind": CapabilityKind.EQUIPMENT,
+                    "code": "running_shoes",
                     "display_name": "Running shoes",
-                    "importance": EquipmentImportance.ESSENTIAL,
                 },
             ),
         }
     )
 
     assert "<pre>" in profile
-    assert "Discipline" in profile
+    assert "Resource" in profile
     assert "Running shoes" in profile
     assert "None reported" in profile
     assert "&lt;weekend&gt;" in profile

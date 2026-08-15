@@ -238,6 +238,15 @@ def profile_goal_text_keyboard() -> InlineKeyboardMarkup:
     return _rows([[("Back", "ps:v1:goal:back")]])
 
 
+def profile_goal_classification_keyboard() -> InlineKeyboardMarkup:
+    return _rows(
+        [
+            [("Confirm", "ps:v1:goal:classification:confirm")],
+            [("Cancel", "ps:v1:goal:classification:cancel")],
+        ]
+    )
+
+
 def profile_goal_date_keyboard() -> InlineKeyboardMarkup:
     return _rows([[("Not yet", "ps:v1:goal:no-date")], [("Back", "ps:v1:goal:back")]])
 
@@ -301,6 +310,15 @@ def health_limitations_keyboard() -> InlineKeyboardMarkup:
     return _rows(
         [
             [(LABELS["health_none"], "ob:v1:health:none")],
+            [(LABELS["cancel"], "ob:v1:cancel")],
+        ]
+    )
+
+
+def training_history_import_keyboard() -> InlineKeyboardMarkup:
+    return _rows(
+        [
+            [("Skip for now", "ob:v1:history:skip")],
             [(LABELS["cancel"], "ob:v1:cancel")],
         ]
     )

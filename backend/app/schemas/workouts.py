@@ -157,10 +157,10 @@ class SwimmingWorkoutDetailsData(_StrictSchema):
         ):
             raise ValueError("A pool swim requires pool_details")
         if (
-            self.swimming_environment is SwimmingEnvironment.OPEN_WATER
+            self.swimming_environment is not SwimmingEnvironment.POOL
             and self.pool_details is not None
         ):
-            raise ValueError("An open-water swim cannot have pool_details")
+            raise ValueError("An open-water or unknown swim cannot have pool_details")
         derived = pace_seconds_per_unit(
             distance_meters=self.distance_meters,
             moving_duration_seconds=self.moving_duration_seconds,

@@ -454,6 +454,10 @@ class AppleHealthParser:
             source_name=source_name,
             source_version=attributes.get("sourceVersion"),
             device=attributes.get("device"),
+            creation_date=_optional_datetime(
+                attributes.get("creationDate"),
+                warnings=warnings,
+            ),
             started_at=started_at,
             ended_at=ended_at,
             duration_seconds=duration,
@@ -469,6 +473,7 @@ class AppleHealthParser:
                 source_metadata,
                 warnings=warnings,
             ),
+            workout_statistics=tuple(dict(item) for item in builder.statistics),
         )
 
     @staticmethod
@@ -542,6 +547,21 @@ def _parse_datetime(value: str) -> datetime:
         except ValueError:
             continue
     raise AppleHealthParserError("invalid_health_timestamp")
+
+
+def _optional_datetime(
+    value: str | None,
+    *,
+    warnings: list[str],
+) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        return _parse_datetime(value)
+    except AppleHealthParserError:
+        if "invalid_creation_date" not in warnings:
+            warnings.append("invalid_creation_date")
+        return None
 
 
 def _duration_seconds(value: str, unit: str) -> int:
@@ -728,12 +748,18 @@ def _match_workout(
     ]
     if not candidates:
         return None
-    same_source = [
-        workout
-        for workout in candidates
-        if observation.source_name and workout.source_name == observation.source_name
-    ]
-    selected = same_source or candidates
+    if observation.source_name:
+        selected = [
+            workout
+            for workout in candidates
+            if workout.source_name == observation.source_name
+        ]
+        if not selected:
+            return None
+    else:
+        if len(candidates) != 1:
+            return None
+        selected = candidates
     observation_midpoint = (
         observation.started_at + (observation.ended_at - observation.started_at) / 2
     )
@@ -759,10 +785,8 @@ def _summarize_heart_rate(workout: ParsedWorkout) -> None:
             HeartRateTemporalQuality.SHORT_INTERVAL,
         }
     ]
-    if workout.observations:
-        workout.max_heart_rate = max(
-            item.beats_per_minute for item in workout.observations
-        )
+    if precise:
+        workout.max_heart_rate = max(item.beats_per_minute for item in precise)
     if precise:
         workout.average_heart_rate = sum(
             item.beats_per_minute for item in precise

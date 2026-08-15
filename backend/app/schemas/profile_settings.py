@@ -5,7 +5,7 @@ from __future__ import annotations
 from pydantic import BaseModel, ConfigDict, JsonValue
 
 from app.domain.enums import ProfileSettingsStep
-from app.schemas.equipment import EquipmentReview, EquipmentSuggestionSummary
+from app.schemas.capabilities import CapabilityReview, GoalExecutionAssessment
 
 
 class ProfileSettingsResult(BaseModel):
@@ -15,5 +15,5 @@ class ProfileSettingsResult(BaseModel):
     pending: dict[str, JsonValue] = {}
     saved_field: str | None = None
     current_value: str | int | float | None = None
-    equipment_review: EquipmentReview | None = None
-    equipment_summary: EquipmentSuggestionSummary | None = None
+    capability_review: CapabilityReview | None = None
+    execution_assessment: GoalExecutionAssessment | None = None

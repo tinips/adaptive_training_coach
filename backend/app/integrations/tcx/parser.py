@@ -16,6 +16,7 @@ from typing import IO
 from app.domain.enums import Discipline
 from app.integrations.tcx.models import (
     ParsedTCXActivity,
+    ParsedTCXHeartRateObservation,
     ParsedTCXPosition,
 )
 
@@ -207,6 +208,24 @@ class TCXParser:
             else activity_id
         )
         identity = normalized_activity_id or started_at.isoformat()  # type: ignore[union-attr]
+        observations_by_key = {
+            source_key: ParsedTCXHeartRateObservation(
+                source_record_key=source_key,
+                timestamp=sample.timestamp,
+                beats_per_minute=sample.value,
+            )
+            for lap in parsed_laps
+            for sample in lap.heart_rate_samples
+            if sample.timestamp is not None
+            for source_key in (
+                _stable_hash(
+                    "TCX_HEART_RATE",
+                    identity,
+                    sample.timestamp.isoformat(),
+                    format(sample.value, ".12g"),
+                ),
+            )
+        }
 
         return ParsedTCXActivity(
             source_record_key=_stable_hash("TCX", identity),
@@ -233,6 +252,9 @@ class TCXParser:
             raw_sub_sport=raw_sub_sport,
             elevation_loss_meters=elevation_loss_meters,
             max_cadence=max_cadence,
+            heart_rate_observations=tuple(
+                observations_by_key[key] for key in sorted(observations_by_key)
+            ),
         )
 
     @staticmethod

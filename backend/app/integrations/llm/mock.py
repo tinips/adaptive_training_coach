@@ -82,6 +82,10 @@ class DeterministicFakeOnboardingModel:
                 output = schema.model_validate(
                     {"accepted": not needs_clarification},
                 )
+            elif set(schema.model_fields) == {"templates"}:
+                output = schema.model_validate(_fake_context_mapping(user_text))
+            elif set(schema.model_fields) == {"capabilities", "contexts"}:
+                output = schema.model_validate(_fake_context_capabilities(user_text))
             else:
                 output = schema.model_validate(
                     _fake_goal_output(
@@ -194,17 +198,156 @@ def _fake_goal_output(
     *,
     needs_clarification: bool,
 ) -> dict[str, object]:
+    folded = user_text.casefold()
+    code = "GENERAL_RUNNING"
+    display_name: str | None = None
+    description: str | None = None
+    decision = "USE_EXISTING"
+    known = {
+        "ironman 70.3": "TRIATHLON_HALF_DISTANCE",
+        "half ironman": "TRIATHLON_HALF_DISTANCE",
+        "hyrox": "HYROX",
+        "spartan": "OBSTACLE_RACE",
+        "obstacle": "OBSTACLE_RACE",
+        "marathon": "MARATHON",
+        "10k": "RUNNING_10K",
+        "5k": "RUNNING_5K",
+    }
+    for phrase, known_code in known.items():
+        if phrase in folded:
+            code = known_code
+            break
+    else:
+        if not any(word in folded for word in ("run", "running")):
+            decision = "CREATE"
+            words = re.findall(r"[a-z0-9]+", folded)[:5]
+            code = "_".join(words).upper()[:64] or "OTHER_GOAL"
+            if len(code) < 3:
+                code = f"GOAL_{code}"
+            display_name = " ".join(words).title() or "Other goal"
+            description = f"General preparation for {display_name.casefold()}."
+
+    supporting: dict[str, object]
+    secondary_priority: str | None = None
+    if "maintain muscle" in folded or "retention" in folded:
+        secondary_priority = "Maintain muscle"
+        supporting = {
+            "decision": "USE_EXISTING",
+            "code": "MUSCLE_RETENTION",
+            "display_name": None,
+            "description": None,
+        }
+    elif "maintain strength" in folded:
+        secondary_priority = "Maintain strength"
+        supporting = {
+            "decision": "USE_EXISTING",
+            "code": "STRENGTH_MAINTENANCE",
+            "display_name": None,
+            "description": None,
+        }
+    else:
+        supporting = {
+            "decision": "NONE",
+            "code": None,
+            "display_name": None,
+            "description": None,
+        }
     return {
         "main_goal": user_text or None,
         "event_date": None,
         "target_outcome": None if needs_clarification else "Achieve the stated goal",
-        "secondary_priority": None,
+        "secondary_priority": secondary_priority,
+        "primary_template": {
+            "decision": decision,
+            "code": code,
+            "display_name": display_name,
+            "description": description,
+        },
+        "supporting_template": supporting,
         "missing_fields": ["target_outcome"] if needs_clarification else [],
         "ambiguous_fields": [],
         "message_status": (
             "NEEDS_CLARIFICATION" if needs_clarification else "COMPLETE"
         ),
     }
+
+
+def _fake_context_mapping(request_json: str) -> dict[str, object]:
+    request = json.loads(request_json)
+    templates = request.get("new_templates", [])
+    rows: list[dict[str, object]] = []
+    for template in templates:
+        code = str(template["code"])
+        kind = str(template["kind"])
+        folded = code.casefold()
+        if "swim" in folded:
+            context_code, discipline = "swimming_pool", "SWIMMING"
+        elif "cycl" in folded or "bike" in folded:
+            context_code, discipline = "cycling_road", "CYCLING"
+        elif "strength" in folded or "muscle" in folded:
+            context_code, discipline = "strength_general", "STRENGTH"
+        else:
+            context_code, discipline = "running_road", "RUNNING"
+        rows.append(
+            {
+                "template_code": code,
+                "contexts": [
+                    {
+                        "decision": "USE_EXISTING",
+                        "code": context_code,
+                        "display_name": None,
+                        "description": None,
+                        "discipline": discipline,
+                        "role": "SUPPORTING" if kind == "SUPPORTING" else "TARGET",
+                        "priority": 10,
+                    }
+                ],
+            }
+        )
+    return {"templates": rows}
+
+
+def _fake_context_capabilities(request_json: str) -> dict[str, object]:
+    request = json.loads(request_json)
+    contexts = request.get("new_training_contexts", [])
+    capabilities: list[dict[str, object]] = []
+    definitions: list[dict[str, object]] = []
+    for context in contexts:
+        code = str(context["code"])
+        capability_code = f"{code}_access"[:64]
+        capabilities.append(
+            {
+                "decision": "CREATE",
+                "code": capability_code,
+                "display_name": f"{context.get('display_name') or code!s} access",
+                "description": (
+                    f"Access needed for general {code.replace('_', ' ')} training."
+                ),
+                "kind": "ACCESS",
+            }
+        )
+        definitions.append(
+            {
+                "target_context_code": code,
+                "options": [
+                    {
+                        "code": "standard_access",
+                        "display_name": "Standard access",
+                        "execution_context_code": code,
+                        "role": "PREFERRED",
+                        "priority": 10,
+                        "limitations": [],
+                        "requirements": [
+                            {
+                                "capability_code": capability_code,
+                                "importance": "REQUIRED",
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+    return {"capabilities": capabilities, "contexts": definitions}
 
 
 def _is_free_text_validation_schema(schema: StructuredOutputSchema) -> bool:

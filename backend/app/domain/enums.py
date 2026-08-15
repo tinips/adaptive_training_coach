@@ -31,6 +31,7 @@ class OnboardingStep(StrEnum):
     EQUIPMENT_RECOMMENDATION = "EQUIPMENT_RECOMMENDATION"
     EQUIPMENT_INTAKE = "EQUIPMENT_INTAKE"
     HEALTH_LIMITATIONS_INTAKE = "HEALTH_LIMITATIONS_INTAKE"
+    TRAINING_HISTORY_IMPORT = "TRAINING_HISTORY_IMPORT"
 
 
 class AthleteGender(StrEnum):
@@ -59,6 +60,11 @@ class TrainingFileFormat(StrEnum):
     APPLE_HEALTH_ZIP = "APPLE_HEALTH_ZIP"
     TCX = "TCX"
     UNKNOWN = "UNKNOWN"
+
+
+class TrainingImportContext(StrEnum):
+    ONBOARDING_HISTORY = "ONBOARDING_HISTORY"
+    POST_ONBOARDING = "POST_ONBOARDING"
 
 
 class WorkoutFlowStep(StrEnum):
@@ -133,6 +139,7 @@ class HikingType(StrEnum):
 class SwimmingEnvironment(StrEnum):
     POOL = "POOL"
     OPEN_WATER = "OPEN_WATER"
+    UNKNOWN = "UNKNOWN"
 
 
 class SwimmingStroke(StrEnum):
@@ -172,6 +179,59 @@ class EquipmentImportance(StrEnum):
     OPTIONAL = "optional"
 
 
+class CatalogItemSource(StrEnum):
+    """Origin of reusable training-catalog knowledge."""
+
+    SEEDED = "SEEDED"
+    LLM_GENERATED = "LLM_GENERATED"
+
+
+class CatalogItemStatus(StrEnum):
+    """Whether one catalog definition can drive new planning decisions."""
+
+    ACTIVE = "ACTIVE"
+    DISABLED = "DISABLED"
+
+
+class GoalTemplateKind(StrEnum):
+    PRIMARY = "PRIMARY"
+    SUPPORTING = "SUPPORTING"
+
+
+class GoalContextRole(StrEnum):
+    TARGET = "TARGET"
+    SUPPORTING = "SUPPORTING"
+
+
+class CapabilityKind(StrEnum):
+    EQUIPMENT = "EQUIPMENT"
+    ACCESS = "ACCESS"
+    FACILITY = "FACILITY"
+
+
+class ExecutionOptionRole(StrEnum):
+    PREFERRED = "PREFERRED"
+    SUBSTITUTE = "SUBSTITUTE"
+
+
+class CapabilityImportance(StrEnum):
+    REQUIRED = "REQUIRED"
+    RECOMMENDED = "RECOMMENDED"
+    OPTIONAL = "OPTIONAL"
+
+
+class AthleteCapabilityStatus(StrEnum):
+    AVAILABLE = "AVAILABLE"
+    UNAVAILABLE = "UNAVAILABLE"
+
+
+class ContextAssessmentStatus(StrEnum):
+    FEASIBLE = "FEASIBLE"
+    FEASIBLE_WITH_SUBSTITUTION = "FEASIBLE_WITH_SUBSTITUTION"
+    UNKNOWN = "UNKNOWN"
+    LIMITED = "LIMITED"
+
+
 class ProfileSettingsStep(StrEnum):
     """Persisted, deterministic post-onboarding profile edit states."""
 
@@ -181,6 +241,7 @@ class ProfileSettingsStep(StrEnum):
     GOAL_OUTCOME = "GOAL_OUTCOME"
     GOAL_DATE = "GOAL_DATE"
     GOAL_SECONDARY = "GOAL_SECONDARY"
+    GOAL_CLASSIFICATION_CONFIRM = "GOAL_CLASSIFICATION_CONFIRM"
     AVAILABILITY = "AVAILABILITY"
     EQUIPMENT = "EQUIPMENT"
     HEALTH = "HEALTH"

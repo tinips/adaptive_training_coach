@@ -131,17 +131,19 @@ def explicit_onboarding_change_tool_policy(
     )
 
 
-GOAL_EXTRACTION_CONTRACT_VERSION: Final = "2"
+GOAL_EXTRACTION_CONTRACT_VERSION: Final = "4"
 """Version of the static goal-extraction contract sent to the model."""
 
 GOAL_EXTRACTION_CONTRACT: Final = (
     "Extract a field patch from the latest athlete onboarding goal answer. "
     "Return exactly one flat JSON object matching the requested schema and no "
     "prose. The top-level keys must be main_goal, event_date, target_outcome, "
-    "secondary_priority, missing_fields, ambiguous_fields, and message_status. "
+    "secondary_priority, primary_template, supporting_template, missing_fields, "
+    "ambiguous_fields, and message_status. "
     "Never nest fields under patch, goal, result, or any other wrapper key. "
     "The only semantic patch fields are main_goal, event_date, target_outcome, "
-    "and secondary_priority. Set a semantic field only when the latest user "
+    "secondary_priority, primary_template, and supporting_template. Set a "
+    "semantic field only when the latest user "
     "message explicitly adds or corrects it; otherwise return null. Null means "
     "preserve the current draft value. Never copy unchanged values from the "
     "current draft into the patch. For UPDATE_EXISTING_GOAL, the latest message "
@@ -163,6 +165,25 @@ GOAL_EXTRACTION_CONTRACT: Final = (
     "a decent time' and secondary_priority is 'Maintain muscle'. "
     "secondary_priority is optional, "
     "must be explicitly stated, and must never be listed as missing. "
+    "When main_goal is supplied, primary_template must also classify it. Use "
+    "USE_EXISTING only with an ACTIVE PRIMARY code from the supplied catalog. "
+    "Catalog entries use template_type only to identify PRIMARY or SUPPORTING; "
+    "never copy template_type or return a field named kind. For an existing "
+    "primary return exactly, for example, "
+    '{"decision":"USE_EXISTING","code":'
+    '"TRIATHLON_HALF_DISTANCE","display_name":null,'
+    '"description":null}. '
+    "Otherwise use CREATE with a stable uppercase general code, concise English "
+    "display name, and general English description. Do not create templates for "
+    "event brands, locations, dates, or individual race editions when a general "
+    "template fits. When secondary_priority is supplied, supporting_template must "
+    "classify it. Use an ACTIVE SUPPORTING code, CREATE a general supporting "
+    "template, or UNSUPPORTED when it cannot safely become reusable catalog "
+    "knowledge. Existing supporting templates use the same decision/code/null "
+    "name/null description shape. Use NONE only when the athlete explicitly has "
+    "no secondary priority. Never return disciplines, contexts, equipment, "
+    "capabilities, or "
+    "training recommendations. "
     f"{future_event_date_policy('goal_extraction')}A null event_date is "
     "valid when the user has no date yet or the goal has no event. List only "
     "genuinely missing or ambiguous fields. Use COMPLETE only when main_goal "
@@ -180,10 +201,12 @@ def render_goal_extraction_system_prompt(
     action: str,
     current_date: str,
     draft_json: str,
+    catalog_json: str,
 ) -> str:
     """Inject per-invocation values without changing the static contract."""
 
     return (
         f"{GOAL_EXTRACTION_CONTRACT}Today's date is: {current_date}. "
-        f"Operation: {action}. Current persisted draft: {draft_json}"
+        f"Operation: {action}. Current persisted draft: {draft_json}. "
+        f"ACTIVE goal template catalog: {catalog_json}"
     )

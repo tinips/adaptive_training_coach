@@ -6,9 +6,10 @@ import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.repositories.equipment import EquipmentRepository
+from app.repositories.athlete_capabilities import AthleteCapabilityRepository
 from app.repositories.profiles import ProfileRepository
-from app.schemas.equipment import EquipmentAccessItem
+from app.repositories.training_catalog import TrainingCatalogRepository
+from app.schemas.capabilities import CapabilityAccessItem
 from app.schemas.profile import PersistedMandatoryProfileData, PersistedTrainingGoalData
 
 
@@ -31,10 +32,23 @@ class ProfileService:
                 )
             ):
                 return None
-            equipment = await EquipmentRepository(session).selected_catalog(
+            capabilities = await AthleteCapabilityRepository(session).available(
                 athlete_id=user_id
             )
             goal = await ProfileRepository(session).get_training_goal(user_id=user_id)
+            catalog = TrainingCatalogRepository(session)
+            primary_template = (
+                await catalog.active_goal_by_id(goal_template_id=goal.goal_template_id)
+                if goal is not None and goal.goal_template_id is not None
+                else None
+            )
+            supporting_template = (
+                await catalog.active_goal_by_id(
+                    goal_template_id=goal.supporting_goal_template_id
+                )
+                if goal is not None and goal.supporting_goal_template_id is not None
+                else None
+            )
             return PersistedMandatoryProfileData(
                 birth_year=profile.birth_year,
                 gender=profile.gender,
@@ -42,12 +56,12 @@ class ProfileService:
                 height_cm=profile.height_cm,
                 availability_text=profile.availability_text,
                 equipment_access=tuple(
-                    EquipmentAccessItem(
-                        discipline=item.discipline,
+                    CapabilityAccessItem(
+                        code=item.code,
                         display_name=item.display_name,
-                        importance=item.importance,
+                        kind=item.kind,
                     )
-                    for item in equipment
+                    for item in capabilities
                 ),
                 health_limitations_text=profile.health_limitations_text,
                 training_goal=(
@@ -56,6 +70,16 @@ class ProfileService:
                         target_outcome=goal.target_outcome,
                         event_date=goal.event_date,
                         secondary_priority=goal.secondary_priority,
+                        primary_template=(
+                            primary_template.display_name
+                            if primary_template is not None
+                            else None
+                        ),
+                        supporting_template=(
+                            supporting_template.display_name
+                            if supporting_template is not None
+                            else None
+                        ),
                         status=goal.status,
                     )
                     if goal is not None

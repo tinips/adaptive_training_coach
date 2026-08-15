@@ -15,6 +15,7 @@ def create_goal_extraction_model(
     settings: Settings,
     *,
     fake_scenario: FakeLLMScenario = FakeLLMScenario.AUTO,
+    timeout_seconds: float = 30.0,
 ) -> StructuredOnboardingModel:
     """Create the focused goal model adapter without workflow topology."""
 
@@ -27,4 +28,5 @@ def create_goal_extraction_model(
         api_key=settings.llm_api_key,
         base_url=settings.llm_base_url or None,
         model_name=settings.llm_model,
+        timeout_seconds=timeout_seconds,
     )

@@ -1,35 +1,43 @@
-# Equipment knowledge
+# Training catalog and equipment knowledge
 
-Equipment knowledge is deterministic reference data in PostgreSQL. Alembic
-revision `0017_equipment_catalog` creates and seeds:
+Equipment is no longer the source of training intent. A confirmed primary goal
+and optional supporting goal select reusable planning contexts; those contexts
+then expose preferred and substitute execution options with explicit capability
+requirements.
 
-- `equipment_catalog`, keyed by discipline and stable lower-snake-case item;
-- `athlete_equipment`, the global set of catalog items an athlete can use.
+```text
+Goal template
+  -> target/supporting training context
+  -> preferred/substitute execution option
+  -> required/recommended/optional capability
+  -> athlete AVAILABLE / UNAVAILABLE / implicit UNKNOWN
+```
 
-Catalog importance is fixed as `essential`, `recommended`, or `optional`.
-Essential means required to train the discipline, but a listed substitution
-also satisfies it. Substitutions are a small JSON array of keys in the same
-discipline; they are intentionally not a generic rules subsystem.
+The global PostgreSQL catalog consists of `goal_templates`,
+`training_contexts`, `goal_template_contexts`, `capabilities`,
+`context_execution_options`, and `execution_option_capabilities`.
+`athlete_capabilities` is the only athlete-owned layer. A capability can be
+equipment, access, or a facility, and the same global capability can support
+many contexts without duplication.
 
-The application resolves confirmed goal text to running, cycling, swimming,
-hiking, and/or strength using bounded English aliases. Triathlon and Ironman
-resolve to swim-bike-run; duathlon resolves to bike-run. Event date, baseline,
-training stage, and race proximity do not affect importance or matching.
+Revision `0022_dynamic_training_catalog` creates the model and an intentionally
+general seed covering running, cycling, swimming, hiking, strength, triathlon,
+HYROX, and obstacle racing. It replaces `equipment_catalog` and
+`athlete_equipment` after a verified backfill. Its downgrade aborts because
+dynamically generated catalog knowledge cannot be reconstructed in the old
+tables; take a database backup before upgrading.
 
-The Telegram review preselects the athlete's existing global access. Saving a
-review replaces only rows for the reviewed disciplines and preserves all other
-disciplines. Missing essentials do not block onboarding. The summary shows
-missing essentials with alternatives and missing recommended items; optional
-gaps are omitted.
+Unknown goals can extend the catalog only after athlete confirmation. The
+compiled structured workflows first map all new templates to existing or new
+contexts, then define options and capabilities for all new contexts in one
+grouped call. Strict application validation and an advisory transaction lock
+publish the complete proposal atomically. The model never writes the database,
+supplies IDs, edits existing definitions, or runs from Equipment & access
+callbacks.
 
-Revision `0018_remove_obsolete_equipment` performs the authorized cleanup. It
-reruns and verifies the explicit current-revision `AVAILABLE` backfill, rejects
-unknown source codes, removes the seven `0014` equipment tables, removes legacy
-`equipment_access` when present, drops the goal revision and raw profile
-equipment columns, and removes the obsolete details step from database checks.
-Discarded raw text and interpretation history can only be recovered from the
-pre-cleanup PostgreSQL backup.
-
-To change catalog knowledge, add an additive Alembic reference-data migration
-using stable IDs. Do not add an LLM prompt, stage logic, or a generic rules
-engine for equipment prioritization.
+The equipment review includes only capabilities reachable from the athlete's
+current primary/supporting goal. Saving marks every visible capability
+AVAILABLE or UNAVAILABLE while preserving unrelated answers. Feasibility and
+substitutions are calculated from execution options and are advisory; a future
+planner consumes `GoalExecutionAssessment` rather than interpreting catalog
+rows itself.

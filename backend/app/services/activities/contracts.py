@@ -10,6 +10,7 @@ from app.domain.enums import (
     ActivitySource,
     CyclingType,
     Discipline,
+    HeartRateTemporalQuality,
     HikingType,
     RunningType,
     StrengthType,
@@ -18,6 +19,19 @@ from app.domain.enums import (
 from app.schemas.workouts import PoolSwimmingDetailsData, StrengthExercise
 
 ActivityUpsertOutcome = Literal["inserted", "updated", "unchanged"]
+
+
+@dataclass(slots=True, frozen=True)
+class HeartRateObservationData:
+    """One normalized source measurement associated with a workout."""
+
+    source: ActivitySource
+    source_record_key: str
+    source_name: str | None
+    started_at: datetime
+    ended_at: datetime
+    beats_per_minute: float
+    temporal_quality: HeartRateTemporalQuality
 
 
 @dataclass(slots=True)
@@ -61,6 +75,7 @@ class ActivityImportData:
     route_points: tuple[dict[str, object], ...] = ()
     source_metadata: dict[str, object] = field(default_factory=dict)
     unsupported_metrics: dict[str, object] = field(default_factory=dict)
+    heart_rate_observations: tuple[HeartRateObservationData, ...] = ()
 
 
 class ActivitySourceConflictError(ValueError):
@@ -76,4 +91,5 @@ __all__ = [
     "ActivityImportValidationError",
     "ActivitySourceConflictError",
     "ActivityUpsertOutcome",
+    "HeartRateObservationData",
 ]

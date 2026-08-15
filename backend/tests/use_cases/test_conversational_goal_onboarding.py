@@ -9,7 +9,9 @@ from uuid import UUID
 
 import pytest
 import pytest_asyncio
+from catalog_seed import seed_training_catalog
 from pydantic import JsonValue
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -19,6 +21,7 @@ from sqlalchemy.ext.asyncio import (
 
 from app.config import Settings
 from app.db.base import Base
+from app.db.models import Capability, GoalTemplate, TrainingContext
 from app.domain.enums import (
     OnboardingStatus,
     OnboardingStep,
@@ -29,9 +32,19 @@ from app.integrations.llm.models import (
     GoalExtractionAction,
     GoalExtractionOutput,
     GoalExtractionPatch,
+    GoalTemplateSummary,
 )
 from app.repositories.onboarding import OnboardingRepository
 from app.repositories.profiles import ProfileRepository
+from app.repositories.users import UserRepository
+from app.schemas.catalog_expansion import (
+    CapabilitySummary,
+    CatalogExpansionWorkflowResult,
+    GoalContextMappingOutput,
+    GoalContextProposal,
+    GoalTemplateDraft,
+    TrainingContextSummary,
+)
 from app.schemas.common import TelegramIdentity
 from app.schemas.onboarding_context import FreeTextValidationWorkflowResult
 from app.schemas.onboarding_goal import (
@@ -40,7 +53,6 @@ from app.schemas.onboarding_goal import (
     OnboardingUpdateHandler,
 )
 from app.services.onboarding import OnboardingApplicationError, OnboardingService
-from tests.equipment_seed import seed_equipment_catalog
 
 
 @pytest_asyncio.fixture
@@ -52,7 +64,7 @@ async def goal_database() -> AsyncIterator[
         await connection.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
     async with factory.begin() as session:
-        await seed_equipment_catalog(session)
+        await seed_training_catalog(session)
     yield engine, factory
     await engine.dispose()
 
@@ -74,9 +86,10 @@ class QueueGoalExtractor:
         action: GoalExtractionAction,
         user_text: str,
         existing_draft: GoalExtractionOutput | None,
+        goal_catalog: tuple[GoalTemplateSummary, ...],
         current_date: str,
     ) -> GoalExtractionWorkflowResult:
-        del user_id
+        del user_id, goal_catalog
         self.calls.append((action, user_text, existing_draft))
         self.current_dates.append(current_date)
         return self.results.pop(0)
@@ -128,6 +141,38 @@ class QueueContextWorkflow:
         )
 
 
+@dataclass
+class QueueCatalogExpansionWorkflow:
+    mappings: list[CatalogExpansionWorkflowResult]
+    capabilities: list[CatalogExpansionWorkflowResult]
+    map_calls: int = 0
+    capability_calls: int = 0
+
+    async def map_goal_contexts(
+        self,
+        *,
+        user_id: UUID,
+        templates: tuple[GoalTemplateDraft, ...],
+        active_goals: tuple[GoalTemplateSummary, ...],
+        active_contexts: tuple[TrainingContextSummary, ...],
+    ) -> CatalogExpansionWorkflowResult:
+        del user_id, templates, active_goals, active_contexts
+        self.map_calls += 1
+        return self.mappings.pop(0)
+
+    async def define_context_capabilities(
+        self,
+        *,
+        user_id: UUID,
+        new_contexts: tuple[GoalContextProposal, ...],
+        active_contexts: tuple[TrainingContextSummary, ...],
+        active_capabilities: tuple[CapabilitySummary, ...],
+    ) -> CatalogExpansionWorkflowResult:
+        del user_id, new_contexts, active_contexts, active_capabilities
+        self.capability_calls += 1
+        return self.capabilities.pop(0)
+
+
 def identity(telegram_id: int = 6201) -> TelegramIdentity:
     return TelegramIdentity(
         telegram_user_id=telegram_id,
@@ -155,6 +200,52 @@ def extracted(
     ambiguous_fields: list[str] | None = None,
     message_status: str = "COMPLETE",
 ) -> GoalExtractionWorkflowResult:
+    primary_template: dict[str, object] | None = None
+    if main_goal is not None:
+        folded = main_goal.casefold()
+        known = next(
+            (
+                code
+                for phrase, code in (
+                    ("70.3", "TRIATHLON_HALF_DISTANCE"),
+                    ("half ironman", "TRIATHLON_HALF_DISTANCE"),
+                    ("marathon", "MARATHON"),
+                    ("trail", "TRAIL_RACE"),
+                    ("running", "GENERAL_RUNNING"),
+                    ("run", "GENERAL_RUNNING"),
+                )
+                if phrase in folded
+            ),
+            None,
+        )
+        primary_template = (
+            {
+                "decision": "USE_EXISTING",
+                "code": known,
+                "display_name": None,
+                "description": None,
+            }
+            if known is not None
+            else {
+                "decision": "CREATE",
+                "code": "CUSTOM_ENDURANCE_GOAL",
+                "display_name": "Custom endurance goal",
+                "description": "General preparation for a custom endurance goal.",
+            }
+        )
+    supporting_template: dict[str, object] | None = None
+    if secondary_priority is not None:
+        code = (
+            "MUSCLE_RETENTION"
+            if "muscle" in secondary_priority.casefold()
+            else "STRENGTH_MAINTENANCE"
+        )
+        supporting_template = {
+            "decision": "USE_EXISTING",
+            "code": code,
+            "display_name": None,
+            "description": None,
+        }
     return GoalExtractionWorkflowResult(
         outcome="extracted",
         goal_patch=GoalExtractionPatch.model_validate(
@@ -163,6 +254,8 @@ def extracted(
                 "event_date": event_date,
                 "target_outcome": target_outcome,
                 "secondary_priority": secondary_priority,
+                "primary_template": primary_template,
+                "supporting_template": supporting_template,
                 "missing_fields": missing_fields or [],
                 "ambiguous_fields": ambiguous_fields or [],
                 "message_status": message_status,
@@ -175,12 +268,14 @@ def service(
     factory: async_sessionmaker[AsyncSession],
     extractor: QueueGoalExtractor,
     context_workflow: QueueContextWorkflow | None = None,
+    catalog_expansion_workflow: QueueCatalogExpansionWorkflow | None = None,
 ) -> OnboardingService:
     return OnboardingService(
         session_factory=factory,
         goal_extractor=extractor,
         settings=settings(),
         context_workflow=context_workflow or QueueContextWorkflow(),
+        catalog_expansion_workflow=catalog_expansion_workflow,
     )
 
 
@@ -229,15 +324,13 @@ async def test_raw_goal_is_retained_and_complete_draft_waits_for_confirmation(
     assert result.kind == "goal_confirmation"
     assert result.answers["raw_goal_text"] == raw
     assert result.answers["goal_messages"] == [raw]
-    assert result.answers["goal_draft"] == {
-        "main_goal": "Complete a first Ironman 70.3",
-        "event_date": "2027-07-18",
-        "target_outcome": "Finish safely",
-        "secondary_priority": "Maintain muscle mass",
-        "missing_fields": [],
-        "ambiguous_fields": [],
-        "message_status": "COMPLETE",
-    }
+    draft = result.answers["goal_draft"]
+    assert draft["main_goal"] == "Complete a first Ironman 70.3"
+    assert draft["event_date"] == "2027-07-18"
+    assert draft["target_outcome"] == "Finish safely"
+    assert draft["secondary_priority"] == "Maintain muscle mass"
+    assert draft["primary_template"]["code"] == "TRIATHLON_HALF_DISTANCE"
+    assert draft["supporting_template"]["code"] == "MUSCLE_RETENTION"
     assert extractor.calls == [("CREATE_GOAL", raw, None)]
     assert extractor.current_dates == [date.today().isoformat()]
     async with factory() as session:
@@ -321,15 +414,11 @@ async def test_multiple_turns_merge_and_explicitly_unknown_date_is_complete(
     assert first.kind == "goal_clarification"
     assert second.kind == "goal_clarification"
     assert final.kind == "goal_confirmation"
-    assert final.answers["goal_draft"] == {
-        "main_goal": "Complete a marathon",
-        "event_date": None,
-        "target_outcome": "Finish safely",
-        "secondary_priority": None,
-        "missing_fields": [],
-        "ambiguous_fields": [],
-        "message_status": "COMPLETE",
-    }
+    draft = final.answers["goal_draft"]
+    assert draft["main_goal"] == "Complete a marathon"
+    assert draft["event_date"] is None
+    assert draft["target_outcome"] == "Finish safely"
+    assert draft["primary_template"]["code"] == "MARATHON"
     assert extractor.calls[1][0] == "UPDATE_EXISTING_GOAL"
     assert extractor.calls[1][2] is not None
     assert extractor.calls[1][2].main_goal == "Complete a marathon"
@@ -440,15 +529,11 @@ async def test_iso_date_clarification_does_not_invoke_the_llm(
     assert invalid.kind == "goal_clarification"
     assert invalid.error_code == "invalid_event_date"
     assert updated.kind == "goal_confirmation"
-    assert updated.answers["goal_draft"] == {
-        "main_goal": "Complete my first Ironman 70.3",
-        "event_date": "2027-07-11",
-        "target_outcome": "Finish safely",
-        "secondary_priority": None,
-        "missing_fields": [],
-        "ambiguous_fields": [],
-        "message_status": "COMPLETE",
-    }
+    draft = updated.answers["goal_draft"]
+    assert draft["main_goal"] == "Complete my first Ironman 70.3"
+    assert draft["event_date"] == "2027-07-11"
+    assert draft["target_outcome"] == "Finish safely"
+    assert draft["primary_template"]["code"] == "TRIATHLON_HALF_DISTANCE"
     assert len(extractor.calls) == 1
 
 
@@ -485,15 +570,12 @@ async def test_explicit_main_goal_correction_overrides_only_that_field(
     )
 
     assert corrected.kind == "goal_confirmation"
-    assert corrected.answers["goal_draft"] == {
-        "main_goal": "Complete a half marathon",
-        "event_date": "2027-09-19",
-        "target_outcome": "Finish safely",
-        "secondary_priority": "Maintain strength",
-        "missing_fields": [],
-        "ambiguous_fields": [],
-        "message_status": "COMPLETE",
-    }
+    draft = corrected.answers["goal_draft"]
+    assert draft["main_goal"] == "Complete a half marathon"
+    assert draft["event_date"] == "2027-09-19"
+    assert draft["target_outcome"] == "Finish safely"
+    assert draft["secondary_priority"] == "Maintain strength"
+    assert draft["supporting_template"]["code"] == "STRENGTH_MAINTENANCE"
 
 
 @pytest.mark.asyncio
@@ -523,7 +605,8 @@ async def test_confirmation_persists_goal_then_requires_context_before_completio
         "Tuesday and Thursday after work, plus a longer Saturday session.",
     )
     limitations = await onboarding.choose_equipment(athlete, "done")
-    completed = await onboarding.choose_health_limitations(athlete, "none")
+    history = await onboarding.choose_health_limitations(athlete, "none")
+    completed = await onboarding.skip_training_history(athlete)
 
     assert draft.kind == "goal_confirmation"
     assert confirmed.kind == "availability_intake"
@@ -531,8 +614,9 @@ async def test_confirmation_persists_goal_then_requires_context_before_completio
     assert equipment.kind == "equipment_intake"
     assert equipment.current_step is OnboardingStep.EQUIPMENT_INTAKE
     assert limitations.kind == "health_limitations_intake"
+    assert history.kind == "training_history_import"
     assert completed.kind == "onboarding_completed"
-    assert completed.current_step is OnboardingStep.HEALTH_LIMITATIONS_INTAKE
+    assert completed.current_step is OnboardingStep.TRAINING_HISTORY_IMPORT
     assert completed.onboarding_status is OnboardingStatus.COMPLETED
     assert completed.user_status is UserStatus.ONBOARDING_COMPLETED
     assert "goal_draft" not in completed.answers
@@ -559,24 +643,24 @@ async def test_confirmation_persists_goal_then_requires_context_before_completio
         )
         assert profile_context.health_limitations_text == "NONE_REPORTED"
 
+    with pytest.raises(OnboardingApplicationError) as exc_info:
+        await onboarding.update_onboarding_data(
+            user_id=completed.user_id,
+            payload={"main_goal": "Finish an Ironman 70.3"},
+        )
+    assert exc_info.value.code == "invalid_onboarding_update"
     updated = await onboarding.update_onboarding_data(
         user_id=completed.user_id,
-        payload={
-            "main_goal": "Finish an Ironman 70.3",
-            "target_outcome": "Finish in a decent time",
-        },
+        payload={"target_outcome": "Finish in a decent time"},
     )
 
-    assert updated.updated_fields == {
-        "main_goal": "Finish an Ironman 70.3",
-        "target_outcome": "Finish in a decent time",
-    }
+    assert updated.updated_fields == {"target_outcome": "Finish in a decent time"}
     async with factory() as session:
         goal = await ProfileRepository(session).get_training_goal(
             user_id=completed.user_id
         )
         assert goal is not None
-        assert goal.main_goal == "Finish an Ironman 70.3"
+        assert goal.main_goal == "Improve 5 km performance"
         assert goal.target_outcome == "Finish in a decent time"
         assert goal.original_description == raw
         assert goal.event_date is not None
@@ -589,8 +673,316 @@ async def test_confirmation_persists_goal_then_requires_context_before_completio
         onboarding_state = await OnboardingRepository(session).require_for_user(
             user_id=completed.user_id,
         )
-        assert onboarding_state.status is OnboardingStatus.ACTIVE
-        assert onboarding_state.current_step is OnboardingStep.EQUIPMENT_INTAKE
+        assert onboarding_state.status is OnboardingStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_dynamic_expansion_failure_is_atomic_and_retry_publishes_everything(
+    goal_database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
+) -> None:
+    _, factory = goal_database
+    mapping = GoalContextMappingOutput.model_validate(
+        {
+            "templates": [
+                {
+                    "template_code": "CUSTOM_ENDURANCE_GOAL",
+                    "contexts": [
+                        {
+                            "decision": "CREATE",
+                            "code": "rowing_indoor",
+                            "display_name": "Indoor rowing",
+                            "description": (
+                                "General indoor rowing preparation and conditioning."
+                            ),
+                            "discipline": "OTHER",
+                            "role": "TARGET",
+                            "priority": 10,
+                        }
+                    ],
+                },
+                {
+                    "template_code": "POSTURE_MAINTENANCE",
+                    "contexts": [
+                        {
+                            "decision": "CREATE",
+                            "code": "rowing_indoor",
+                            "display_name": "Indoor rowing",
+                            "description": (
+                                "General indoor rowing preparation and conditioning."
+                            ),
+                            "discipline": "OTHER",
+                            "role": "SUPPORTING",
+                            "priority": 20,
+                        }
+                    ],
+                },
+            ]
+        }
+    )
+    capability_definition = {
+        "capabilities": [
+            {
+                "decision": "CREATE",
+                "code": "rowing_machine",
+                "display_name": "Rowing machine",
+                "description": "Equipment used for indoor rowing sessions.",
+                "kind": "EQUIPMENT",
+            }
+        ],
+        "contexts": [
+            {
+                "target_context_code": "rowing_indoor",
+                "options": [
+                    {
+                        "code": "rowing_machine_execution",
+                        "display_name": "Indoor rowing machine",
+                        "execution_context_code": "rowing_indoor",
+                        "role": "PREFERRED",
+                        "priority": 10,
+                        "limitations": [],
+                        "requirements": [
+                            {
+                                "capability_code": "rowing_machine",
+                                "importance": "REQUIRED",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+    expansion = QueueCatalogExpansionWorkflow(
+        mappings=[
+            CatalogExpansionWorkflowResult(
+                outcome="succeeded", context_mapping=mapping
+            ),
+            CatalogExpansionWorkflowResult(
+                outcome="succeeded", context_mapping=mapping
+            ),
+        ],
+        capabilities=[
+            CatalogExpansionWorkflowResult(
+                outcome="provider_error", error_code="provider_failure"
+            ),
+            CatalogExpansionWorkflowResult.model_validate(
+                {
+                    "outcome": "succeeded",
+                    "capability_definition": capability_definition,
+                }
+            ),
+        ],
+    )
+    onboarding = service(
+        factory,
+        QueueGoalExtractor(
+            [
+                GoalExtractionWorkflowResult(
+                    outcome="extracted",
+                    goal_patch=GoalExtractionPatch.model_validate(
+                        {
+                            "main_goal": "Prepare for an indoor rowing event",
+                            "event_date": None,
+                            "target_outcome": "Finish the event comfortably",
+                            "secondary_priority": "Maintain good posture",
+                            "primary_template": {
+                                "decision": "CREATE",
+                                "code": "CUSTOM_ENDURANCE_GOAL",
+                                "display_name": "Custom endurance goal",
+                                "description": (
+                                    "General preparation for a custom endurance goal."
+                                ),
+                            },
+                            "supporting_template": {
+                                "decision": "CREATE",
+                                "code": "POSTURE_MAINTENANCE",
+                                "display_name": "Posture maintenance",
+                                "description": (
+                                    "Maintain posture during endurance preparation."
+                                ),
+                            },
+                            "missing_fields": [],
+                            "ambiguous_fields": [],
+                            "message_status": "COMPLETE",
+                        }
+                    ),
+                )
+            ]
+        ),
+        catalog_expansion_workflow=expansion,
+    )
+    athlete = identity(6220)
+    await start_goal(onboarding, athlete)
+    await onboarding.handle_text(
+        athlete,
+        "I want to prepare for an indoor rowing event, finish comfortably, "
+        "and maintain good posture.",
+    )
+
+    failed = await onboarding.confirm_goal(athlete)
+
+    assert failed.kind == "goal_confirmation"
+    assert failed.error_code == "provider_failure"
+    assert "_catalog_expansion_in_flight" not in failed.answers
+    async with factory() as session:
+        assert (
+            await session.scalar(
+                select(GoalTemplate).where(GoalTemplate.code == "CUSTOM_ENDURANCE_GOAL")
+            )
+            is None
+        )
+        assert (
+            await session.scalar(
+                select(GoalTemplate).where(GoalTemplate.code == "POSTURE_MAINTENANCE")
+            )
+            is None
+        )
+        assert (
+            await session.scalar(
+                select(TrainingContext).where(TrainingContext.code == "rowing_indoor")
+            )
+            is None
+        )
+        assert (
+            await session.scalar(
+                select(Capability).where(Capability.code == "rowing_machine")
+            )
+            is None
+        )
+        assert (
+            await ProfileRepository(session).get_training_goal(user_id=failed.user_id)
+            is None
+        )
+
+    retried = await onboarding.confirm_goal(athlete)
+
+    assert retried.kind == "availability_intake"
+    assert expansion.map_calls == 2
+    assert expansion.capability_calls == 2
+    review = await onboarding.handle_text(athlete, "Weekday mornings.")
+    assert review.capability_review is not None
+    rowing_machine = next(
+        item.id
+        for item in review.capability_review.options
+        if item.code == "rowing_machine"
+    )
+    await onboarding.choose_equipment(athlete, str(rowing_machine))
+    await onboarding.choose_equipment(athlete, "done")
+    history = await onboarding.choose_health_limitations(athlete, "none")
+    completed = await onboarding.skip_training_history(athlete)
+    assert history.kind == "training_history_import"
+    assert completed.kind == "onboarding_completed"
+    async with factory() as session:
+        goal = await ProfileRepository(session).get_training_goal(
+            user_id=retried.user_id
+        )
+        template = await session.scalar(
+            select(GoalTemplate).where(GoalTemplate.code == "CUSTOM_ENDURANCE_GOAL")
+        )
+        supporting_template = await session.scalar(
+            select(GoalTemplate).where(GoalTemplate.code == "POSTURE_MAINTENANCE")
+        )
+        context = await session.scalar(
+            select(TrainingContext).where(TrainingContext.code == "rowing_indoor")
+        )
+        capability = await session.scalar(
+            select(Capability).where(Capability.code == "rowing_machine")
+        )
+        assert goal is not None
+        assert template is not None
+        assert supporting_template is not None
+        assert context is not None
+        assert capability is not None
+        assert goal.goal_template_id == template.id
+        assert goal.supporting_goal_template_id == supporting_template.id
+
+
+@pytest.mark.asyncio
+async def test_historical_unclassified_goal_is_classified_before_equipment_review(
+    goal_database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
+) -> None:
+    _, factory = goal_database
+    extractor = QueueGoalExtractor(
+        [
+            GoalExtractionWorkflowResult(
+                outcome="extracted",
+                goal_patch=GoalExtractionPatch.model_validate(
+                    {
+                        "main_goal": None,
+                        "event_date": None,
+                        "target_outcome": None,
+                        "secondary_priority": None,
+                        "primary_template": {
+                            "decision": "USE_EXISTING",
+                            "code": "TRIATHLON_HALF_DISTANCE",
+                            "display_name": None,
+                            "description": None,
+                        },
+                        "supporting_template": {
+                            "decision": "NONE",
+                            "code": None,
+                            "display_name": None,
+                            "description": None,
+                        },
+                        "missing_fields": [],
+                        "ambiguous_fields": [],
+                        "message_status": "COMPLETE",
+                    }
+                ),
+            )
+        ]
+    )
+    onboarding = service(factory, extractor)
+    athlete = identity(6221)
+    await start_goal(onboarding, athlete)
+    original = "I want to finish a local middle-distance triathlon."
+    async with factory.begin() as session:
+        user = await UserRepository(session).get_by_telegram_id(
+            athlete.telegram_user_id
+        )
+        assert user is not None
+        await ProfileRepository(session).upsert_conversational_training_goal(
+            user_id=user.id,
+            main_goal="Finish a middle-distance triathlon",
+            event_date=None,
+            target_outcome="Finish comfortably",
+            secondary_priority=None,
+            original_description=original,
+        )
+        await OnboardingRepository(session).save_progress(
+            user_id=user.id,
+            current_step=OnboardingStep.AVAILABILITY_INTAKE,
+            answers={
+                "raw_goal_text": original,
+                "goal_messages": [original],
+            },
+        )
+
+    confirmation = await onboarding.handle_text(athlete, "Weekend mornings.")
+
+    assert confirmation.kind == "goal_confirmation"
+    assert confirmation.answers["goal_messages"] == [original]
+    assert extractor.calls[0][0] == "UPDATE_EXISTING_GOAL"
+    assert extractor.calls[0][1].startswith("Classify my existing main goal")
+    assert extractor.calls[0][2] is not None
+    assert extractor.calls[0][2].main_goal == "Finish a middle-distance triathlon"
+
+    review = await onboarding.confirm_goal(athlete)
+
+    assert review.kind == "equipment_intake"
+    assert review.capability_review is not None
+    assert review.current_step is OnboardingStep.EQUIPMENT_INTAKE
+    async with factory() as session:
+        user = await UserRepository(session).get_by_telegram_id(
+            athlete.telegram_user_id
+        )
+        assert user is not None
+        goal = await ProfileRepository(session).get_training_goal(user_id=user.id)
+        profile = await ProfileRepository(session).get_athlete_profile(user_id=user.id)
+        assert goal is not None
+        assert goal.goal_template_id is not None
+        assert goal.original_description == original
+        assert profile is not None
+        assert profile.availability_text == "Weekend mornings."
 
 
 @pytest.mark.asyncio
@@ -626,6 +1018,7 @@ async def test_completed_athlete_requires_explicit_profile_settings_flow(
     await onboarding.handle_text(athlete, "Tuesday, Thursday, and Sunday mornings.")
     await onboarding.choose_equipment(athlete, "done")
     await onboarding.choose_health_limitations(athlete, "none")
+    await onboarding.skip_training_history(athlete)
 
     request = "change my goal to finish my ironman 70.3 in a decent time"
     with pytest.raises(OnboardingApplicationError, match="profile_settings_required"):
@@ -660,11 +1053,13 @@ async def test_other_equipment_and_described_limitations_retain_literal_text(
     validation_count_before_callbacks = len(context.validation_calls)
     health = await onboarding.choose_equipment(athlete, "done")
     health_text = "  Recovering from a previous ankle sprain; avoid steep descents.  "
-    completed = await onboarding.handle_text(athlete, health_text)
+    history = await onboarding.handle_text(athlete, health_text)
+    completed = await onboarding.skip_training_history(athlete)
 
     assert confirmed.kind == "availability_intake"
     assert equipment.kind == "equipment_intake"
     assert health.kind == "health_limitations_intake"
+    assert history.kind == "training_history_import"
     assert completed.kind == "onboarding_completed"
     # Deterministic callbacks did not call either LangGraph method.
     assert validation_count_before_callbacks == 1
@@ -710,7 +1105,7 @@ async def test_equipment_review_is_deterministic_and_resumes_without_provider(
     assert failed.current_step is OnboardingStep.EQUIPMENT_INTAKE
     assert resumed.kind == "equipment_intake"
     assert resumed.current_step is OnboardingStep.EQUIPMENT_INTAKE
-    assert resumed.equipment_review is not None
+    assert resumed.capability_review is not None
     assert len(context.validation_calls) == 1
 
     async with factory() as session:
@@ -817,6 +1212,7 @@ async def test_completed_chat_edit_requires_explicit_profile_settings_flow(
     await onboarding.handle_text(athlete, "Tuesday, Thursday, and Saturday.")
     await onboarding.choose_equipment(athlete, "done")
     await onboarding.choose_health_limitations(athlete, "none")
+    await onboarding.skip_training_history(athlete)
 
     with pytest.raises(OnboardingApplicationError, match="profile_settings_required"):
         await onboarding.handle_text(

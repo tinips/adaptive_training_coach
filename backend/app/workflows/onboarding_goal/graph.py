@@ -21,6 +21,7 @@ from app.integrations.llm.mock import FakeLLMScenario
 from app.integrations.llm.models import (
     GoalExtractionAction,
     GoalExtractionOutput,
+    GoalTemplateSummary,
     StructuredOnboardingModel,
 )
 from app.observability.callbacks import build_langchain_run_config
@@ -132,6 +133,7 @@ class LangGraphGoalExtractor:
         action: GoalExtractionAction,
         user_text: str,
         existing_draft: GoalExtractionOutput | None,
+        goal_catalog: tuple[GoalTemplateSummary, ...],
         current_date: str,
     ) -> GoalExtractionWorkflowResult:
         started_at = datetime.now(UTC)
@@ -150,6 +152,7 @@ class LangGraphGoalExtractor:
             "action": action,
             "user_text": user_text,
             "existing_draft": existing_draft,
+            "goal_catalog": goal_catalog,
             "current_date": current_date,
         }
         try:

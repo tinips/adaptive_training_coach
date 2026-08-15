@@ -32,6 +32,7 @@ from app.integrations.llm.models import (
     GoalExtractionAction,
     GoalExtractionOutput,
     GoalExtractionPatch,
+    GoalTemplateSummary,
     LLMConfigurationError,
     LLMProviderError,
     StructuredOnboardingModel,
@@ -59,11 +60,6 @@ class UpdateOnboardingSchema(BaseModel):
 
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
-    main_goal: str | None = Field(
-        default=None,
-        max_length=500,
-        description="The athlete's primary training or event goal.",
-    )
     target_outcome: str | None = Field(
         default=None,
         max_length=500,
@@ -132,7 +128,7 @@ class UpdateOnboardingSchema(BaseModel):
         InjectedToolArg,
     ] = None
 
-    @field_validator("main_goal", "target_outcome")
+    @field_validator("target_outcome")
     @classmethod
     def normalize_optional_text(cls, value: str | None) -> str | None:
         if value is None:
@@ -193,6 +189,7 @@ def build_goal_messages(
     action: GoalExtractionAction,
     user_text: str,
     existing_draft: GoalExtractionOutput | None,
+    goal_catalog: tuple[GoalTemplateSummary, ...],
     current_date: str,
 ) -> list[BaseMessage]:
     """Send the operation, current draft, and latest answer as separate inputs."""
@@ -206,6 +203,19 @@ def build_goal_messages(
         action=action,
         current_date=current_date,
         draft_json=draft_json,
+        catalog_json=json.dumps(
+            [
+                {
+                    "code": item.code,
+                    "template_type": item.kind,
+                    "display_name": item.display_name,
+                    "description": item.description,
+                }
+                for item in goal_catalog
+            ],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
     )
     return [
         SystemMessage(content=system_text),
@@ -232,6 +242,7 @@ def make_extract_goal_node(
             action=action,
             user_text=state["user_text"],
             existing_draft=state.get("existing_draft"),
+            goal_catalog=state.get("goal_catalog", ()),
             current_date=state["current_date"],
         )
         try:
@@ -266,6 +277,10 @@ def make_extract_goal_node(
         raw_output = response.output
         if isinstance(raw_output, BaseModel):
             raw_output = raw_output.model_dump(mode="json")
+        raw_output = _normalize_copied_catalog_candidates(
+            raw_output,
+            goal_catalog=state.get("goal_catalog", ()),
+        )
         try:
             goal_patch = GoalExtractionPatch.model_validate(raw_output)
         except (ValidationError, TypeError, ValueError):
@@ -291,6 +306,53 @@ def make_extract_goal_node(
     return RunnableLambda(extract_goal, name="extract_goal")
 
 
+def _normalize_copied_catalog_candidates(
+    raw_output: object,
+    *,
+    goal_catalog: tuple[GoalTemplateSummary, ...],
+) -> object:
+    """Repair only exact active-catalog rows copied into decision fields."""
+
+    if not isinstance(raw_output, dict):
+        return raw_output
+    normalized = dict(raw_output)
+    active: dict[tuple[str, str], GoalTemplateSummary] = {
+        (item.code, item.kind): item for item in goal_catalog
+    }
+    for field, expected_kind in (
+        ("primary_template", "PRIMARY"),
+        ("supporting_template", "SUPPORTING"),
+    ):
+        candidate = normalized.get(field)
+        if not isinstance(candidate, dict) or "decision" in candidate:
+            continue
+        code = candidate.get("code")
+        copied_kind = candidate.get("kind", candidate.get("template_type"))
+        candidate_keys = set(candidate)
+        copied_row_keys = {
+            frozenset({"code", "kind", "display_name", "description"}),
+            frozenset({"code", "template_type", "display_name", "description"}),
+        }
+        catalog_item = (
+            active.get((code, expected_kind)) if isinstance(code, str) else None
+        )
+        if (
+            isinstance(code, str)
+            and copied_kind == expected_kind
+            and catalog_item is not None
+            and frozenset(candidate_keys) in copied_row_keys
+            and candidate.get("display_name") == catalog_item.display_name
+            and candidate.get("description") == catalog_item.description
+        ):
+            normalized[field] = {
+                "decision": "USE_EXISTING",
+                "code": code,
+                "display_name": None,
+                "description": None,
+            }
+    return normalized
+
+
 def build_onboarding_modification_messages(user_text: str) -> list[BaseMessage]:
     """Build agent context for a completed athlete-data modification."""
 
@@ -299,7 +361,7 @@ def build_onboarding_modification_messages(user_text: str) -> list[BaseMessage]:
         "onboarding_modification",
         tool_name="update_onboarding_data",
         supported_fields=(
-            "main goal, target outcome, event date, age, birth year, gender, "
+            "target outcome, event date, age, birth year, gender, "
             "weight, height, availability, and training limitations"
         ),
     )

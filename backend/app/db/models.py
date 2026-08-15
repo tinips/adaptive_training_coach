@@ -38,10 +38,18 @@ from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin, utc_now
 from app.domain.enums import (
     ActivitySource,
     AppleHealthImportStatus,
+    AthleteCapabilityStatus,
     AthleteGender,
+    CapabilityImportance,
+    CapabilityKind,
+    CatalogItemSource,
+    CatalogItemStatus,
     CyclingType,
     Discipline,
-    EquipmentImportance,
+    ExecutionOptionRole,
+    GoalContextRole,
+    GoalTemplateKind,
+    HeartRateTemporalQuality,
     HikingType,
     LLMUsageStatus,
     OnboardingStatus,
@@ -53,6 +61,7 @@ from app.domain.enums import (
     SwimmingStroke,
     TrainingFileFormat,
     TrainingGoalStatus,
+    TrainingImportContext,
     UserStatus,
     WorkoutFlowStep,
 )
@@ -174,6 +183,12 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         passive_deletes=True,
         lazy="raise",
     )
+    heart_rate_observations: Mapped[list[WorkoutHeartRateObservation]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="raise",
+    )
     workout_flow_session: Mapped[WorkoutFlowSession | None] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
@@ -225,6 +240,11 @@ class OnboardingSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     user: Mapped[User] = relationship(
         back_populates="onboarding_session",
+        lazy="raise",
+    )
+    import_jobs: Mapped[list[AppleHealthImportJob]] = relationship(
+        back_populates="onboarding_session",
+        passive_deletes=True,
         lazy="raise",
     )
 
@@ -319,6 +339,16 @@ class TrainingGoal(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         String(500),
         nullable=True,
     )
+    goal_template_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("goal_templates.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    supporting_goal_template_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("goal_templates.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
     original_description: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[TrainingGoalStatus] = mapped_column(
         persisted_enum(
@@ -336,48 +366,204 @@ class TrainingGoal(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
 
 
-class EquipmentCatalog(UUIDPrimaryKeyMixin, TimestampMixin, Base):
-    """Static equipment knowledge for one supported discipline."""
+class GoalTemplate(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Reusable primary or supporting goal understood by the product."""
 
-    __tablename__ = "equipment_catalog"
+    __tablename__ = "goal_templates"
+    __table_args__ = (
+        UniqueConstraint("code", name="uq_goal_templates_code"),
+        CheckConstraint(
+            "code = upper(code) AND length(code) BETWEEN 3 AND 64",
+            name="goal_template_code",
+        ),
+        CheckConstraint("definition_version > 0", name="definition_version_positive"),
+    )
+
+    code: Mapped[str] = mapped_column(String(64), nullable=False)
+    kind: Mapped[GoalTemplateKind] = mapped_column(
+        persisted_enum(GoalTemplateKind, name="goal_template_kind", length=16),
+        nullable=False,
+    )
+    display_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    description: Mapped[str] = mapped_column(String(500), nullable=False)
+    source: Mapped[CatalogItemSource] = mapped_column(
+        persisted_enum(CatalogItemSource, name="catalog_item_source", length=16),
+        nullable=False,
+    )
+    status: Mapped[CatalogItemStatus] = mapped_column(
+        persisted_enum(CatalogItemStatus, name="catalog_item_status", length=16),
+        nullable=False,
+    )
+    definition_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class TrainingContext(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Planning context more specific than an imported workout discipline."""
+
+    __tablename__ = "training_contexts"
+    __table_args__ = (
+        UniqueConstraint("code", name="uq_training_contexts_code"),
+        CheckConstraint(
+            "code = lower(code) AND length(code) BETWEEN 3 AND 64",
+            name="training_context_code",
+        ),
+        CheckConstraint("definition_version > 0", name="definition_version_positive"),
+    )
+
+    code: Mapped[str] = mapped_column(String(64), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    description: Mapped[str] = mapped_column(String(500), nullable=False)
+    discipline: Mapped[Discipline] = mapped_column(
+        persisted_enum(Discipline, name="training_context_discipline", length=16),
+        nullable=False,
+    )
+    source: Mapped[CatalogItemSource] = mapped_column(
+        persisted_enum(CatalogItemSource, name="catalog_item_source", length=16),
+        nullable=False,
+    )
+    status: Mapped[CatalogItemStatus] = mapped_column(
+        persisted_enum(CatalogItemStatus, name="catalog_item_status", length=16),
+        nullable=False,
+    )
+    definition_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class GoalTemplateContext(TimestampMixin, Base):
+    __tablename__ = "goal_template_contexts"
+    __table_args__ = (CheckConstraint("priority >= 0", name="priority_nonnegative"),)
+
+    goal_template_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("goal_templates.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    training_context_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("training_contexts.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    role: Mapped[GoalContextRole] = mapped_column(
+        persisted_enum(GoalContextRole, name="goal_context_role", length=16),
+        nullable=False,
+    )
+    priority: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class Capability(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Global equipment, access, or facility capability."""
+
+    __tablename__ = "capabilities"
+    __table_args__ = (
+        UniqueConstraint("code", name="uq_capabilities_code"),
+        CheckConstraint(
+            "code = lower(code) AND length(code) BETWEEN 3 AND 64",
+            name="capability_code",
+        ),
+        CheckConstraint("definition_version > 0", name="definition_version_positive"),
+    )
+
+    code: Mapped[str] = mapped_column(String(64), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    description: Mapped[str] = mapped_column(String(500), nullable=False)
+    kind: Mapped[CapabilityKind] = mapped_column(
+        persisted_enum(CapabilityKind, name="capability_kind", length=16),
+        nullable=False,
+    )
+    source: Mapped[CatalogItemSource] = mapped_column(
+        persisted_enum(CatalogItemSource, name="catalog_item_source", length=16),
+        nullable=False,
+    )
+    status: Mapped[CatalogItemStatus] = mapped_column(
+        persisted_enum(CatalogItemStatus, name="catalog_item_status", length=16),
+        nullable=False,
+    )
+    definition_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class ContextExecutionOption(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """One preferred or substitute way to execute a target context."""
+
+    __tablename__ = "context_execution_options"
     __table_args__ = (
         UniqueConstraint(
-            "discipline", "equipment", name="uq_equipment_catalog_discipline_item"
+            "target_context_id",
+            "code",
+            name="uq_context_execution_options_context_code",
+        ),
+        CheckConstraint("priority >= 0", name="priority_nonnegative"),
+        CheckConstraint(
+            "code = lower(code) AND length(code) BETWEEN 3 AND 64",
+            name="execution_option_code",
         ),
     )
 
-    discipline: Mapped[Discipline] = mapped_column(
-        persisted_enum(Discipline, name="equipment_catalog_discipline", length=16),
+    target_context_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("training_contexts.id", ondelete="CASCADE"),
         nullable=False,
     )
-    equipment: Mapped[str] = mapped_column(String(64), nullable=False)
+    execution_context_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("training_contexts.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    code: Mapped[str] = mapped_column(String(64), nullable=False)
     display_name: Mapped[str] = mapped_column(String(120), nullable=False)
-    importance: Mapped[EquipmentImportance] = mapped_column(
-        persisted_enum(EquipmentImportance, name="equipment_importance", length=16),
+    role: Mapped[ExecutionOptionRole] = mapped_column(
+        persisted_enum(ExecutionOptionRole, name="execution_option_role", length=16),
         nullable=False,
     )
-    substitutions: Mapped[list[str]] = mapped_column(
+    priority: Mapped[int] = mapped_column(Integer, nullable=False)
+    limitations: Mapped[list[str]] = mapped_column(
         json_document(), default=list, nullable=False
     )
 
 
-class AthleteEquipment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
-    """Equipment to which an athlete currently has access."""
+class ExecutionOptionCapability(TimestampMixin, Base):
+    __tablename__ = "execution_option_capabilities"
 
-    __tablename__ = "athlete_equipment"
-    __table_args__ = (
-        UniqueConstraint(
-            "athlete_id", "equipment_id", name="uq_athlete_equipment_item"
-        ),
-        Index("ix_athlete_equipment_athlete_id", "athlete_id"),
+    execution_option_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("context_execution_options.id", ondelete="CASCADE"),
+        primary_key=True,
     )
+    capability_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("capabilities.id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    importance: Mapped[CapabilityImportance] = mapped_column(
+        persisted_enum(
+            CapabilityImportance,
+            name="execution_capability_importance",
+            length=16,
+        ),
+        nullable=False,
+    )
+
+
+class AthleteCapability(TimestampMixin, Base):
+    """One athlete's explicit current answer for a global capability."""
+
+    __tablename__ = "athlete_capabilities"
+    __table_args__ = (Index("ix_athlete_capabilities_athlete_id", "athlete_id"),)
 
     athlete_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
-    )
-    equipment_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True),
-        ForeignKey("equipment_catalog.id", ondelete="CASCADE"),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    capability_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("capabilities.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    status: Mapped[AthleteCapabilityStatus] = mapped_column(
+        persisted_enum(
+            AthleteCapabilityStatus,
+            name="athlete_capability_status",
+            length=16,
+        ),
         nullable=False,
     )
 
@@ -475,6 +661,12 @@ class Workout(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     import_jobs: Mapped[list[AppleHealthImportJob]] = relationship(
         back_populates="workout",
+        passive_deletes=True,
+        lazy="raise",
+    )
+    heart_rate_observations: Mapped[list[WorkoutHeartRateObservation]] = relationship(
+        back_populates="workout",
+        cascade="all, delete-orphan",
         passive_deletes=True,
         lazy="raise",
     )
@@ -955,6 +1147,21 @@ class AppleHealthImportJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
     )
+    context: Mapped[TrainingImportContext] = mapped_column(
+        persisted_enum(
+            TrainingImportContext,
+            name="training_import_context",
+            length=24,
+        ),
+        default=TrainingImportContext.POST_ONBOARDING,
+        server_default=TrainingImportContext.POST_ONBOARDING.value,
+        nullable=False,
+    )
+    onboarding_session_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("onboarding_sessions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     workout_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True),
         ForeignKey("workouts.id", ondelete="SET NULL"),
@@ -1048,11 +1255,20 @@ class AppleHealthImportJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         back_populates="apple_health_import_jobs",
         lazy="raise",
     )
+    onboarding_session: Mapped[OnboardingSession | None] = relationship(
+        back_populates="import_jobs",
+        lazy="raise",
+    )
     workout: Mapped[Workout | None] = relationship(
         back_populates="import_jobs",
         lazy="raise",
     )
     source_links: Mapped[list[ActivitySourceLink]] = relationship(
+        back_populates="import_job",
+        passive_deletes=True,
+        lazy="raise",
+    )
+    heart_rate_observations: Mapped[list[WorkoutHeartRateObservation]] = relationship(
         back_populates="import_job",
         passive_deletes=True,
         lazy="raise",
@@ -1140,6 +1356,79 @@ class ActivitySourceLink(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     @activity_id.setter
     def activity_id(self, value: uuid.UUID) -> None:
         self.workout_id = value
+
+
+class WorkoutHeartRateObservation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Quality-labelled source observation retained for future recalculation."""
+
+    __tablename__ = "workout_heart_rate_observations"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "source",
+            "source_record_key",
+            name="uq_workout_hr_observations_user_source_key",
+        ),
+        Index(
+            "ix_workout_hr_observations_workout_started",
+            "workout_id",
+            "started_at",
+        ),
+        CheckConstraint("beats_per_minute > 0", name="beats_per_minute_positive"),
+        CheckConstraint("ended_at >= started_at", name="observation_period_order"),
+    )
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    workout_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("workouts.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    source: Mapped[ActivitySource] = mapped_column(
+        persisted_enum(
+            ActivitySource,
+            name="heart_rate_observation_source",
+            length=16,
+        ),
+        nullable=False,
+    )
+    source_record_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    ended_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    beats_per_minute: Mapped[float] = mapped_column(Float, nullable=False)
+    temporal_quality: Mapped[HeartRateTemporalQuality] = mapped_column(
+        persisted_enum(
+            HeartRateTemporalQuality,
+            name="heart_rate_observation_quality",
+            length=24,
+        ),
+        nullable=False,
+    )
+    import_job_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("apple_health_import_jobs.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    user: Mapped[User] = relationship(
+        back_populates="heart_rate_observations",
+        lazy="raise",
+    )
+    workout: Mapped[Workout] = relationship(
+        back_populates="heart_rate_observations",
+        lazy="raise",
+    )
+    import_job: Mapped[AppleHealthImportJob | None] = relationship(
+        back_populates="heart_rate_observations",
+        lazy="raise",
+    )
 
 
 class WorkoutFlowSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -1280,10 +1569,14 @@ __all__ = [
     "Activity",
     "ActivitySourceLink",
     "AppleHealthImportJob",
-    "AthleteEquipment",
+    "AthleteCapability",
     "AthleteProfile",
+    "Capability",
+    "ContextExecutionOption",
     "CyclingWorkoutDetails",
-    "EquipmentCatalog",
+    "ExecutionOptionCapability",
+    "GoalTemplate",
+    "GoalTemplateContext",
     "HikingWorkoutDetails",
     "LLMProviderMode",
     "LLMUsage",
@@ -1293,9 +1586,11 @@ __all__ = [
     "RunningWorkoutDetails",
     "StrengthWorkoutDetails",
     "SwimmingWorkoutDetails",
+    "TrainingContext",
     "TrainingGoal",
     "User",
     "Workout",
     "WorkoutFlowSession",
+    "WorkoutHeartRateObservation",
     "WorkoutSourceLink",
 ]

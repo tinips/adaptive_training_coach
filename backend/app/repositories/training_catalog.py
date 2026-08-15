@@ -1,0 +1,135 @@
+"""Reads of reusable global training-goal and capability knowledge."""
+
+from __future__ import annotations
+
+import uuid
+from collections.abc import Collection
+from typing import cast
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
+
+from app.db.models import (
+    Capability,
+    ContextExecutionOption,
+    ExecutionOptionCapability,
+    GoalTemplate,
+    GoalTemplateContext,
+    TrainingContext,
+)
+from app.domain.enums import CatalogItemStatus, GoalTemplateKind
+
+
+class TrainingCatalogRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def active_goal_templates(self) -> tuple[GoalTemplate, ...]:
+        rows = await self._session.scalars(
+            select(GoalTemplate)
+            .where(GoalTemplate.status == CatalogItemStatus.ACTIVE)
+            .order_by(GoalTemplate.kind, GoalTemplate.code)
+        )
+        return tuple(rows)
+
+    async def active_goal_by_code(
+        self, *, code: str, kind: GoalTemplateKind | None = None
+    ) -> GoalTemplate | None:
+        statement = select(GoalTemplate).where(
+            GoalTemplate.code == code,
+            GoalTemplate.status == CatalogItemStatus.ACTIVE,
+        )
+        if kind is not None:
+            statement = statement.where(GoalTemplate.kind == kind)
+        return cast(GoalTemplate | None, await self._session.scalar(statement))
+
+    async def active_goal_by_id(
+        self, *, goal_template_id: uuid.UUID
+    ) -> GoalTemplate | None:
+        return cast(
+            GoalTemplate | None,
+            await self._session.scalar(
+                select(GoalTemplate).where(
+                    GoalTemplate.id == goal_template_id,
+                    GoalTemplate.status == CatalogItemStatus.ACTIVE,
+                )
+            ),
+        )
+
+    async def active_contexts(self) -> tuple[TrainingContext, ...]:
+        rows = await self._session.scalars(
+            select(TrainingContext)
+            .where(TrainingContext.status == CatalogItemStatus.ACTIVE)
+            .order_by(TrainingContext.code)
+        )
+        return tuple(rows)
+
+    async def active_capabilities(self) -> tuple[Capability, ...]:
+        rows = await self._session.scalars(
+            select(Capability)
+            .where(Capability.status == CatalogItemStatus.ACTIVE)
+            .order_by(Capability.code)
+        )
+        return tuple(rows)
+
+    async def contexts_for_goals(
+        self, *, goal_template_ids: Collection[uuid.UUID]
+    ) -> tuple[tuple[GoalTemplateContext, TrainingContext], ...]:
+        if not goal_template_ids:
+            return ()
+        rows = await self._session.execute(
+            select(GoalTemplateContext, TrainingContext)
+            .join(
+                TrainingContext,
+                TrainingContext.id == GoalTemplateContext.training_context_id,
+            )
+            .where(
+                GoalTemplateContext.goal_template_id.in_(tuple(goal_template_ids)),
+                TrainingContext.status == CatalogItemStatus.ACTIVE,
+            )
+            .order_by(GoalTemplateContext.priority, TrainingContext.code)
+        )
+        return tuple(rows.tuples())
+
+    async def execution_options(
+        self, *, context_ids: Collection[uuid.UUID]
+    ) -> tuple[tuple[ContextExecutionOption, TrainingContext, TrainingContext], ...]:
+        if not context_ids:
+            return ()
+        target = aliased(TrainingContext)
+        execution = aliased(TrainingContext)
+        rows = await self._session.execute(
+            select(ContextExecutionOption, target, execution)
+            .join(target, target.id == ContextExecutionOption.target_context_id)
+            .join(
+                execution, execution.id == ContextExecutionOption.execution_context_id
+            )
+            .where(
+                ContextExecutionOption.target_context_id.in_(tuple(context_ids)),
+                target.status == CatalogItemStatus.ACTIVE,
+                execution.status == CatalogItemStatus.ACTIVE,
+            )
+            .order_by(
+                ContextExecutionOption.target_context_id,
+                ContextExecutionOption.role,
+                ContextExecutionOption.priority,
+            )
+        )
+        return tuple(rows.tuples())
+
+    async def option_requirements(
+        self, *, option_ids: Collection[uuid.UUID]
+    ) -> tuple[tuple[ExecutionOptionCapability, Capability], ...]:
+        if not option_ids:
+            return ()
+        rows = await self._session.execute(
+            select(ExecutionOptionCapability, Capability)
+            .join(Capability, Capability.id == ExecutionOptionCapability.capability_id)
+            .where(
+                ExecutionOptionCapability.execution_option_id.in_(tuple(option_ids)),
+                Capability.status == CatalogItemStatus.ACTIVE,
+            )
+            .order_by(Capability.display_name)
+        )
+        return tuple(rows.tuples())

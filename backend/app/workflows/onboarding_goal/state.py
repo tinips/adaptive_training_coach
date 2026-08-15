@@ -12,6 +12,7 @@ from app.integrations.llm.models import (
     GoalExtractionAction,
     GoalExtractionOutput,
     GoalExtractionPatch,
+    GoalTemplateSummary,
 )
 from app.schemas.onboarding_goal import GoalExtractionOutcome, OnboardingUpdateHandler
 
@@ -32,6 +33,7 @@ class GoalExtractionGraphState(TypedDict, total=False):
     action: GoalWorkflowAction
     user_text: str
     existing_draft: GoalExtractionOutput | None
+    goal_catalog: tuple[GoalTemplateSummary, ...]
     current_date: str
     goal_patch: GoalExtractionPatch
     messages: Annotated[list[BaseMessage], add_messages]

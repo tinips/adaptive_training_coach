@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -77,10 +78,10 @@ def normalize_import(incoming: ActivityImportData) -> None:
                 raw_sport=raw,
             )
         if incoming.swimming_environment is None:
+            incoming.swimming_environment = SwimmingEnvironment.UNKNOWN
             incoming.source_metadata["normalization_fallback"] = (
                 "swimming_environment_unknown"
             )
-            incoming.discipline = Discipline.OTHER
         elif (
             incoming.swimming_environment is SwimmingEnvironment.POOL
             and incoming.pool_details is None
@@ -148,6 +149,34 @@ def validate_import(incoming: ActivityImportData) -> None:
     ):
         if value is not None and value < 0:
             raise ActivityImportValidationError("Workout metrics cannot be negative")
+    observation_keys: set[str] = set()
+    for observation in incoming.heart_rate_observations:
+        if observation.source is not incoming.source:
+            raise ActivityImportValidationError(
+                "Heart-rate observation source does not match workout source"
+            )
+        if (
+            not observation.source_record_key
+            or len(observation.source_record_key) > 64
+            or observation.source_record_key in observation_keys
+        ):
+            raise ActivityImportValidationError(
+                "Invalid heart-rate observation source key"
+            )
+        observation_keys.add(observation.source_record_key)
+        started_at = as_utc(observation.started_at)
+        ended_at = as_utc(observation.ended_at)
+        if ended_at < started_at:
+            raise ActivityImportValidationError(
+                "Heart-rate observation period is invalid"
+            )
+        if (
+            not math.isfinite(observation.beats_per_minute)
+            or observation.beats_per_minute <= 0
+        ):
+            raise ActivityImportValidationError(
+                "Heart-rate observation must be positive"
+            )
 
 
 def record_canonical_conflicts(

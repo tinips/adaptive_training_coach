@@ -2014,3 +2014,259 @@ personalisation.
   text, callbacks, and document uploads reach application services. An empty
   allowlist in the production application denies all Telegram users.
 - [x] Document the setting and validate the Telegram handler/application tests.
+
+## 2026-08-12 dynamic goal, context, and capability catalog
+
+The static discipline/equipment resolver is replaced by reusable planning
+knowledge. Equipment no longer determines the goal or training context. The
+confirmed primary and supporting templates determine target contexts, and each
+context owns explicit preferred/substitute executions with capability
+requirements.
+
+- [x] Add irreversible revision `0022_dynamic_training_catalog` with seeded
+  UUIDv5 goal templates, training contexts, capabilities, execution options,
+  and relationships; deterministically classify safe historical matches,
+  merge/backfill old athlete equipment, preserve ambiguous access, normalize
+  active sessions, and remove the two old equipment tables.
+- [x] Replace the old ORM, repositories, schemas, regex resolver, and equipment
+  recommendation service with `TrainingCatalogRepository`,
+  `AthleteCapabilityRepository`, and `CapabilityAssessmentService`.
+- [x] Extend goal structured output with independent primary/supporting
+  template decisions and provide the complete compact active catalog to the
+  compiled classification graph.
+- [x] Add two compiled structured expansion stages: grouped goal-to-context
+  mapping followed, only for new contexts, by grouped execution/capability
+  definition.
+- [x] Validate proposal limits, references, reusable English catalog text,
+  supporting roles, required capabilities, and preferred executions before any
+  catalog write. Generate IDs in the application and serialize publication
+  through a PostgreSQL advisory transaction lock.
+- [x] Publish templates, contexts, capabilities, relationships, and athlete
+  goal foreign keys atomically. Preserve confirmed drafts and clear only the
+  in-flight marker after provider, rate-limit, or validation failures so
+  Continue can retry safely.
+- [x] Make Equipment & access a goal-scoped deterministic review of
+  `AVAILABLE`, `UNAVAILABLE`, and implicit `UNKNOWN` capabilities. Compute
+  preferred/substitute feasibility without blocking onboarding and expose the
+  typed assessment boundary for the future planner.
+- [x] Require focused LLM classification plus user confirmation when editing a
+  primary or supporting goal. Keep outcome/date changes deterministic, clear a
+  supporting goal with `None` without an LLM, and reopen Equipment & access
+  only when a template foreign key changes.
+- [x] Update Telegram review/assessment/profile presentation and stale UUID
+  handling while keeping callbacks model-free and bounded to 4,096 characters.
+- [x] Replace the obsolete test suite with focused catalog, migration,
+  expansion retry/atomicity, assessment, isolation, callback, profile-edit, and
+  known/dynamic journey coverage.
+- [x] Update `docs/current-product-flow.md` and equipment knowledge
+  documentation. Live LLM validation remains credential-gated and is not
+  claimed by this change.
+- [x] Take a pre-upgrade PostgreSQL custom-format backup, upgrade the populated
+  local database from `0021` to `0022`, and verify 23 goals, 16 contexts, 29
+  capabilities, 29 execution options, and absence of the two old equipment
+  tables. `alembic current` reports head and `alembic check` reports no new
+  operations. A fresh disposable database also upgraded through the complete
+  chain to `0022` before being removed.
+- [x] Final automated validation: `202 passed, 3` credential-gated live tests
+  skipped; Ruff, format, and mypy pass. No live Telegram or live-LLM call was
+  made.
+
+### Migration issue found during validation
+
+The first populated PostgreSQL attempt rolled back transactionally because the
+lightweight Alembic seed table did not declare `limitations` as JSONB, causing
+asyncpg to reject Python lists. The column is now explicitly typed, the final
+migration passed, and the SQLite migration regression still passes. The same
+validation exposed a pre-existing `profile_settings_sessions.pending_answers`
+JSON/JSONB mismatch; `0022` now reconciles it. Alembic autogeneration also
+ignores LangGraph's library-managed checkpoint tables instead of proposing to
+delete them.
+
+### Historical-goal resume correction
+
+The first real post-migration availability submission exposed two deployment
+and resume conditions. The running bot/API image predated `0022`, so its old
+equipment query failed against the upgraded database; all backend services were
+rebuilt and recreated from the current image. The affected active goal was also
+intentionally left unclassified by the conservative migration. Equipment
+resume now stages that persisted goal, classifies it through the focused
+workflow without treating the athlete's retry text as goal content, asks for
+canonical confirmation, and then opens Equipment & access using the already
+saved availability. A focused regression covers this exact path. Final local
+validation is `203 passed, 3 skipped`; Ruff, format, and mypy pass.
+
+The next live attempt exposed that the immediate availability-success path
+still called the strict capability lookup directly before entering that resume
+helper. Availability had committed successfully, but the following
+`goal_classification_required` error produced Telegram's generic failure. The
+post-availability transition now uses the same classify-or-review helper, and
+the regression starts at `AVAILABILITY_INTAKE` to cover the exact transaction
+boundary rather than only a later retry checkpoint.
+
+### Goal catalog response-shape correction
+
+A real goal-intake call for Ironman 70.3 plus muscle retention reached the
+provider successfully, but DeepSeek copied the compact catalog row shape into
+`primary_template` and `supporting_template`: it returned `kind` and omitted
+the required `decision`. The semantic classification itself was correct, but
+strict boundary validation safely rejected the response.
+
+- [x] Rename the catalog's prompt-only discriminator from `kind` to
+  `template_type`, bump the static goal contract to version 4, and show the
+  exact `USE_EXISTING` candidate shape.
+- [x] Add a narrow boundary repair for an exact copied ACTIVE catalog row. It
+  verifies code, type, display name, and description against the invocation
+  snapshot before converting it to `USE_EXISTING`; altered or unknown rows
+  remain invalid.
+- [x] Cover the provider's observed primary/supporting response and the
+  altered-row rejection without weakening the Pydantic contract.
+- [x] Rebuild and recreate API/bot, then verify the exact reported sentence
+  through the live compiled workflow and real active catalog. It returns an
+  extracted `TRIATHLON_HALF_DISTANCE` primary and `MUSCLE_RETENTION` supporting
+  template, both `USE_EXISTING`, with no error. Because no event date was
+  supplied, the existing deterministic flow asks for the date or offers
+  `Not yet`. Final local validation is `206 passed, 3 skipped`; Ruff, format,
+  and mypy pass.
+
+### Seed simplification
+
+The initial catalog no longer seeds `safe_running_route`, `trail_access`,
+`backpack`, `trekking_poles`, `bodyweight_space`, or
+`training_space_unspecified`. Their execution requirements and `0022` backfill
+mappings were removed. Because bodyweight execution then had no required
+capability, its two options and the now-unused `strength_bodyweight` context
+were also removed. Historical migrations `0014`, `0017`, and `0018` retain
+their original rows so the pre-`0022` schema history remains reproducible. The
+existing representative seed test now also checks every relation and verifies
+that every execution option retains at least one required capability.
+
+The populated local PostgreSQL database contained one athlete selection for
+`safe_running_route` and one for `bodyweight_space`. After an explicit request
+to remove them, irreversible migration `0023_prune_training_catalog_seed`
+deletes those owned selections, all six retired seeded capabilities, their
+execution requirements, the two bodyweight options, and the retired context.
+Only `SEEDED` version-one definitions are eligible for deletion. A full custom
+PostgreSQL backup was created at
+`backups/adaptive_coach_pre_0023_20260813.dump` before applying the migration.
+
+### Live catalog-expansion JSON-mode correction
+
+The first manual creation attempt classified `ULTRA_RUNNING_12H` correctly but
+failed after confirmation. The context-mapping call initially succeeded, while
+the capability stage and subsequent retries returned DeepSeek HTTP 400
+`invalid_request_error` before producing output. The expansion adapter uses
+JSON mode, and unlike the goal-classification prompt, neither expansion system
+prompt explicitly requested JSON. Both mapping and capability contracts now
+require exactly one JSON object matching the schema; a focused regression keeps
+that provider requirement visible. The confirmed candidate remains staged and
+no partial catalog row was published.
+
+Once JSON mode was accepted, the live response exposed a second contract issue:
+DeepSeek returned intuitive top-level `mappings` and `new_contexts` fields
+instead of the required nested `templates[].contexts[]` proposals. The mapping
+prompt now states every exact field and includes a valid `USE_EXISTING` JSON
+example; the capability prompt likewise enumerates its exact nested contract.
+A live isolated retry for the staged template now succeeds and reuses
+`running_road`, `running_treadmill`, and `strength_general`, so no capability
+stage is required for this particular goal.
+
+### Direct-modality catalog expansion correction
+
+The first `ROWING_REGATTA` manual test published the new template but mapped it
+only to seeded `strength_general` as TARGET, so no context or capability stage
+ran. The mapping contract now defines TARGET as direct practice of the goal's
+sport, movement, and environment; generic conditioning may be SUPPORTING but
+cannot replace a missing direct modality. Every primary mapping must contain a
+TARGET, and unknown broad modalities such as rowing use discipline `OTHER`
+instead of inventing enum values.
+
+DeepSeek JSON mode also required the exact generated JSON Schema in each
+expansion prompt. The capability contract now limits knowledge to EQUIPMENT,
+ACCESS, and FACILITY, forbids methods/services/content, requires exact
+PREFERRED/SUBSTITUTE roles and integer priorities, and permits USE_EXISTING
+only for exact active capability codes. Expansion alone uses a 60-second HTTP
+timeout and 70-second workflow timeout; ordinary onboarding remains at its
+existing limits. A live isolated rowing run now proposes a direct rowing
+context, four execution options, and six CREATE capabilities without writing
+partial data.
+
+### Dynamic catalog publication ordering correction
+
+The first validated live rowing publication exposed a PostgreSQL-only ordering
+defect: the service assigned UUIDs directly and added contexts, execution
+options, and requirements in one flush, but no ORM relationships told
+SQLAlchemy that the new `training_contexts` rows had to be inserted first.
+PostgreSQL rejected the option foreign key and the transaction rolled back in
+full. Publication now flushes each dependency boundary explicitly: templates
+and contexts, then capabilities, then execution options, then requirements. A
+focused database test publishes this complete dynamic hierarchy.
+
+After rebuilding API and bot, a fresh live expansion produced and validated
+`rowing_regatta` as a new TARGET context, five new rowing capabilities, and
+on-water, indoor-machine, and club execution options. A backup was created at
+`backups/adaptive_coach_pre_rowing_repair_20260813.dump`. The incorrect
+`ROWING_REGATTA -> strength_general` relation was then replaced atomically;
+the existing athlete goal was preserved and now references the corrected
+template. Database verification confirms all context, option, and requirement
+relations and both runtime containers are healthy.
+
+Final validation after the publication fix is `209 passed, 3 skipped`; Ruff,
+format, mypy, `alembic upgrade head`, `alembic current`, and `alembic check`
+all pass.
+
+### Catalog expansion prompt compaction
+
+The mapping and capability prompts now leave field names, enums, and structural
+limits to the attached exact JSON Schema and retain only semantic catalog rules.
+The context-mapping request also omits the redundant active goal-template
+snapshot. Mapping prefers the smallest useful context set and reuses general
+supporting contexts instead of generating sport-named conditioning duplicates.
+The capability prompt retains an explicit declaration/reference invariant and
+a minimal reused-capability example because live DeepSeek checks showed that an
+abstract instruction alone could omit a referenced capability intermittently.
+
+The final static prompts are approximately 1.2 KB and 1.4 KB. An isolated live
+`CANOE_SPRINT` run (without publication) passed application validation: it
+created one direct canoe TARGET, reused seeded strength/functional supporting
+contexts, created canoe-specific resources, and correctly reused
+`gym_access`/`free_weights`.
+
+Final validation remains `209 passed, 3 skipped`; Ruff, format, and mypy pass.
+The compacted prompts are deployed and API, bot, and PostgreSQL are healthy.
+
+## Follow-up: optional workout-history import (2026-08-13)
+
+The current onboarding now ends with an explicit optional training-history
+decision after limitations. This follow-up intentionally imports source facts
+only; athlete baseline calculation, subjective feedback, planning, and
+adaptation remain future work.
+
+- [x] Add `TRAINING_HISTORY_IMPORT`, **Skip for now**, resumable failure copy,
+  and atomic onboarding completion after a successful Apple Health/TCX import.
+- [x] Add migration `0024_training_history_import` with import context,
+  onboarding-session provenance, `SwimmingEnvironment.UNKNOWN`, and
+  owner-scoped normalized heart-rate observations.
+- [x] Use Apple `source_record_key` as stable workout identity, retain direct
+  metadata and raw `WorkoutStatistics` provenance, and stop demoting swims when
+  their environment is unknown.
+- [x] Persist quality-labelled Apple and TCX HR observations. Only exact or
+  short-interval Apple observations drive average/max aggregates; coarse data
+  remains available for future recalculation.
+- [x] Keep Apple parsing limited to workouts and overlapping HR. Clinical CDA,
+  sleep, body composition, activity summaries, gait, audio, and unrelated
+  HealthKit records are not imported. Original files are deleted after use.
+- [x] Cover source matching, zero-workout recovery, skip/import completion,
+  active-import conflicts, stable identity, unknown swims, ownership, and
+  workout/observation idempotency.
+
+Validation evidence:
+
+- `215 passed, 3 skipped`; the skipped tests require explicit live-model
+  credentials. Ruff, Ruff format, and mypy pass.
+- PostgreSQL migration `0024` upgrades, downgrades to `0023`, upgrades again,
+  and `alembic check` reports no pending operations.
+- The attached Apple Health export was processed in an isolated in-memory
+  database without retaining its records: 28 workouts were imported (9 run,
+  5 cycling, 14 swimming), 244 HR observations were retained, onboarding was
+  completed, and an exact second import left both counts unchanged.
+- No live Telegram or live-LLM validation is claimed.

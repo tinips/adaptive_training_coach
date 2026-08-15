@@ -12,6 +12,7 @@ from app.integrations.llm.models import (
     GoalExtractionAction,
     GoalExtractionOutput,
     GoalExtractionPatch,
+    GoalTemplateSummary,
 )
 
 GoalExtractionOutcome = Literal[
@@ -69,6 +70,7 @@ class GoalExtractor(Protocol):
         action: GoalExtractionAction,
         user_text: str,
         existing_draft: GoalExtractionOutput | None,
+        goal_catalog: tuple[GoalTemplateSummary, ...],
         current_date: str,
     ) -> GoalExtractionWorkflowResult:
         """Extract a patch from the latest answer without writing canonical data."""

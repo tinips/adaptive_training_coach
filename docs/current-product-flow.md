@@ -2,19 +2,65 @@
 
 ## Supported onboarding boundary
 
-The English Telegram onboarding collects the athlete profile, confirmed goal,
-literal availability, deterministic equipment access, and literal training
-limitations:
+The English Telegram onboarding collects a mandatory athlete profile, a
+confirmed and canonically classified goal, literal availability, current
+equipment and access, and literal training limitations:
 
 ```text
-Start -> consent -> basic profile -> conversational goal -> availability
-      -> catalog equipment review -> training limitations -> complete
+Start -> consent -> basic profile -> conversational goal
+      -> canonical goal confirmation -> availability
+      -> Equipment & access -> training limitations
+      -> optional workout-history import or explicit Skip -> complete
 ```
 
-The milestone does not generate a training plan, calculate feasibility, or
+The product does not generate training plans yet. It prepares the deterministic
+goal and execution assessment that a future planner will consume. It does not
 provide medical diagnosis.
 
-## Durable sequence
+## Goal interpretation and catalog expansion
+
+The compiled goal workflow receives the complete compact list of active goal
+templates. Structured output preserves the athlete's wording while deciding:
+
+```text
+primary_template:   USE_EXISTING | CREATE
+supporting_template: USE_EXISTING | CREATE | NONE | UNSUPPORTED
+```
+
+Known goals reuse the catalog without another model call. For example,
+Ironman 70.3 maps to `TRIATHLON_HALF_DISTANCE` and Spartan maps to
+`OBSTACLE_RACE`. A secondary priority such as maintaining muscle maps
+independently to `MUSCLE_RETENTION`; it is not folded into the primary goal.
+
+The athlete sees both their wording and the canonical interpretation before
+confirming. A correction replaces the previous candidate. `UNSUPPORTED`
+retains secondary-priority text without creating a reusable relationship.
+
+After confirmation, each still-new primary or supporting template is expanded
+synchronously:
+
+```text
+all new templates
+  -> one structured goal-to-context mapping call
+  -> one grouped context-to-capability call, only if contexts are new
+  -> strict application validation
+  -> PostgreSQL advisory transaction lock
+  -> atomic global publication plus TrainingGoal foreign keys
+```
+
+The model proposes structured data but never writes PostgreSQL or supplies IDs.
+The application rechecks the active catalog before each stage, reuses compatible
+rows won by a concurrent request, and rejects incompatible code collisions.
+Templates, contexts, capabilities, execution options, their relationships, and
+the athlete's goal are committed together. A failed stage clears only the
+in-flight marker, preserves the confirmed draft, and allows Continue to retry;
+no partial catalog is published.
+
+Generated definitions become globally `ACTIVE` immediately and are reused by
+later athletes. `source`, `status`, and `definition_version` support manual
+catalog control without an administrative UI in this iteration.
+
+## Durable onboarding sequence
 
 ```text
 CONSENT
@@ -23,94 +69,123 @@ CONSENT
   -> PROFILE_GENDER_INTAKE
   -> PROFILE_WEIGHT_INTAKE
   -> PROFILE_HEIGHT_INTAKE
-  -> GOAL_INTAKE -> clarification -> explicit confirmation
+  -> GOAL_INTAKE -> clarification -> explicit confirmation/expansion
   -> AVAILABILITY_INTAKE
   -> EQUIPMENT_RECOMMENDATION
   -> EQUIPMENT_INTAKE -> HEALTH_LIMITATIONS_INTAKE
-  -> NONE_REPORTED or free text -> COMPLETED
+  -> NONE_REPORTED or free text -> TRAINING_HISTORY_IMPORT
+  -> successful Apple Health/TCX import or Skip for now -> COMPLETED
 ```
 
 Availability and training-limitations free text use the compiled stateless
-LangGraph validation boundary and are stored literally. Equipment review is a
-fully deterministic database path and never invokes a model.
+LangGraph validation boundary and are stored literally. Equipment & access
+callbacks are fully deterministic and never invoke a model.
 
-## Equipment flow
+## Equipment & access
 
-The resolver reads `main_goal`, `target_outcome`, and `secondary_priority`, then
-loads catalog rows for the relevant disciplines. An unmatched goal displays a
-short notice and advances safely to training limitations without writing
-athlete-equipment rows.
+A goal template maps to planning `training_contexts`; these contexts are more
+specific than the broad `Discipline` stored on imported workouts. Each target
+context has preferred or substitute execution options, and each option lists
+required, recommended, or optional capabilities.
 
-The athlete checks every item or facility they can use and chooses Continue.
-The application replaces `athlete_equipment` only for the reviewed disciplines,
-then displays:
+The review combines primary and supporting goal contexts, deduplicates shared
+capabilities, and displays only resources relevant to the current goal. Saving
+the review marks visible checked resources `AVAILABLE` and visible unchecked
+resources `UNAVAILABLE`. An absent row means `UNKNOWN`. Answers belonging only
+to other goals are preserved.
 
-- whether the selected access can satisfy each discipline's essentials;
-- missing essentials and their valid alternatives;
-- missing recommended items.
+The application computes, but does not persist, one assessment per target
+context:
 
-Gaps are advisory and never block completion. Optional gaps are omitted. A goal
-change reopens the relevant review with matching global equipment preselected;
-ownership is not invalidated or revision-scoped. Old catalog/resource callback
-IDs rerender the current durable state rather than applying a stale selection.
+- `FEASIBLE`: a preferred execution has every required capability available.
+- `FEASIBLE_WITH_SUBSTITUTION`: only a substitute execution is complete.
+- `UNKNOWN`: required capability answers are still unknown.
+- `LIMITED`: every execution has an explicitly unavailable required capability.
 
-Equipment reviews and gap summaries are escaped HTML `<pre>` tables. Reviews
-are grouped by discipline and show selection, equipment, importance, and valid
-alternatives. Gap tables preserve the ability-to-start statement and show only
-missing essential and recommended items. `/profile` renders selected equipment
-with discipline and importance. Table cells are bounded with an ellipsis and
-every resulting Telegram message remains within the 4,096-character limit.
+The default execution prefers `PREFERRED`, then `SUBSTITUTE`, then lower
+priority. Missing required/recommended resources and option limitations are
+advisory and never block onboarding. The future planner consumes the typed
+`GoalExecutionAssessment`; it does not infer substitutions from raw catalog
+rows.
+
+Telegram reviews are escaped, bounded HTML `<pre>` tables grouped by target
+context. They show selection, resource, capability type, and whether the
+resource participates in a preferred or substitute execution. Stale UUID
+callbacks rerender current durable state. Messages remain within Telegram's
+4,096-character limit.
+
+## Workout-history import
+
+The final onboarding decision is optional but explicit. The athlete sends an
+Apple Health export ZIP or TCX file, or chooses **Skip for now**. Import and
+Skip callbacks are deterministic and do not invoke an LLM. Failed, cancelled,
+interrupted, or zero-workout imports leave the athlete at the same resumable
+step.
+
+The importer stores only objective workouts and metric types already modeled
+by the workout tables. Apple Health clinical CDA, sleep, body composition,
+general activity summaries, gait, and audio records are ignored. The original
+ZIP/XML is always deleted after processing.
+
+Canonical workouts retain discipline details and source provenance. Apple
+workouts use a source-derived key independent of normalized discipline, so a
+later classification correction cannot duplicate the workout. Swimming with
+no reliable pool/open-water evidence remains `SWIMMING` with environment
+`UNKNOWN`.
+
+Timestamped Apple/TCX heart-rate observations are stored separately with
+source identity and temporal quality. Exact and short-interval observations
+may produce canonical average/max heart rate; coarse observations are retained
+for future recomputation but do not create misleading aggregates. Reimporting
+the same file is idempotent for workouts and observations.
+
+A successful onboarding import writes workouts, source links, observations,
+the successful job, and onboarding completion atomically. Completed athletes
+can use the same importer through **Add workout**. Baseline calculation,
+subjective feedback, and planner adaptation remain future work.
 
 ## Persistence
 
-`athlete_profiles.availability_text` and
-`athlete_profiles.health_limitations_text` retain the two literal context
-answers. `equipment_catalog` is static system knowledge and
-`athlete_equipment` is current athlete access. Every personal-data read and
-write is constrained by the athlete's `user_id`.
+The reusable catalog is normalized across:
 
-Revision `0018_remove_obsolete_equipment` removed the obsolete equipment tables,
-goal revision, and raw equipment profile columns after the final guarded
-backfill. The pre-cleanup PostgreSQL backup is required to recover discarded raw
-text or interpretation history.
+- `goal_templates`, `training_contexts`, and `goal_template_contexts`;
+- `capabilities`;
+- `context_execution_options` and `execution_option_capabilities`.
+
+`training_goals` retains the athlete-facing goal fields and optionally points
+to primary and supporting templates. Every newly confirmed goal has a primary
+template; historical goals may remain unclassified until edited.
+`athlete_capabilities` stores explicit current answers, owned by `athlete_id`.
+`apple_health_import_jobs` records onboarding or post-onboarding context, while
+`workout_heart_rate_observations` retains owner-scoped normalized HR facts.
+
+Revision `0022_dynamic_training_catalog` seeds deterministic UUIDv5 catalog
+data, safely classifies recognizable historical goals, backfills and merges old
+equipment selections, preserves ambiguous access as non-execution
+capabilities, normalizes active sessions, and removes `equipment_catalog` and
+`athlete_equipment`. The migration is intentionally irreversible and requires a
+pre-migration backup.
 
 ## Post-onboarding changes and privacy
 
-`Change profile` provides deterministic mini-flows for goal, availability,
-equipment, health, and personal details. Equipment callbacks never call the
-global agent or context workflow. Changing a goal opens the new relevant catalog
-review while preserving global access.
+`Change profile` provides focused mini-flows. Editing target outcome or event
+date remains deterministic and does not touch catalog knowledge. Editing the
+main goal or secondary priority invokes only the focused classification
+workflow, displays the canonical candidate, and requires confirmation. Choosing
+`None` for the supporting priority clears its text and foreign key without a
+model call.
 
-`Profile` also displays the current training goal's main goal, target outcome,
-event date, secondary priority, and confirmed status.
-The deterministic Goal editor displays an explicit submenu for main goal,
-target outcome, event date, and secondary priority. Each button edits only its
-named field and shows the saved value before replacement. A secondary priority
-can be cleared with `None`. The original description remains internal onboarding
-provenance and is neither displayed nor editable. Goal status, record IDs,
-ownership, and timestamps are also system-managed. Revisions `0019` through
-`0021` evolve the durable profile-settings checkpoints for these controls.
+Confirming a new template uses the same atomic expansion workflow. Equipment &
+access reopens only when either template ID changes; wording changes that retain
+the same template do not force another review. A historical unclassified goal
+must be classified before Equipment & access can open. No generic update path
+can write `main_goal` directly.
 
-The persistent reply keyboard follows account lifecycle state:
+`/profile` displays the athlete-facing goal, primary and supporting canonical
+types, and currently available capabilities. Original free text remains useful
+as internal provenance and future planner context.
 
-- no account: `Start`;
-- active or cancelled onboarding: `Resume`, `Delete`;
-- completed profile: `Profile`, `Change profile`, then `Delete`.
-
-Those exact labels route directly to existing deterministic actions without a
-model call. A successful deletion replaces the keyboard with `Start`. Profile
-edit prompts display the saved value for goals, outcome, event date,
-availability, training limitations, birth year, category, weight, and height.
-Equipment uses its selected-state table. Values are escaped and user-facing;
-long health or availability text is truncated only in the Telegram presentation
-with an explicit marker, while the stored value remains unchanged.
-
-Profile-edit text prompts use `Back / Done` with the `ps:v1:` settings contract.
-They never reuse onboarding's `Cancel` callback. Closing an edit clears pending
-settings state, confirms that profile settings are closed, and leaves onboarding
-completed.
-
-Raw health and availability text is not logged or retained in global-agent
-checkpoints. Tool confirmations name the updated field without echoing private
-content. Cancellation retains saved data; restart clears only the onboarding
-session.
+Raw health and availability text, prompts, raw model responses, and full
+profiles are not logged or placed in observability metadata. Every personal
+repository operation is constrained by the athlete's user ID. Cancellation
+retains saved data; account deletion remains the explicit destructive path.

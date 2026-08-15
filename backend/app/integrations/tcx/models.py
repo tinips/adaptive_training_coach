@@ -20,6 +20,15 @@ class ParsedTCXPosition:
 
 
 @dataclass(slots=True, frozen=True)
+class ParsedTCXHeartRateObservation:
+    """One timestamped TCX heart-rate trackpoint."""
+
+    source_record_key: str
+    timestamp: datetime
+    beats_per_minute: float
+
+
+@dataclass(slots=True, frozen=True)
 class ParsedTCXActivity:
     """One normalized TCX activity ready for ownership-scoped persistence."""
 
@@ -45,9 +54,11 @@ class ParsedTCXActivity:
     raw_sub_sport: str | None = None
     elevation_loss_meters: float | None = None
     max_cadence: float | None = None
+    heart_rate_observations: tuple[ParsedTCXHeartRateObservation, ...] = ()
 
 
 __all__ = [
     "ParsedTCXActivity",
+    "ParsedTCXHeartRateObservation",
     "ParsedTCXPosition",
 ]

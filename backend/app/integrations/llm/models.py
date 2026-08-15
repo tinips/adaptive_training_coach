@@ -10,7 +10,7 @@ from typing import Any, Literal, Protocol
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.runnables import Runnable, RunnableConfig
 from langchain_core.tools import BaseTool
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.domain.enums import OnboardingStep
 from app.observability.protocol import ProviderMode
@@ -47,6 +47,63 @@ type GoalExtractionAction = Literal[
     "CREATE_GOAL",
     "UPDATE_EXISTING_GOAL",
 ]
+type TemplateDecision = Literal["USE_EXISTING", "CREATE"]
+type SupportingTemplateDecision = Literal[
+    "USE_EXISTING",
+    "CREATE",
+    "NONE",
+    "UNSUPPORTED",
+]
+
+
+class GoalTemplateSummary(BaseModel):
+    """Compact active catalog row supplied to goal classification."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    code: str = Field(pattern=r"^[A-Z][A-Z0-9_]{2,63}$")
+    kind: Literal["PRIMARY", "SUPPORTING"]
+    display_name: str = Field(min_length=1, max_length=120)
+    description: str = Field(min_length=1, max_length=500)
+
+
+class PrimaryTemplateCandidate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision: TemplateDecision
+    code: str = Field(pattern=r"^[A-Z][A-Z0-9_]{2,63}$")
+    display_name: str | None = Field(default=None, max_length=120)
+    description: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def require_created_definition(self) -> PrimaryTemplateCandidate:
+        if self.decision == "CREATE" and (
+            not self.display_name or not self.description
+        ):
+            raise ValueError("created templates require a name and description")
+        return self
+
+
+class SupportingTemplateCandidate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision: SupportingTemplateDecision
+    code: str | None = Field(default=None, pattern=r"^[A-Z][A-Z0-9_]{2,63}$")
+    display_name: str | None = Field(default=None, max_length=120)
+    description: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def validate_decision_fields(self) -> SupportingTemplateCandidate:
+        if self.decision in {"NONE", "UNSUPPORTED"}:
+            if any((self.code, self.display_name, self.description)):
+                raise ValueError("non-template decisions cannot define a template")
+        elif self.code is None:
+            raise ValueError("template decisions require a code")
+        elif self.decision == "CREATE" and (
+            not self.display_name or not self.description
+        ):
+            raise ValueError("created templates require a name and description")
+        return self
 
 
 class _GoalExtractionFields(BaseModel):
@@ -58,6 +115,8 @@ class _GoalExtractionFields(BaseModel):
     event_date: date | None
     target_outcome: str | None = Field(max_length=500)
     secondary_priority: str | None = Field(max_length=500)
+    primary_template: PrimaryTemplateCandidate | None = None
+    supporting_template: SupportingTemplateCandidate | None = None
     missing_fields: list[GoalFieldName]
     ambiguous_fields: list[GoalFieldName]
     message_status: GoalMessageStatus

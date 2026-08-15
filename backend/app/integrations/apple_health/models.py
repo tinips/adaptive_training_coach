@@ -33,6 +33,7 @@ class ParsedWorkout:
     source_name: str | None
     source_version: str | None
     device: str | None
+    creation_date: datetime | None
     started_at: datetime
     ended_at: datetime
     duration_seconds: int
@@ -45,6 +46,7 @@ class ParsedWorkout:
     raw_sub_sport: str | None = None
     swimming_environment: SwimmingEnvironmentHint | None = None
     pool_length_meters: float | None = None
+    workout_statistics: tuple[dict[str, str], ...] = ()
 
 
 @dataclass(slots=True, frozen=True)

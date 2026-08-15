@@ -18,7 +18,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings
 from app.db.models import AppleHealthImportJob, Workout
-from app.domain.enums import AppleHealthImportStatus, TrainingFileFormat, UserStatus
+from app.domain.enums import (
+    AppleHealthImportStatus,
+    OnboardingStatus,
+    OnboardingStep,
+    TrainingFileFormat,
+    TrainingImportContext,
+    UserStatus,
+)
 from app.integrations.apple_health import (
     AppleHealthArchiveLimits,
     AppleHealthParser,
@@ -34,6 +41,7 @@ from app.repositories.apple_health import (
     AppleHealthImportConflictError,
     AppleHealthRepository,
 )
+from app.repositories.onboarding import OnboardingRepository
 from app.repositories.users import UserRepository
 from app.schemas.common import TelegramIdentity
 from app.schemas.training_import import TelegramDocumentUpload
@@ -47,6 +55,7 @@ ProgressCallback = Callable[[str], Awaitable[None]]
 
 _COMPLETED_PROFILE_STATES = {
     UserStatus.ONBOARDING_COMPLETED,
+    UserStatus.PROFILE_COMPLETED,
 }
 _ZIP_MAGIC = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
 
@@ -68,6 +77,8 @@ class TrainingFileImportOutcome:
     discipline_counts: dict[str, int] | None = None
     safe_error_code: str | None = None
     exact_file_duplicate: bool = False
+    context: TrainingImportContext = TrainingImportContext.POST_ONBOARDING
+    completed_onboarding: bool = False
     sport: str | None = None
     started_at: datetime | None = None
     duration_seconds: int | None = None
@@ -279,7 +290,23 @@ class TrainingFileImportService:
             )
             if user is None:
                 raise OnboardingApplicationError("user_not_found")
-            if user.status not in _COMPLETED_PROFILE_STATES:
+            context = TrainingImportContext.POST_ONBOARDING
+            onboarding_session_id: uuid.UUID | None = None
+            if user.status is UserStatus.ONBOARDING_IN_PROGRESS:
+                onboarding = await OnboardingRepository(session).get_for_user(
+                    user_id=user.id,
+                    for_update=True,
+                )
+                if (
+                    onboarding is None
+                    or onboarding.status is not OnboardingStatus.ACTIVE
+                    or onboarding.current_step
+                    is not OnboardingStep.TRAINING_HISTORY_IMPORT
+                ):
+                    raise OnboardingApplicationError("training_file_not_expected")
+                context = TrainingImportContext.ONBOARDING_HISTORY
+                onboarding_session_id = onboarding.id
+            elif user.status not in _COMPLETED_PROFILE_STATES:
                 raise OnboardingApplicationError("training_file_not_expected")
             repository = AppleHealthRepository(session)
             if document.update_id is not None:
@@ -297,6 +324,8 @@ class TrainingFileImportService:
                 telegram_file_unique_id=document.file_unique_id,
                 display_filename=document.display_filename,
                 file_format=TrainingFileFormat.UNKNOWN,
+                context=context,
+                onboarding_session_id=onboarding_session_id,
             )
             return job, user.id, created
 
@@ -317,6 +346,8 @@ class TrainingFileImportService:
             path,
             member,
         )
+        if not workouts:
+            raise TrainingFileImportError("training_file_no_workouts")
         await progress("reading_heart_rate")
         matched = await asyncio.to_thread(
             self._apple_parser.read_heart_rate,
@@ -338,6 +369,7 @@ class TrainingFileImportService:
                 AppleHealthImportStatus.PROCESSING,
             }:
                 return await self._outcome_in_session(session, job)
+            await self._require_current_context(session=session, job=job)
             activities = TrainingActivityRepository(session)
             imported = 0
             updated = 0
@@ -370,6 +402,10 @@ class TrainingFileImportService:
                 activity_id=latest.id if len(workouts) == 1 and latest else None,
                 file_format=TrainingFileFormat.APPLE_HEALTH_ZIP,
             )
+            await self._complete_onboarding_if_needed(
+                session=session,
+                job=completed,
+            )
             return await self._outcome_in_session(session, completed)
 
     async def _process_tcx(
@@ -397,6 +433,7 @@ class TrainingFileImportService:
                 AppleHealthImportStatus.PROCESSING,
             }:
                 return await self._outcome_in_session(session, job)
+            await self._require_current_context(session=session, job=job)
             activity, outcome = await TrainingActivityRepository(
                 session
             ).import_tcx_activity(
@@ -416,6 +453,10 @@ class TrainingFileImportService:
                 warning_count=len(parsed.warnings),
                 activity_id=activity.id,
                 file_format=TrainingFileFormat.TCX,
+            )
+            await self._complete_onboarding_if_needed(
+                session=session,
+                job=completed,
             )
             return await self._outcome_in_session(session, completed)
 
@@ -443,11 +484,19 @@ class TrainingFileImportService:
         file_sha256: str,
     ) -> AppleHealthImportJob | None:
         async with self._session_factory() as session:
-            return await AppleHealthRepository(session).get_successful_by_hash(
+            repository = AppleHealthRepository(session)
+            duplicate = await repository.get_successful_by_hash(
                 user_id=user_id,
                 file_sha256=file_sha256,
                 excluding_job_id=job_id,
             )
+            if duplicate is None:
+                return None
+            persisted = await repository.imported_workout_count_for_hash(
+                user_id=user_id,
+                file_sha256=file_sha256,
+            )
+            return duplicate if persisted >= max(duplicate.workouts_found, 1) else None
 
     async def _finish_duplicate(
         self,
@@ -458,12 +507,69 @@ class TrainingFileImportService:
     ) -> AppleHealthImportJob:
         async with self._session_factory.begin() as session:
             repository = AppleHealthRepository(session)
+            job = await repository.require_job(
+                user_id=user_id,
+                job_id=job_id,
+                for_update=True,
+            )
+            await self._require_current_context(session=session, job=job)
             copied = await repository.copy_success(
                 user_id=user_id,
                 job_id=job_id,
                 source=duplicate,
             )
+            await self._complete_onboarding_if_needed(
+                session=session,
+                job=copied,
+            )
             return copied
+
+    async def _require_current_context(
+        self,
+        *,
+        session: AsyncSession,
+        job: AppleHealthImportJob,
+    ) -> None:
+        user = await UserRepository(session).require_by_id(job.user_id)
+        if job.context is TrainingImportContext.POST_ONBOARDING:
+            if user.status not in _COMPLETED_PROFILE_STATES:
+                raise OnboardingApplicationError("training_file_not_expected")
+            return
+        if job.onboarding_session_id is None:
+            raise OnboardingApplicationError("training_file_not_expected")
+        onboarding = await OnboardingRepository(session).require_for_user(
+            user_id=job.user_id,
+            session_id=job.onboarding_session_id,
+            for_update=True,
+        )
+        if (
+            user.status is not UserStatus.ONBOARDING_IN_PROGRESS
+            or onboarding.status is not OnboardingStatus.ACTIVE
+            or onboarding.current_step is not OnboardingStep.TRAINING_HISTORY_IMPORT
+        ):
+            raise OnboardingApplicationError("training_file_not_expected")
+
+    async def _complete_onboarding_if_needed(
+        self,
+        *,
+        session: AsyncSession,
+        job: AppleHealthImportJob,
+    ) -> None:
+        if job.context is not TrainingImportContext.ONBOARDING_HISTORY:
+            return
+        if job.onboarding_session_id is None:
+            raise OnboardingApplicationError("training_file_not_expected")
+        onboarding = await OnboardingRepository(session).require_for_user(
+            user_id=job.user_id,
+            session_id=job.onboarding_session_id,
+            for_update=True,
+        )
+        onboarding.status = OnboardingStatus.COMPLETED
+        await UserRepository(session).update_status(
+            user_id=job.user_id,
+            status=UserStatus.ONBOARDING_COMPLETED,
+        )
+        await session.flush()
 
     async def _fail(
         self,
@@ -561,6 +667,11 @@ class TrainingFileImportService:
             discipline_counts=counts,
             safe_error_code=job.safe_error_code,
             exact_file_duplicate=exact_file_duplicate,
+            context=job.context,
+            completed_onboarding=(
+                job.status is AppleHealthImportStatus.SUCCEEDED
+                and job.context is TrainingImportContext.ONBOARDING_HISTORY
+            ),
             sport=workout.discipline.value if workout is not None else None,
             started_at=workout.started_at if workout is not None else None,
             duration_seconds=(

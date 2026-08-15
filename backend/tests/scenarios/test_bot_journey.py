@@ -8,6 +8,7 @@ from uuid import UUID
 
 import pytest
 import pytest_asyncio
+from catalog_seed import seed_training_catalog
 from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableLambda
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -23,8 +24,9 @@ from app.integrations.llm.models import (
     GoalExtractionAction,
     GoalExtractionOutput,
     GoalExtractionPatch,
+    GoalTemplateSummary,
 )
-from app.repositories.equipment import EquipmentRepository
+from app.repositories.athlete_capabilities import AthleteCapabilityRepository
 from app.repositories.onboarding import OnboardingRepository
 from app.repositories.profiles import ProfileRepository
 from app.repositories.users import UserRepository
@@ -34,7 +36,6 @@ from app.services.accounts import AccountQueryService, AccountService
 from app.services.onboarding import OnboardingService
 from app.services.profiles import ProfileService
 from app.workflows.telegram_orchestrator.workspace import TelegramAgentWorkspace
-from tests.equipment_seed import seed_equipment_catalog
 
 
 @dataclass
@@ -48,9 +49,10 @@ class QueueGoalExtractor:
         action: GoalExtractionAction,
         user_text: str,
         existing_draft: GoalExtractionOutput | None,
+        goal_catalog: tuple[GoalTemplateSummary, ...],
         current_date: str,
     ) -> GoalExtractionWorkflowResult:
-        del user_id, action, user_text, existing_draft, current_date
+        del user_id, action, user_text, existing_draft, goal_catalog, current_date
         return self.results.pop(0)
 
 
@@ -76,7 +78,28 @@ def _extracted(
     main_goal: str | None,
     target_outcome: str | None,
     secondary_priority: str | None = None,
+    supporting_code: str = "STRENGTH_MAINTENANCE",
 ) -> GoalExtractionWorkflowResult:
+    primary_template = (
+        {
+            "decision": "USE_EXISTING",
+            "code": "MARATHON",
+            "display_name": None,
+            "description": None,
+        }
+        if main_goal is not None
+        else None
+    )
+    supporting_template = (
+        {
+            "decision": "USE_EXISTING",
+            "code": supporting_code,
+            "display_name": None,
+            "description": None,
+        }
+        if secondary_priority is not None
+        else None
+    )
     return GoalExtractionWorkflowResult(
         outcome="extracted",
         goal_patch=GoalExtractionPatch(
@@ -84,6 +107,8 @@ def _extracted(
             event_date=None,
             target_outcome=target_outcome,
             secondary_priority=secondary_priority,
+            primary_template=primary_template,
+            supporting_template=supporting_template,
             missing_fields=[],
             ambiguous_fields=[],
             message_status="COMPLETE",
@@ -104,7 +129,7 @@ async def journey() -> AsyncIterator[
         await connection.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
     async with factory.begin() as session:
-        await seed_equipment_catalog(session)
+        await seed_training_catalog(session)
     extractor = QueueGoalExtractor(
         [
             _extracted(
@@ -115,6 +140,16 @@ async def journey() -> AsyncIterator[
                 main_goal=None,
                 target_outcome=None,
                 secondary_priority="Maintain strength",
+            ),
+            _extracted(
+                main_goal="Complete a marathon",
+                target_outcome=None,
+            ),
+            _extracted(
+                main_goal=None,
+                target_outcome=None,
+                secondary_priority="Maintain muscle",
+                supporting_code="MUSCLE_RETENTION",
             ),
         ]
     )
@@ -204,13 +239,12 @@ async def test_journey_collects_profile_goal_and_required_context_before_complet
         "Tuesday and Thursday evenings, plus a longer Saturday run.",
     )
     equipment_callback = next(
-        callback
-        for label, callback in _buttons(equipment)
-        if "Trail running shoes" in label
+        callback for label, callback in _buttons(equipment) if "Running shoes" in label
     )
     await bot.handle_callback(athlete, equipment_callback)
     limitations = await bot.handle_callback(athlete, "ob:v1:equipment:done")
-    completed = await bot.handle_callback(athlete, "ob:v1:health:none")
+    history = await bot.handle_callback(athlete, "ob:v1:health:none")
+    completed = await bot.handle_callback(athlete, "ob:v1:history:skip")
     displayed_profile = await bot.profile(athlete)
     profile_button = await _agent_input(bot, "Profile")
 
@@ -227,12 +261,13 @@ async def test_journey_collects_profile_goal_and_required_context_before_complet
     assert weight.text == messages.PROFILE_WEIGHT_INTAKE
     assert height.text == messages.PROFILE_HEIGHT_INTAKE
     assert availability.text == messages.AVAILABILITY_INTAKE
-    assert "essential means" in equipment.text.casefold()
+    assert "select every resource" in equipment.text.casefold()
     assert messages.HEALTH_LIMITATIONS_INTAKE in limitations.text
+    assert history.text == messages.TRAINING_HISTORY_IMPORT
     assert completed.text == messages.ONBOARDING_COMPLETED
     assert "Birth year: 1990" in displayed_profile.text
     assert "Category: Female" in displayed_profile.text
-    assert "Trail running shoes" in displayed_profile.text
+    assert "Running shoes" in displayed_profile.text
     assert "<pre>" in displayed_profile.text
     assert "<b>Training goal</b>" in displayed_profile.text
     assert "Main goal: Complete a marathon" in displayed_profile.text
@@ -241,7 +276,7 @@ async def test_journey_collects_profile_goal_and_required_context_before_complet
     assert "Event date: Not set" in displayed_profile.text
     assert "Status: Confirmed" in displayed_profile.text
     assert "Original description" not in displayed_profile.text
-    assert "Trail running shoes" in profile_button.text
+    assert "Running shoes" in profile_button.text
     assert _reply_buttons(profile_button) == [
         ["Profile", "Change profile"],
         ["Delete"],
@@ -255,7 +290,7 @@ async def test_journey_collects_profile_goal_and_required_context_before_complet
         assert user.status is UserStatus.ONBOARDING_COMPLETED
         state = await OnboardingRepository(session).require_for_user(user_id=user.id)
         assert state.status is OnboardingStatus.COMPLETED
-        assert state.current_step is OnboardingStep.HEALTH_LIMITATIONS_INTAKE
+        assert state.current_step is OnboardingStep.TRAINING_HISTORY_IMPORT
         goal = await ProfileRepository(session).get_training_goal(user_id=user.id)
         assert goal is not None
         assert goal.main_goal == "Complete a marathon"
@@ -272,12 +307,10 @@ async def test_journey_collects_profile_goal_and_required_context_before_complet
             "Tuesday and Thursday evenings, plus a longer Saturday run."
         )
         assert profile.health_limitations_text == "NONE_REPORTED"
-        selected_equipment = await EquipmentRepository(session).selected_catalog(
+        selected_equipment = await AthleteCapabilityRepository(session).available(
             athlete_id=user.id
         )
-        assert {item.equipment for item in selected_equipment} == {
-            "trail_running_shoes"
-        }
+        assert {item.code for item in selected_equipment} == {"running_shoes"}
 
     back = await bot.handle_callback(athlete, "nav:v1:welcome")
     assert back.text == messages.WELCOME
@@ -295,13 +328,18 @@ async def test_journey_collects_profile_goal_and_required_context_before_complet
     }
     goal = await bot.handle_callback(athlete, "ps:v1:goal:main")
     assert "Complete a marathon" in goal.text
-    await _agent_input(bot, "Complete a marathon")
+    main_confirmation = await _agent_input(bot, "Complete a marathon")
+    assert "Understood as" in main_confirmation.text
+    main_saved = await bot.handle_callback(athlete, "ps:v1:goal:classification:confirm")
+    assert "Saved: Main goal." in main_saved.text
 
     await bot.handle_callback(athlete, "ps:v1:section:goal")
     secondary = await bot.handle_callback(athlete, "ps:v1:goal:secondary")
     assert "Maintain strength" in secondary.text
-    goal_saved = await _agent_input(bot, "Maintain mobility")
-    assert "Saved: Goal." in goal_saved.text
+    secondary_confirmation = await _agent_input(bot, "Maintain muscle")
+    assert "Understood as" in secondary_confirmation.text
+    goal_saved = await bot.handle_callback(athlete, "ps:v1:goal:classification:confirm")
+    assert "Saved: Secondary priority." in goal_saved.text
     await bot.handle_callback(athlete, "ps:v1:back")
 
     availability_current = await bot.handle_callback(
@@ -315,7 +353,7 @@ async def test_journey_collects_profile_goal_and_required_context_before_complet
 
     equipment_current = await bot.handle_callback(athlete, "ps:v1:section:equipment")
     assert "Have" in equipment_current.text
-    assert "Trail running shoes" in equipment_current.text
+    assert "Running shoes" in equipment_current.text
     await bot.handle_callback(athlete, "ps:v1:back")
 
     health_current = await bot.handle_callback(athlete, "ps:v1:section:health")
@@ -351,7 +389,7 @@ async def test_journey_collects_profile_goal_and_required_context_before_complet
         assert profile.height_cm == 170.0
         goal = await ProfileRepository(session).get_training_goal(user_id=user.id)
         assert goal is not None
-        assert goal.secondary_priority == "Maintain mobility"
+        assert goal.secondary_priority == "Maintain muscle"
         assert goal.original_description == original_description
 
 

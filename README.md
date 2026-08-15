@@ -5,8 +5,8 @@ endurance coach. The currently supported onboarding slice deterministically
 collects the athlete's birth year, competition category / biological sex,
 weight, and height, then records a confirmed athlete goal, raw weekly
 availability, deterministic equipment access, and training limitations.
-Deriving a broader normalized, updateable profile,
-baseline selection, feasibility, and plan generation remain outside this phase.
+The final optional step imports objective workout history from Apple Health or
+TCX. Baseline calculation and plan generation remain outside this phase.
 
 The interface is English-only. Goal answers may be written naturally in any
 language supported by the configured model. The application does not provide
@@ -21,7 +21,7 @@ The only supported journey is:
 3. Consent opens the setup introduction.
 4. **Let's build my profile** asks for a four-digit birth year from 1940
    through 2008.
-5. An inline keyboard records Male, Female, or Other / Unspecified.
+5. An inline keyboard records Male or Female.
 6. The bot validates weight from 40.0 through 200.0 kg.
 7. The bot validates integer height from 120 through 230 cm and saves the
    owned athlete profile.
@@ -35,9 +35,10 @@ The only supported journey is:
     deterministic resolver loads relevant discipline equipment from PostgreSQL.
 14. The athlete checks every catalog item or facility they can currently use.
     Missing essentials are advisory and include valid alternatives.
-15. The athlete chooses **None** or **Describe limitations**. A literal answer
-    is required when they describe limitations; only then does onboarding move
-    to `ONBOARDING_COMPLETED`.
+15. The athlete chooses **None** or describes training limitations. A literal
+    answer advances to the optional workout-history import step.
+16. The athlete sends an Apple Health ZIP or TCX file, or explicitly chooses
+    **Skip for now**. A successful import and Skip both complete onboarding.
 
 The first mandatory profile prompt is:
 
@@ -47,8 +48,8 @@ First, let\u2019s build your athlete profile.
 What year were you born? Send the four-digit year (1940 to 2008).
 ```
 
-Profile completion does not start an import, select a baseline, calculate
-feasibility, or generate a plan.
+Workout-history import stores source facts for future coaching. It does not
+calculate a baseline or generate a plan.
 
 Commands, callbacks, and completed-profile chat routing use one global
 tool-calling LangGraph workspace. Active onboarding events bypass that workspace
@@ -73,6 +74,7 @@ The durable onboarding states are:
 - `EQUIPMENT_RECOMMENDATION`
 - `EQUIPMENT_INTAKE`
 - `HEALTH_LIMITATIONS_INTAKE`
+- `TRAINING_HISTORY_IMPORT`
 
 Cancellation is stored as an onboarding-session status. Restart returns only
 that user's session to consent.
@@ -200,19 +202,15 @@ repository operations include the owning internal user ID.
 
 ## Retained features outside onboarding
 
-Existing athletes whose normalized profiles were completed before this
-onboarding reduction retain their data and can continue to use:
+Completed athletes can continue to use:
 
 - normalized profile reads;
-- Apple Health ZIP and TCX daily file imports;
-- deterministic baseline recalculation;
-- durable post-workout feedback;
-- optional Strava OAuth, synchronization, disconnect, and webhook ingestion.
+- Apple Health ZIP history imports;
+- TCX single-workout imports.
 
-Daily file imports are not an onboarding path. A user must already have a
-completed-profile lifecycle status and begin through **Add workout**. Import
-jobs retain their outcomes and workout provenance, but no longer contain an
-onboarding session ID or onboarding/daily context flag.
+The same importer serves the optional final onboarding step and completed
+athletes using **Add workout**. Import jobs record whether they belong to
+onboarding or post-onboarding and retain owner-scoped workout provenance.
 
 The historical normalized profile tables remain because current profile reads
 for existing athletes still depend on them. The new onboarding writes only the
@@ -226,6 +224,7 @@ This slice does not implement:
 
 - derived normalization of availability, equipment, or injury context;
 - baseline selection during onboarding;
+- athlete baseline calculation;
 - goal feasibility or safety assessment;
 - roadmap, weekly plan, or adaptive replanning;
 - RAG, embeddings, a vector database, or multiple agents;
@@ -408,6 +407,10 @@ LLM, or live Strava journey.
 - Apple Health ZIP/XML and TCX uploads are deleted from generated temporary
   paths after processing; interrupted cleanup is recovered from import-job
   metadata.
+- Only workout records and existing workout metric types are imported. Matched
+  heart-rate observations retain source identity and temporal quality so future
+  algorithms can recompute aggregates; clinical CDA, sleep, body composition,
+  gait, audio, and general daily HealthKit records are ignored.
 - Strava tokens are encrypted at rest and account deletion requires explicit
   confirmation.
 - Goal intake records intent only. It does not decide whether a goal is safe or

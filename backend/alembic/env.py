@@ -21,6 +21,32 @@ if config.config_file_name is not None:
 settings = get_settings()
 config.set_main_option("sqlalchemy.url", settings.database_url.replace("%", "%%"))
 target_metadata = Base.metadata
+_EXTERNALLY_MANAGED_TABLES = frozenset(
+    {
+        "checkpoint_migrations",
+        "checkpoints",
+        "checkpoint_blobs",
+        "checkpoint_writes",
+    }
+)
+
+
+def include_object(
+    object_: object,
+    name: str | None,
+    type_: str,
+    reflected: bool,
+    compare_to: object | None,
+) -> bool:
+    """Exclude tables whose schema is owned by the LangGraph checkpointer."""
+
+    del reflected, compare_to
+    table_name = (
+        name
+        if type_ == "table"
+        else getattr(getattr(object_, "table", None), "name", None)
+    )
+    return table_name not in _EXTERNALLY_MANAGED_TABLES
 
 
 def run_migrations_offline() -> None:
@@ -32,6 +58,7 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
+        include_object=include_object,
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -44,6 +71,7 @@ def do_run_migrations(connection: Connection) -> None:
         connection=connection,
         target_metadata=target_metadata,
         compare_type=True,
+        include_object=include_object,
     )
     with context.begin_transaction():
         context.run_migrations()

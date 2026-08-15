@@ -105,11 +105,43 @@ def test_coarse_heart_rate_is_preserved_without_fake_average(
     workout = parser().parse(archive).workouts[0]
 
     assert len(workout.observations) == 1
-    assert workout.max_heart_rate == 150
+    assert workout.max_heart_rate is None
     assert workout.average_heart_rate is None
     assert workout.observations[0].temporal_quality is (
         HeartRateTemporalQuality.COARSE_INTERVAL
     )
+
+
+def test_heart_rate_matching_rejects_source_mismatch_and_ambiguous_missing_source(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "strict-matching.zip"
+    write_archive(
+        archive,
+        """<HealthData>
+          <Workout workoutActivityType="HKWorkoutActivityTypeRunning"
+            duration="60" durationUnit="min" sourceName="Watch A"
+            startDate="2026-07-20 08:00:00 +0000"
+            endDate="2026-07-20 09:00:00 +0000"/>
+          <Workout workoutActivityType="HKWorkoutActivityTypeCycling"
+            duration="60" durationUnit="min" sourceName="Watch B"
+            startDate="2026-07-20 08:00:00 +0000"
+            endDate="2026-07-20 09:00:00 +0000"/>
+          <Record type="HKQuantityTypeIdentifierHeartRate" sourceName="Phone"
+            unit="count/min" value="155"
+            startDate="2026-07-20 08:10:00 +0000"
+            endDate="2026-07-20 08:10:00 +0000"/>
+          <Record type="HKQuantityTypeIdentifierHeartRate"
+            unit="count/min" value="145"
+            startDate="2026-07-20 08:20:00 +0000"
+            endDate="2026-07-20 08:20:00 +0000"/>
+        </HealthData>""",
+    )
+
+    result = parser().parse(archive)
+
+    assert result.heart_rate_records_matched == 0
+    assert all(not workout.observations for workout in result.workouts)
 
 
 @pytest.mark.parametrize(

@@ -15,6 +15,7 @@ from app.domain.enums import ActivitySource
 from app.integrations.apple_health.models import ParsedWorkout
 from app.repositories.activity_source_links import ActivitySourceLinkRepository
 from app.repositories.errors import OwnedRecordNotFoundError
+from app.repositories.heart_rate_observations import HeartRateObservationRepository
 from app.repositories.workout_detail_mapper import (
     apply_exact_detail,
     details_for_import,
@@ -52,6 +53,7 @@ class TrainingActivityRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
         self._source_links = ActivitySourceLinkRepository(session)
+        self._heart_rate = HeartRateObservationRepository(session)
 
     async def get_by_source_key(
         self,
@@ -228,6 +230,13 @@ class TrainingActivityRepository:
             import_job_id=import_job_id,
             workout=inserted,
         )
+        await self._heart_rate.synchronize(
+            user_id=user_id,
+            workout_id=inserted.id,
+            source=incoming.source,
+            observations=incoming.heart_rate_observations,
+            import_job_id=import_job_id,
+        )
         await self._session.flush()
         main_detail(inserted)
         return inserted, "inserted"
@@ -265,6 +274,16 @@ class TrainingActivityRepository:
             import_job_id=import_job_id,
         )
         changed = changed or link_changed
+        changed = (
+            await self._heart_rate.synchronize(
+                user_id=user_id,
+                workout_id=workout.id,
+                source=incoming.source,
+                observations=incoming.heart_rate_observations,
+                import_job_id=import_job_id,
+            )
+            or changed
+        )
         await self._source_links.attach_import_job(
             user_id=user_id,
             import_job_id=import_job_id,

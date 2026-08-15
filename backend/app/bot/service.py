@@ -13,7 +13,13 @@ from telegram import ReplyKeyboardMarkup
 
 from app.bot import keyboards, messages
 from app.bot.rendering import TelegramResponse
-from app.domain.enums import OnboardingStatus, OnboardingStep, UserStatus
+from app.domain.enums import (
+    AppleHealthImportStatus,
+    OnboardingStatus,
+    OnboardingStep,
+    TrainingImportContext,
+    UserStatus,
+)
 from app.schemas.common import TelegramIdentity
 from app.schemas.onboarding_service import OnboardingServiceResult
 from app.schemas.profile_settings import ProfileSettingsResult
@@ -227,13 +233,35 @@ class CoachBotApplicationService:
         outcome = await self._apple_health.process_upload(
             identity=identity, document=document, download=download, progress=progress
         )
-        response = TelegramResponse(
-            messages.apple_health_file_result(
+        if outcome.status is not AppleHealthImportStatus.SUCCEEDED:
+            error = messages.validation_error(
+                outcome.safe_error_code or "training_file_import_failed"
+            )
+            if outcome.context is TrainingImportContext.ONBOARDING_HISTORY:
+                return TelegramResponse(
+                    f"{error}\n\n{messages.TRAINING_HISTORY_IMPORT}",
+                    keyboards.training_history_import_keyboard(),
+                )
+            return TelegramResponse(
+                error,
+                user_keyboard=await self._lifecycle_keyboard(identity),
+            )
+        result_text = (
+            messages.onboarding_history_imported(
+                file_format=outcome.file_format,
+                activities_imported=outcome.activities_imported,
+                activities_updated=outcome.activities_updated,
+                activities_skipped=outcome.activities_skipped,
+            )
+            if outcome.completed_onboarding
+            else messages.training_file_result(
+                file_format=outcome.file_format,
                 activities_imported=outcome.activities_imported,
                 activities_updated=outcome.activities_updated,
                 activities_skipped=outcome.activities_skipped,
             )
         )
+        response = TelegramResponse(result_text)
         return replace(
             response,
             user_keyboard=await self._lifecycle_keyboard(identity),
@@ -362,6 +390,9 @@ class CoachBotApplicationService:
                 identity, callback_data.removeprefix("ob:v1:health:")
             )
             return await self._render_onboarding(identity, result)
+        if callback_data == "ob:v1:history:skip":
+            result = await self._onboarding.skip_training_history(identity)
+            return await self._render_onboarding(identity, result)
         if callback_data == "ob:v1:cancel":
             return TelegramResponse(
                 messages.CANCEL_CONFIRM, keyboards.cancel_confirmation_keyboard()
@@ -399,8 +430,16 @@ class CoachBotApplicationService:
 
     @staticmethod
     def _render_profile_settings(result: ProfileSettingsResult) -> TelegramResponse:
-        if result.step.value == "EQUIPMENT" and result.equipment_review is not None:
-            review = result.equipment_review
+        if result.step.value == "GOAL_CLASSIFICATION_CONFIRM":
+            text = messages.profile_goal_classification_confirmation(result.pending)
+            if result.saved_field == "__classification_failed__":
+                text = f"{messages.PROFILE_GOAL_CLASSIFICATION_FAILED}\n\n{text}"
+            return TelegramResponse(
+                text,
+                keyboards.profile_goal_classification_keyboard(),
+            )
+        if result.step.value == "EQUIPMENT" and result.capability_review is not None:
+            review = result.capability_review
             text = messages.equipment_review(review)
             if result.saved_field not in {None, "__closed__"}:
                 text = (
@@ -418,8 +457,8 @@ class CoachBotApplicationService:
             if result.saved_field == "__closed__":
                 return TelegramResponse(messages.PROFILE_SETTINGS_CLOSED)
             notices: list[str] = []
-            if result.equipment_summary is not None:
-                notices.append(messages.equipment_summary(result.equipment_summary))
+            if result.execution_assessment is not None:
+                notices.append(messages.equipment_summary(result.execution_assessment))
             if result.saved_field not in {None, "__closed__"}:
                 notices.append(messages.PROFILE_SAVED.format(field=result.saved_field))
             notices.append(messages.PROFILE_SETTINGS_MENU)
@@ -515,6 +554,10 @@ class CoachBotApplicationService:
                 messages.HEALTH_LIMITATIONS_INTAKE,
                 keyboards.health_limitations_keyboard(),
             ),
+            "training_history_import": (
+                messages.TRAINING_HISTORY_IMPORT,
+                keyboards.training_history_import_keyboard(),
+            ),
             "cancelled": (messages.CANCELLED, keyboards.cancelled_keyboard()),
         }
         if result.created:
@@ -571,16 +614,19 @@ class CoachBotApplicationService:
             return TelegramResponse(
                 f"{messages.CONTEXT_VALIDATION_ERROR}\n\n{prompt}", keyboard
             )
-        if (
-            result.kind == "equipment_recommendation"
-            or result.kind == "equipment_intake"
-        ):
-            if result.equipment_review is None:
+        if result.kind == "equipment_recommendation":
+            if result.capability_review is None:
+                return TelegramResponse(
+                    messages.GOAL_CLASSIFICATION_REQUIRED,
+                    keyboards.goal_input_keyboard(),
+                )
+        if result.kind in {"equipment_recommendation", "equipment_intake"}:
+            if result.capability_review is None:
                 return TelegramResponse(
                     messages.EQUIPMENT_UNMATCHED,
                     keyboards.health_limitations_keyboard(),
                 )
-            review = result.equipment_review
+            review = result.capability_review
             return TelegramResponse(
                 messages.equipment_review(review),
                 keyboards.equipment_intake_keyboard(
@@ -595,10 +641,10 @@ class CoachBotApplicationService:
             )
         if (
             result.kind == "health_limitations_intake"
-            and result.equipment_summary is not None
+            and result.execution_assessment is not None
         ):
             return TelegramResponse(
-                f"{messages.equipment_summary(result.equipment_summary)}\n\n"
+                f"{messages.equipment_summary(result.execution_assessment)}\n\n"
                 f"{messages.HEALTH_LIMITATIONS_INTAKE}",
                 keyboards.health_limitations_keyboard(),
             )

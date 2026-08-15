@@ -70,6 +70,8 @@ class ProfileRepository:
         target_outcome: str,
         secondary_priority: str | None,
         original_description: str,
+        goal_template_id: uuid.UUID | None = None,
+        supporting_goal_template_id: uuid.UUID | None = None,
     ) -> TrainingGoal:
         await self._require_user(user_id)
         goal = await self.get_training_goal(user_id=user_id)
@@ -80,6 +82,8 @@ class ProfileRepository:
         goal.event_date = event_date
         goal.target_outcome = target_outcome
         goal.secondary_priority = secondary_priority
+        goal.goal_template_id = goal_template_id
+        goal.supporting_goal_template_id = supporting_goal_template_id
         goal.original_description = original_description
         goal.status = TrainingGoalStatus.CONFIRMED
         await self._session.flush()
@@ -129,6 +133,8 @@ class ProfileRepository:
                 "target_outcome",
                 "event_date",
                 "secondary_priority",
+                "goal_template_id",
+                "supporting_goal_template_id",
             }
         ):
             raise ValueError("unsupported training goal update field")

@@ -5,11 +5,15 @@ from __future__ import annotations
 from dataclasses import asdict
 from datetime import datetime
 
-from app.domain.enums import ActivitySource
+from app.domain.enums import (
+    ActivitySource,
+    HeartRateTemporalQuality,
+)
 from app.integrations.tcx.models import ParsedTCXActivity, ParsedTCXPosition
 from app.services.activities.contracts import (
     ActivityImportData,
     ActivityImportValidationError,
+    HeartRateObservationData,
 )
 from app.services.activities.normalization import swimming_environment, workout_title
 
@@ -54,6 +58,18 @@ def from_tcx(parsed: ParsedTCXActivity) -> ActivityImportData:
         ),
         route_points=tuple(_route_point(item) for item in parsed.route_positions),
         source_metadata=source_metadata,
+        heart_rate_observations=tuple(
+            HeartRateObservationData(
+                source=ActivitySource.TCX,
+                source_record_key=item.source_record_key,
+                source_name=None,
+                started_at=item.timestamp,
+                ended_at=item.timestamp,
+                beats_per_minute=item.beats_per_minute,
+                temporal_quality=HeartRateTemporalQuality.EXACT_SAMPLE,
+            )
+            for item in parsed.heart_rate_observations
+        ),
     )
 
 
