@@ -2270,3 +2270,192 @@ Validation evidence:
   5 cycling, 14 swimming), 244 HR observations were retained, onboarding was
   completed, and an exact second import left both counts unchanged.
 - No live Telegram or live-LLM validation is claimed.
+
+## Follow-up: ZIP activity metric persistence investigation (2026-08-16)
+
+- [x] Inspect the real root-level Apple Health ZIP: it contains one workout
+  XML (28 workouts: 9 running, 5 cycling, 14 swimming) and a CDA XML that is
+  intentionally not an activity source.
+- [x] Trace a real workout through extraction, parser, adapter, normalization,
+  canonical detail mapping, repository, PostgreSQL, and read projection. The
+  archive produces 244 matched HR observations, but all are one-hour
+  `COARSE_INTERVAL` samples; the parser summary excluded them from aggregate
+  HR, leaving canonical average/max HR `NULL` even though observations were
+  persisted.
+- [x] Inventory source metrics: duration, distance, active energy, HR
+  observations, and swimming stroke-count records. Duration and distance were
+  already canonical; active energy was retained only in source-link provenance;
+  swimming stroke count is not currently parsed; HR observations were
+  persisted but coarse HR aggregates were not.
+- [x] Persist useful activity metrics at the canonical/read boundary with
+  explicit units. HR is retained as quality-labelled observations plus a
+  sample aggregate, and calories are typed as `calories_kcal` on every detail
+  variant. Swimming stroke count is not promoted because the source does not
+  identify a safe pool/open-water mapping and the existing typed field is
+  pool-specific.
+- [x] Add a real-archive end-to-end regression and validate the real import
+  against PostgreSQL.
+- [x] Full validation: `221 passed, 3 skipped`, Ruff, Ruff format, mypy,
+  `alembic upgrade head`, `alembic check`, and `git diff --check` pass.
+
+## Catalog resolve/reuse/create flow (2026-08-15)
+
+Canonical goal, context, and capability resolution now follows one invariant:
+existing canonical catalog definitions are the source of truth and are reused
+verbatim, and the LLM is only a semantic proposal engine for genuinely NEW
+goals.
+
+- The predefined catalog is assumed complete. When a confirmed goal template
+  already exists, `OnboardingService.confirm_goal` reuses its ID, contexts,
+  and capabilities with zero LLM calls and zero catalog mutation.
+- Only when a goal template does not exist does onboarding run
+  `_run_catalog_expansion`, which asks the LLM for the complete context set
+  (`map_goal_contexts`) and then, goal-aware, the complete capability set for
+  every resulting required context (`define_context_capabilities`), including
+  contexts reused from the canonical catalog. The goal drafts are supplied to
+  the capability call so the model reasons about the goal and each context
+  together.
+- The backend is authoritative: `TrainingCatalogPublicationService` reconciles
+  every `CREATE`/`USE_EXISTING` proposal against live catalog rows, reuses
+  existing entities by code, creates only missing ones, and inserts only
+  missing links inside one advisory-lock-protected transaction. `publish` no
+  longer takes an `existing_definition_contexts` argument and never repairs an
+  existing context.
+- The structural-completeness trigger (`incomplete_goal_template_ids`,
+  `incomplete_contexts_for_goals`, `goal_definition_complete`, and
+  `_ensure_goal_definition`) was removed. An incomplete predefined goal is a
+  catalog/data-integrity concern, not a reason to invoke the LLM.
+- The two static prompts now live in
+  `app.workflows.prompts.catalog_expansion` as `NEW_GOAL_CONTEXT_EXPANSION`
+  and `GOAL_CONTEXT_CAPABILITY_EXPANSION` (each versioned), and the workflow
+  node imports them instead of embedding prompt strings.
+- The deterministic `CapabilityAssessmentService` equipment/access review is
+  unchanged and read-only.
+- Tests cover: complete existing-goal reuse with zero expansion calls and no
+  writes, new-goal reuse of existing contexts/capabilities, idempotent reuse
+  across athletes, and atomic failure/retry.
+- Validation evidence: 219 passed, 3 skipped, Ruff, Ruff format, and mypy
+  pass. No live Telegram or live-LLM validation is claimed.
+
+## Follow-up: new-goal capability resolution through assessment (2026-08-16)
+
+- [x] Execute the confirmed-new-goal path with HYROX absent from the canonical
+  goal table and inspect extraction, context mapping, capability definition,
+  publication, persisted links, and equipment assessment.
+- [x] Fix the first semantic-loss boundary: capability expansion previously ran
+  only when a context was newly created. A new goal that correctly reused
+  existing contexts therefore skipped goal-aware capability resolution and the
+  review loaded only generic context requirements.
+- [x] Define capabilities for every context resolved for a new goal, including
+  `USE_EXISTING` contexts; publish their new options, capability rows, and
+  requirement links idempotently while preserving the no-expansion path for
+  already-canonical goals.
+- [x] Make the deterministic mock honor the active goal catalog and derive
+  context reuse from supplied semantic text instead of defaulting every unknown
+  goal to road running.
+- [x] Add a real LangGraph-backed HYROX scenario covering goal extraction,
+  reuse of `running_road`/`running_shoes`, creation of distinct SkiErg, sled,
+  burpee broad-jump, rowing, farmer-carry, sandbag-lunge, and wall-ball
+  contexts/capabilities, atomic publication, and the final equipment review.
+
+Validation evidence: the focused onboarding/catalog/scenario tests pass, and
+the full suite passes with `221 passed, 3 skipped`. Live provider and Telegram
+validation remain unclaimed.
+
+## Follow-up: semantic catalog dataset validation (2026-08-16)
+
+- [x] Add a 30-case semantic dataset covering running, road cycling, mountain
+  biking, triathlon, pool/open-water swimming, HYROX, rowing, rafting, hiking,
+  strength, reuse/create combinations, and existing-goal controls.
+- [x] Run the dataset through the real goal extraction, catalog-expansion,
+  publication, and equipment-review flow with recorded structured inputs and
+  outputs at each model boundary.
+- [x] Verify that HYROX reuses running while creating each materially distinct
+  race challenge, rowing remains a context rather than equipment, and rafting
+  remains a distinct water-sport modality.
+- [x] Publish the complete dataset/result table and final structures in
+  `docs/semantic-catalog-report.md`.
+
+Validation evidence: the semantic dataset passes `30/30`; the complete suite
+passes with `251 passed, 3 skipped`, Ruff, Ruff format, mypy, and
+`git diff --check`. No live provider, Telegram, or live-LLM validation is
+claimed.
+
+## Follow-up: catalog expansion progress and operational logs (2026-08-16)
+
+- [x] Show an immediate `Processing your goal...` response when the Telegram
+  confirmation callback starts, so long context/capability expansion is visible
+  to the athlete.
+- [x] Add safe structured logs for callback receipt, goal resolution, context
+  expansion, capability expansion, publication, rate limiting, and failures.
+- [x] Keep logs free of raw user text, health data, profiles, tokens, and model
+  payloads; catalog codes and lifecycle identifiers are sufficient for Docker
+  diagnosis.
+- [x] Add a Telegram handler regression test for the processing response.
+
+Validation evidence: complete suite passes `252 passed, 3 skipped`; Ruff, Ruff
+format, mypy, and `git diff --check` pass. The bot image was rebuilt and
+restarted with the progress message and logs enabled. Use
+`docker compose logs -f --tail=100 bot` to follow them.
+
+## Follow-up: PostgreSQL confirmation deadlock (2026-08-16)
+
+- [x] Diagnose the live Telegram symptom where `ob:v1:goal:confirm` was
+  acknowledged but never produced a response.
+- [x] Confirm the callback reached the bot and identify the wait: `confirm_goal`
+  held the onboarding row lock in its outer transaction while starting the
+  second-session catalog expansion workflow.
+- [x] Close the goal-resolution transaction before invoking the LLM expansion;
+  keep publication and athlete-goal persistence atomic in the finalization
+  transaction.
+- [x] Add safe callback receipt/acknowledgement/handling logs for future
+  Telegram diagnosis.
+- [x] Rebuild the bot container, release the stale PostgreSQL transaction, and
+  verify the focused bot/onboarding tests and complete suite.
+
+Validation evidence: callback deadlock reproduced against the local PostgreSQL
+runtime, fixed, and cleared after bot restart; focused bot/onboarding tests
+pass `30/30`; complete suite passes `251 passed, 3 skipped`; Ruff, Ruff
+format, mypy, and `git diff --check` pass. Live Telegram delivery after the
+fix still requires pressing the button again; no production deployment is
+claimed.
+
+## Follow-up: canonical HYROX seed and immutable existing goals (2026-08-16)
+
+- [x] Correct the canonical HYROX definition to reuse `running_road` while
+  retaining seven distinct station contexts: SkiErg, sled push/pull, burpee
+  broad jump, rowing, farmer carry, sandbag lunge, and wall balls.
+- [x] Add goal-aware seeded capabilities and execution requirements for every
+  HYROX station; remove the generic `functional_fitness` HYROX link.
+- [x] Add idempotent migration `0026_complete_hyrox_catalog`, including the
+  missing-goal case encountered during PostgreSQL upgrade and preservation of
+  existing row IDs when present.
+- [x] Keep existing canonical goals immutable at onboarding: no expansion
+  calls, catalog writes, completeness repair, or capability regeneration.
+- [x] Exercise new-goal and existing-goal paths through the real onboarding,
+  LangGraph boundaries, publication, and equipment assessment; the 30-case
+  dataset includes existing Ironman/triathlon and existing HYROX controls.
+
+Validation evidence: `251 passed, 3 skipped`; targeted catalog/scenario tests
+pass `40/40`; Ruff, Ruff format, mypy, `git diff --check`, `alembic upgrade
+head`, `alembic current`, and `alembic check` pass. PostgreSQL verification
+shows eight HYROX contexts, no `functional_fitness` link, and the expected
+station capabilities. No live provider, Telegram, or live-LLM validation is
+claimed.
+
+## Follow-up: capability definition scope mismatch (2026-08-16)
+
+- [x] Diagnose the live publication failure after DeepSeek returned a successful
+  capability expansion: `invalid_context_definition_scope` means the second
+  LLM response renamed or omitted one of the contexts produced by the first
+  expansion.
+- [x] Add safe logs for the mapped context codes, defined capability-context
+  codes, capability codes, and the exact scope mismatch.
+- [x] Make the capability prompt require exactly one definition for every
+  `new_training_contexts` code and explicitly forbid creating or renaming
+  contexts, while retaining strict backend validation.
+
+Validation evidence: prompt contract length remains below the regression limit;
+targeted prompt/onboarding tests pass. Docker must be rebuilt before retrying
+the live callback; successful live publication remains unclaimed until the
+retry shows matching scopes and `catalog_publication_finished`.

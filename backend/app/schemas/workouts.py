@@ -73,6 +73,7 @@ class RunningWorkoutDetailsData(_StrictSchema):
     running_type: RunningType
     distance_meters: float | None = Field(default=None, ge=0)
     moving_duration_seconds: int | None = Field(default=None, ge=0)
+    calories_kcal: float | None = Field(default=None, ge=0)
     average_pace_seconds_per_km: float | None = Field(default=None, ge=0)
     elevation_gain_meters: float | None = Field(default=None, ge=0)
     elevation_loss_meters: float | None = Field(default=None, ge=0)
@@ -97,6 +98,7 @@ class CyclingWorkoutDetailsData(_StrictSchema):
     cycling_type: CyclingType
     distance_meters: float | None = Field(default=None, ge=0)
     moving_duration_seconds: int | None = Field(default=None, ge=0)
+    calories_kcal: float | None = Field(default=None, ge=0)
     average_speed_kph: float | None = Field(default=None, ge=0)
     max_speed_kph: float | None = Field(default=None, ge=0)
     elevation_gain_meters: float | None = Field(default=None, ge=0)
@@ -121,6 +123,7 @@ class HikingWorkoutDetailsData(_StrictSchema):
     hiking_type: HikingType
     distance_meters: float | None = Field(default=None, ge=0)
     moving_duration_seconds: int | None = Field(default=None, ge=0)
+    calories_kcal: float | None = Field(default=None, ge=0)
     average_pace_seconds_per_km: float | None = Field(default=None, ge=0)
     elevation_gain_meters: float | None = Field(default=None, ge=0)
     elevation_loss_meters: float | None = Field(default=None, ge=0)
@@ -144,6 +147,7 @@ class SwimmingWorkoutDetailsData(_StrictSchema):
     swimming_environment: SwimmingEnvironment
     distance_meters: float | None = Field(default=None, ge=0)
     moving_duration_seconds: int | None = Field(default=None, ge=0)
+    calories_kcal: float | None = Field(default=None, ge=0)
     average_pace_seconds_per_100m: float | None = Field(default=None, ge=0)
     average_heart_rate: float | None = Field(default=None, ge=0)
     max_heart_rate: float | None = Field(default=None, ge=0)
@@ -173,6 +177,7 @@ class SwimmingWorkoutDetailsData(_StrictSchema):
 
 class StrengthWorkoutDetailsData(_StrictSchema):
     strength_type: StrengthType
+    calories_kcal: float | None = Field(default=None, ge=0)
     session_focus: str | None = Field(default=None, max_length=255)
     exercises_jsonb: list[StrengthExercise] = Field(default_factory=list)
 
@@ -183,6 +188,7 @@ class OtherWorkoutDetailsData(_StrictSchema):
     raw_sport: str | None = Field(default=None, max_length=128)
     raw_sub_sport: str | None = Field(default=None, max_length=128)
     distance_meters: float | None = Field(default=None, ge=0)
+    calories_kcal: float | None = Field(default=None, ge=0)
     average_heart_rate: float | None = Field(default=None, ge=0)
     max_heart_rate: float | None = Field(default=None, ge=0)
     metrics_jsonb: dict[str, object] | None = None
@@ -325,6 +331,7 @@ class WorkoutMetricsProjection(BaseModel):
     duration_seconds: int
     distance_meters: float | None = None
     moving_duration_seconds: int | None = None
+    calories_kcal: float | None = None
     average_heart_rate: float | None = None
     max_heart_rate: float | None = None
     raw_sport: str | None = None
@@ -497,6 +504,7 @@ def workout_metrics(workout: Workout) -> WorkoutMetricsProjection:
         duration_seconds=workout.duration_seconds,
         distance_meters=distance,
         moving_duration_seconds=moving_duration,
+        calories_kcal=getattr(detail, "calories_kcal", None),
         average_heart_rate=average_hr,
         max_heart_rate=max_hr,
         raw_sport=(raw_link.raw_sport if raw_link is not None else detail_raw_sport),

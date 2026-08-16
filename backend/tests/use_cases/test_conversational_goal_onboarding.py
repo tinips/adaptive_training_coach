@@ -11,7 +11,7 @@ import pytest
 import pytest_asyncio
 from catalog_seed import seed_training_catalog
 from pydantic import JsonValue
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -21,7 +21,12 @@ from sqlalchemy.ext.asyncio import (
 
 from app.config import Settings
 from app.db.base import Base
-from app.db.models import Capability, GoalTemplate, TrainingContext
+from app.db.models import (
+    Capability,
+    GoalTemplate,
+    GoalTemplateContext,
+    TrainingContext,
+)
 from app.domain.enums import (
     OnboardingStatus,
     OnboardingStep,
@@ -40,6 +45,7 @@ from app.repositories.users import UserRepository
 from app.schemas.catalog_expansion import (
     CapabilitySummary,
     CatalogExpansionWorkflowResult,
+    ContextCapabilityOutput,
     GoalContextMappingOutput,
     GoalContextProposal,
     GoalTemplateDraft,
@@ -164,11 +170,12 @@ class QueueCatalogExpansionWorkflow:
         self,
         *,
         user_id: UUID,
+        goals: tuple[GoalTemplateDraft, ...],
         new_contexts: tuple[GoalContextProposal, ...],
         active_contexts: tuple[TrainingContextSummary, ...],
         active_capabilities: tuple[CapabilitySummary, ...],
     ) -> CatalogExpansionWorkflowResult:
-        del user_id, new_contexts, active_contexts, active_capabilities
+        del user_id, goals, new_contexts, active_contexts, active_capabilities
         self.capability_calls += 1
         return self.capabilities.pop(0)
 
@@ -1219,3 +1226,417 @@ async def test_completed_chat_edit_requires_explicit_profile_settings_flow(
             athlete,
             "Update my availability and training limitations.",
         )
+
+
+def _new_goal_result(
+    *,
+    template_code: str,
+    main_goal: str = "Prepare for a HYROX-style event",
+    target_outcome: str = "Finish the event comfortably",
+) -> GoalExtractionWorkflowResult:
+    return GoalExtractionWorkflowResult(
+        outcome="extracted",
+        goal_patch=GoalExtractionPatch.model_validate(
+            {
+                "main_goal": main_goal,
+                "event_date": None,
+                "target_outcome": target_outcome,
+                "secondary_priority": None,
+                "primary_template": {
+                    "decision": "CREATE",
+                    "code": template_code,
+                    "display_name": template_code.replace("_", " ").title(),
+                    "description": (
+                        f"General preparation for {template_code.casefold()}."
+                    ),
+                },
+                "supporting_template": {
+                    "decision": "NONE",
+                    "code": None,
+                    "display_name": None,
+                    "description": None,
+                },
+                "missing_fields": [],
+                "ambiguous_fields": [],
+                "message_status": "COMPLETE",
+            }
+        ),
+    )
+
+
+def _existing_goal_result(
+    *,
+    template_code: str,
+    main_goal: str = "Prepare for a HYROX-style event",
+    target_outcome: str = "Finish the event comfortably",
+) -> GoalExtractionWorkflowResult:
+    return GoalExtractionWorkflowResult(
+        outcome="extracted",
+        goal_patch=GoalExtractionPatch.model_validate(
+            {
+                "main_goal": main_goal,
+                "event_date": None,
+                "target_outcome": target_outcome,
+                "secondary_priority": None,
+                "primary_template": {
+                    "decision": "USE_EXISTING",
+                    "code": template_code,
+                    "display_name": None,
+                    "description": None,
+                },
+                "supporting_template": {
+                    "decision": "NONE",
+                    "code": None,
+                    "display_name": None,
+                    "description": None,
+                },
+                "missing_fields": [],
+                "ambiguous_fields": [],
+                "message_status": "COMPLETE",
+            }
+        ),
+    )
+
+
+def _rowing_mapping(
+    *,
+    template_code: str,
+    include_running: bool = False,
+    rowing_decision: str = "USE_EXISTING",
+) -> CatalogExpansionWorkflowResult:
+    contexts: list[dict[str, object]] = []
+    if include_running:
+        contexts.append(
+            {
+                "decision": "USE_EXISTING",
+                "code": "running_road",
+                "display_name": None,
+                "description": None,
+                "discipline": "RUNNING",
+                "role": "SUPPORTING",
+                "priority": 20,
+            }
+        )
+    rowing_context: dict[str, object] = {
+        "decision": rowing_decision,
+        "code": "rowing_general",
+        "display_name": None,
+        "description": None,
+        "discipline": "OTHER",
+        "role": "TARGET",
+        "priority": 10,
+    }
+    if rowing_decision == "CREATE":
+        rowing_context["display_name"] = "General rowing"
+        rowing_context["description"] = "General rowing practice on water or indoors."
+    contexts.append(rowing_context)
+    return CatalogExpansionWorkflowResult(
+        outcome="succeeded",
+        context_mapping=GoalContextMappingOutput.model_validate(
+            {"templates": [{"template_code": template_code, "contexts": contexts}]}
+        ),
+    )
+
+
+def _rowing_capability_result(
+    *,
+    target_codes: tuple[str, ...] = ("running_road", "rowing_general"),
+    option_code: str = "indoor_rowing",
+    capability_code: str = "rowing_machine",
+) -> CatalogExpansionWorkflowResult:
+    capabilities: list[dict[str, object]] = [
+        {
+            "decision": "CREATE",
+            "code": capability_code,
+            "display_name": "Rowing machine",
+            "description": "An indoor rowing machine.",
+            "kind": "EQUIPMENT",
+        }
+    ]
+    if "running_road" in target_codes:
+        capabilities.append(
+            {
+                "decision": "USE_EXISTING",
+                "code": "running_shoes",
+                "display_name": None,
+                "description": None,
+                "kind": "EQUIPMENT",
+            }
+        )
+    return CatalogExpansionWorkflowResult(
+        outcome="succeeded",
+        capability_definition=ContextCapabilityOutput.model_validate(
+            {
+                "capabilities": capabilities,
+                "contexts": [
+                    {
+                        "target_context_code": target_code,
+                        "options": [
+                            {
+                                "code": (
+                                    "outdoor_road"
+                                    if target_code == "running_road"
+                                    else option_code
+                                ),
+                                "display_name": (
+                                    "Outdoor road running"
+                                    if target_code == "running_road"
+                                    else "Indoor rowing"
+                                ),
+                                "execution_context_code": target_code,
+                                "role": "PREFERRED",
+                                "priority": 10,
+                                "limitations": [],
+                                "requirements": [
+                                    {
+                                        "capability_code": (
+                                            "running_shoes"
+                                            if target_code == "running_road"
+                                            else capability_code
+                                        ),
+                                        "importance": "REQUIRED",
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                    for target_code in target_codes
+                ],
+            }
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_existing_complete_goal_reuses_everything_without_expansion(
+    goal_database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
+) -> None:
+    _, factory = goal_database
+    expansion = QueueCatalogExpansionWorkflow(mappings=[], capabilities=[])
+    extractor = QueueGoalExtractor(
+        [
+            extracted(
+                main_goal="Improve my marathon finish",
+                target_outcome="Finish under four hours",
+            )
+        ]
+    )
+    onboarding = service(factory, extractor, catalog_expansion_workflow=expansion)
+    athlete = identity(6240)
+    await start_goal(onboarding, athlete)
+    async with factory() as session:
+        before_templates = await session.scalar(select(func.count(GoalTemplate.id)))
+        before_contexts = await session.scalar(select(func.count(TrainingContext.id)))
+        before_capabilities = await session.scalar(select(func.count(Capability.id)))
+
+    await onboarding.handle_text(
+        athlete,
+        "I want to improve my marathon finish and run under four hours.",
+    )
+    confirmed = await onboarding.confirm_goal(athlete)
+    equipment = await onboarding.handle_text(athlete, "Weekday mornings.")
+    limitations = await onboarding.choose_equipment(athlete, "done")
+    await onboarding.choose_health_limitations(athlete, "none")
+    completed = await onboarding.skip_training_history(athlete)
+
+    assert expansion.map_calls == 0
+    assert expansion.capability_calls == 0
+    assert confirmed.kind == "availability_intake"
+    assert equipment.capability_review is not None
+    assert limitations.kind == "health_limitations_intake"
+    assert completed.kind == "onboarding_completed"
+    async with factory() as session:
+        goal = await ProfileRepository(session).get_training_goal(
+            user_id=confirmed.user_id
+        )
+        marathon = await session.scalar(
+            select(GoalTemplate).where(GoalTemplate.code == "MARATHON")
+        )
+        assert goal is not None
+        assert marathon is not None
+        assert goal.goal_template_id == marathon.id
+        assert (
+            await session.scalar(select(func.count(GoalTemplate.id)))
+            == before_templates
+        )
+        assert (
+            await session.scalar(select(func.count(TrainingContext.id)))
+            == before_contexts
+        )
+        assert (
+            await session.scalar(select(func.count(Capability.id)))
+            == before_capabilities
+        )
+
+
+@pytest.mark.asyncio
+async def test_new_goal_reuses_existing_context_and_creates_only_missing(
+    goal_database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
+) -> None:
+    _, factory = goal_database
+    expansion = QueueCatalogExpansionWorkflow(
+        mappings=[
+            _rowing_mapping(
+                template_code="CUSTOM_HYROX_GOAL",
+                include_running=True,
+                rowing_decision="CREATE",
+            ),
+        ],
+        capabilities=[_rowing_capability_result()],
+    )
+    onboarding = service(
+        factory,
+        QueueGoalExtractor([_new_goal_result(template_code="CUSTOM_HYROX_GOAL")]),
+        catalog_expansion_workflow=expansion,
+    )
+    athlete = identity(6250)
+    await start_goal(onboarding, athlete)
+    await onboarding.handle_text(athlete, "I want to prepare for a HYROX-style event.")
+
+    confirmed = await onboarding.confirm_goal(athlete)
+    equipment = await onboarding.handle_text(athlete, "Weekday mornings.")
+
+    assert expansion.map_calls == 1
+    assert expansion.capability_calls == 1
+    assert confirmed.kind == "availability_intake"
+    assert equipment.capability_review is not None
+    option_codes = {item.code for item in equipment.capability_review.options}
+    assert {"rowing_machine", "running_shoes"}.issubset(option_codes)
+    async with factory() as session:
+        goal = await ProfileRepository(session).get_training_goal(
+            user_id=confirmed.user_id
+        )
+        template = await session.scalar(
+            select(GoalTemplate).where(GoalTemplate.code == "CUSTOM_HYROX_GOAL")
+        )
+        rowing = await session.scalar(
+            select(TrainingContext).where(TrainingContext.code == "rowing_general")
+        )
+        running = await session.scalar(
+            select(TrainingContext).where(TrainingContext.code == "running_road")
+        )
+        machine = await session.scalar(
+            select(Capability).where(Capability.code == "rowing_machine")
+        )
+        assert goal is not None
+        assert template is not None
+        assert goal.goal_template_id == template.id
+        assert rowing is not None
+        assert running is not None
+        assert machine is not None
+        # running_road is a canonical context and must be reused, not recreated.
+        assert (
+            await session.scalar(
+                select(func.count(TrainingContext.id)).where(
+                    TrainingContext.code == "running_road"
+                )
+            )
+            == 1
+        )
+        assert (
+            await session.scalar(
+                select(func.count(TrainingContext.id)).where(
+                    TrainingContext.code == "rowing_general"
+                )
+            )
+            == 1
+        )
+        assert (
+            await session.scalar(
+                select(func.count(Capability.id)).where(
+                    Capability.code == "rowing_machine"
+                )
+            )
+            == 1
+        )
+        assert (
+            await session.scalar(
+                select(func.count(GoalTemplateContext.training_context_id)).where(
+                    GoalTemplateContext.goal_template_id == template.id
+                )
+            )
+            == 2
+        )
+
+
+@pytest.mark.asyncio
+async def test_new_goal_is_idempotent_across_athletes(
+    goal_database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
+) -> None:
+    _, factory = goal_database
+    expansion = QueueCatalogExpansionWorkflow(
+        mappings=[
+            _rowing_mapping(
+                template_code="CUSTOM_HYROX_GOAL",
+                include_running=True,
+                rowing_decision="CREATE",
+            ),
+        ],
+        capabilities=[_rowing_capability_result()],
+    )
+    first_onboarding = service(
+        factory,
+        QueueGoalExtractor([_new_goal_result(template_code="CUSTOM_HYROX_GOAL")]),
+        catalog_expansion_workflow=expansion,
+    )
+    first = identity(6251)
+    await start_goal(first_onboarding, first)
+    await first_onboarding.handle_text(
+        first,
+        "I want to prepare for a HYROX-style event.",
+    )
+    first_confirmed = await first_onboarding.confirm_goal(first)
+    assert first_confirmed.kind == "availability_intake"
+    assert expansion.map_calls == 1
+    assert expansion.capability_calls == 1
+
+    second_onboarding = service(
+        factory,
+        QueueGoalExtractor([_existing_goal_result(template_code="CUSTOM_HYROX_GOAL")]),
+        catalog_expansion_workflow=expansion,
+    )
+    second = identity(6252)
+    await start_goal(second_onboarding, second)
+    await second_onboarding.handle_text(
+        second,
+        "I want to prepare for a HYROX-style event.",
+    )
+    second_confirmed = await second_onboarding.confirm_goal(second)
+
+    assert second_confirmed.kind == "availability_intake"
+    assert expansion.map_calls == 1
+    assert expansion.capability_calls == 1
+    async with factory() as session:
+        assert (
+            await session.scalar(
+                select(func.count(GoalTemplate.id)).where(
+                    GoalTemplate.code == "CUSTOM_HYROX_GOAL"
+                )
+            )
+            == 1
+        )
+        assert (
+            await session.scalar(
+                select(func.count(TrainingContext.id)).where(
+                    TrainingContext.code == "rowing_general"
+                )
+            )
+            == 1
+        )
+        assert (
+            await session.scalar(
+                select(func.count(Capability.id)).where(
+                    Capability.code == "rowing_machine"
+                )
+            )
+            == 1
+        )
+        second_goal = await ProfileRepository(session).get_training_goal(
+            user_id=second_confirmed.user_id
+        )
+        template = await session.scalar(
+            select(GoalTemplate).where(GoalTemplate.code == "CUSTOM_HYROX_GOAL")
+        )
+        assert second_goal is not None
+        assert template is not None
+        assert second_goal.goal_template_id == template.id

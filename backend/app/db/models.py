@@ -716,6 +716,10 @@ class RunningWorkoutDetails(Base):
             name="moving_duration_nonnegative",
         ),
         CheckConstraint(
+            "calories_kcal IS NULL OR calories_kcal >= 0",
+            name="calories_nonnegative",
+        ),
+        CheckConstraint(
             "average_pace_seconds_per_km IS NULL OR average_pace_seconds_per_km >= 0",
             name="average_pace_nonnegative",
         ),
@@ -759,6 +763,7 @@ class RunningWorkoutDetails(Base):
         Integer,
         nullable=True,
     )
+    calories_kcal: Mapped[float | None] = mapped_column(Float, nullable=True)
     average_pace_seconds_per_km: Mapped[float | None] = mapped_column(
         Float,
         nullable=True,
@@ -794,6 +799,10 @@ class CyclingWorkoutDetails(Base):
         CheckConstraint(
             "moving_duration_seconds IS NULL OR moving_duration_seconds >= 0",
             name="moving_duration_nonnegative",
+        ),
+        CheckConstraint(
+            "calories_kcal IS NULL OR calories_kcal >= 0",
+            name="calories_nonnegative",
         ),
         CheckConstraint(
             "average_speed_kph IS NULL OR average_speed_kph >= 0",
@@ -843,6 +852,7 @@ class CyclingWorkoutDetails(Base):
         Integer,
         nullable=True,
     )
+    calories_kcal: Mapped[float | None] = mapped_column(Float, nullable=True)
     average_speed_kph: Mapped[float | None] = mapped_column(Float, nullable=True)
     max_speed_kph: Mapped[float | None] = mapped_column(Float, nullable=True)
     elevation_gain_meters: Mapped[float | None] = mapped_column(
@@ -876,6 +886,10 @@ class HikingWorkoutDetails(Base):
         CheckConstraint(
             "moving_duration_seconds IS NULL OR moving_duration_seconds >= 0",
             name="moving_duration_nonnegative",
+        ),
+        CheckConstraint(
+            "calories_kcal IS NULL OR calories_kcal >= 0",
+            name="calories_nonnegative",
         ),
         CheckConstraint(
             "average_pace_seconds_per_km IS NULL OR average_pace_seconds_per_km >= 0",
@@ -917,6 +931,7 @@ class HikingWorkoutDetails(Base):
         Integer,
         nullable=True,
     )
+    calories_kcal: Mapped[float | None] = mapped_column(Float, nullable=True)
     average_pace_seconds_per_km: Mapped[float | None] = mapped_column(
         Float,
         nullable=True,
@@ -953,6 +968,10 @@ class SwimmingWorkoutDetails(Base):
             name="moving_duration_nonnegative",
         ),
         CheckConstraint(
+            "calories_kcal IS NULL OR calories_kcal >= 0",
+            name="calories_nonnegative",
+        ),
+        CheckConstraint(
             "average_pace_seconds_per_100m IS NULL "
             "OR average_pace_seconds_per_100m >= 0",
             name="average_pace_nonnegative",
@@ -985,6 +1004,7 @@ class SwimmingWorkoutDetails(Base):
         Integer,
         nullable=True,
     )
+    calories_kcal: Mapped[float | None] = mapped_column(Float, nullable=True)
     average_pace_seconds_per_100m: Mapped[float | None] = mapped_column(
         Float,
         nullable=True,
@@ -1053,6 +1073,12 @@ class StrengthWorkoutDetails(Base):
     """Validated JSON exercise structure for one strength workout."""
 
     __tablename__ = "strength_workout_details"
+    __table_args__ = (
+        CheckConstraint(
+            "calories_kcal IS NULL OR calories_kcal >= 0",
+            name="calories_nonnegative",
+        ),
+    )
 
     workout_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True),
@@ -1063,6 +1089,7 @@ class StrengthWorkoutDetails(Base):
         persisted_enum(StrengthType, name="strength_type", length=16),
         nullable=False,
     )
+    calories_kcal: Mapped[float | None] = mapped_column(Float, nullable=True)
     session_focus: Mapped[str | None] = mapped_column(String(255), nullable=True)
     exercises_jsonb: Mapped[list[dict[str, object]]] = mapped_column(
         json_document(),
@@ -1093,6 +1120,10 @@ class OtherWorkoutDetails(Base):
             "max_heart_rate IS NULL OR max_heart_rate >= 0",
             name="max_heart_rate_nonnegative",
         ),
+        CheckConstraint(
+            "calories_kcal IS NULL OR calories_kcal >= 0",
+            name="calories_nonnegative",
+        ),
     )
 
     workout_id: Mapped[uuid.UUID] = mapped_column(
@@ -1107,6 +1138,7 @@ class OtherWorkoutDetails(Base):
     distance_meters: Mapped[float | None] = mapped_column(Float, nullable=True)
     average_heart_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
     max_heart_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    calories_kcal: Mapped[float | None] = mapped_column(Float, nullable=True)
     metrics_jsonb: Mapped[dict[str, object] | None] = mapped_column(
         json_document(),
         nullable=True,

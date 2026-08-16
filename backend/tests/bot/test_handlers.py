@@ -159,6 +159,26 @@ async def test_callback_handler_acknowledges_and_delegates_action() -> None:
 
 
 @pytest.mark.asyncio
+async def test_goal_confirmation_shows_processing_before_delegating() -> None:
+    service = SimpleNamespace(
+        handle_agent_input=AsyncMock(
+            return_value=TelegramResponse("next", edit_existing=True)
+        ),
+    )
+    update = _update(callback_data="ob:v1:goal:confirm")
+
+    await handlers.callback_handler(
+        cast(Update, update),
+        cast(ContextTypes.DEFAULT_TYPE, _context(service)),
+    )
+
+    assert update.callback_query.edit_message_text.await_args_list == [
+        call(messages.GOAL_CATALOG_EXPANSION_PROGRESS),
+        call("next", reply_markup=None),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_callback_replay_does_not_send_duplicate_message() -> None:
     service = SimpleNamespace(
         handle_agent_input=AsyncMock(

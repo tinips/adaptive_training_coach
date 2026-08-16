@@ -77,9 +77,25 @@ async def callback_handler(
     query = update.callback_query
     if query is None or query.data is None:
         return
+    user = update.effective_user
+    logger.info(
+        "telegram_callback_received user_id=%s callback=%s",
+        user.id if user is not None else None,
+        query.data,
+    )
     await query.answer()
+    logger.info("telegram_callback_acknowledged callback=%s", query.data)
     if not _authorized(update, context):
+        logger.warning("telegram_callback_unauthorized callback=%s", query.data)
         return
+    if query.data == "ob:v1:goal:confirm":
+        try:
+            await query.edit_message_text(messages.GOAL_CATALOG_EXPANSION_PROGRESS)
+        except BadRequest as exc:
+            logger.info(
+                "telegram_goal_progress_message_unavailable reason=%s",
+                type(exc).__name__,
+            )
     identity = _identity(update)
     if identity is None:
         return
@@ -89,6 +105,11 @@ async def callback_handler(
             content=query.data,
             additional_kwargs={"telegram_event_type": "callback"},
         ),
+    )
+    logger.info(
+        "telegram_callback_handled callback=%s edit_existing=%s",
+        query.data,
+        response.edit_existing,
     )
     await _deliver(update, response)
 

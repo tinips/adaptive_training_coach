@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import uuid
 from dataclasses import dataclass
@@ -41,6 +42,7 @@ _FORBIDDEN_TEXT = re.compile(
     r"\b(?:my|mine|i am|i'm|athlete's)\b",
     flags=re.IGNORECASE,
 )
+logger = logging.getLogger(__name__)
 
 
 class CatalogExpansionError(RuntimeError):
@@ -128,6 +130,10 @@ class TrainingCatalogPublicationService:
                 for definition in capability_definition.contexts
                 for option in definition.options
             )
+            context_codes.update(
+                definition.target_context_code
+                for definition in capability_definition.contexts
+            )
         existing_contexts = {
             item.code: item
             for item in await session.scalars(
@@ -179,9 +185,21 @@ class TrainingCatalogPublicationService:
         if created_template_codes or created_context_codes:
             await session.flush()
 
-        for template_code in created_template_codes:
+        template_ids = {row.id for row in template_rows.values()}
+        existing_links = {
+            (row.goal_template_id, row.training_context_id)
+            for row in await session.scalars(
+                select(GoalTemplateContext).where(
+                    GoalTemplateContext.goal_template_id.in_(template_ids)
+                )
+            )
+        }
+        for template_code, mapping in mapping_by_template.items():
             template = template_rows[template_code]
-            for proposal in mapping_by_template[template_code].contexts:
+            for proposal in mapping.contexts:
+                pair = (template.id, context_rows[proposal.code].id)
+                if pair in existing_links:
+                    continue
                 session.add(
                     GoalTemplateContext(
                         goal_template_id=template.id,
@@ -190,14 +208,16 @@ class TrainingCatalogPublicationService:
                         priority=proposal.priority,
                     )
                 )
+                existing_links.add(pair)
 
-        if created_context_codes:
+        definition_context_codes = set(proposals)
+        if definition_context_codes:
             if capability_definition is None:
                 raise CatalogExpansionError("missing_context_capabilities")
             await self._publish_context_definitions(
                 session=session,
                 context_rows=context_rows,
-                created_context_codes=created_context_codes,
+                definition_context_codes=definition_context_codes,
                 output=capability_definition,
             )
 
@@ -287,7 +307,7 @@ class TrainingCatalogPublicationService:
             raise CatalogExpansionError("invalid_goal_context_mapping")
 
         proposals: dict[str, GoalContextProposal] = {}
-        new_context_codes: set[str] = set()
+        mapped_context_codes: set[str] = set()
         for context_set in context_mapping.templates:
             template = template_by_code[context_set.template_code]
             if len({context.code for context in context_set.contexts}) != len(
@@ -315,7 +335,7 @@ class TrainingCatalogPublicationService:
                         context_proposal.display_name,
                         context_proposal.description,
                     )
-                    new_context_codes.add(context_proposal.code)
+                mapped_context_codes.add(context_proposal.code)
                 previous = proposals.get(context_proposal.code)
                 if previous is not None and (
                     previous.decision != context_proposal.decision
@@ -324,7 +344,11 @@ class TrainingCatalogPublicationService:
                     raise CatalogExpansionError("inconsistent_training_context")
                 proposals[context_proposal.code] = context_proposal
 
-        if not new_context_codes:
+        # A new goal needs a goal-aware capability definition for every
+        # resulting context, including contexts reused from the global catalog.
+        # Existing goals never enter this publication path.
+        definition_scope = mapped_context_codes
+        if not definition_scope:
             if capability_definition is not None:
                 raise CatalogExpansionError("unexpected_context_capabilities")
             return
@@ -335,7 +359,12 @@ class TrainingCatalogPublicationService:
         }
         if len(definitions) != len(capability_definition.contexts):
             raise CatalogExpansionError("duplicate_context_definition")
-        if set(definitions) != new_context_codes:
+        if set(definitions) != definition_scope:
+            logger.warning(
+                "catalog_context_definition_scope_mismatch mapped=%s defined=%s",
+                ",".join(sorted(definition_scope)),
+                ",".join(sorted(definitions)),
+            )
             raise CatalogExpansionError("invalid_context_definition_scope")
 
         capability_by_code = {
@@ -395,9 +424,11 @@ class TrainingCatalogPublicationService:
         *,
         session: AsyncSession,
         context_rows: dict[str, TrainingContext],
-        created_context_codes: set[str],
+        definition_context_codes: set[str],
         output: ContextCapabilityOutput,
     ) -> None:
+        """Create only missing options, capabilities, and requirement links."""
+
         capability_proposals = {item.code: item for item in output.capabilities}
         existing_capabilities = {
             item.code: item
@@ -434,34 +465,61 @@ class TrainingCatalogPublicationService:
             await session.flush()
 
         definitions = {item.target_context_code: item for item in output.contexts}
-        option_requirements: list[
+        target_ids = [context_rows[code].id for code in definition_context_codes]
+        existing_options = {
+            (row.target_context_id, row.code): row
+            for row in await session.scalars(
+                select(ContextExecutionOption).where(
+                    ContextExecutionOption.target_context_id.in_(target_ids)
+                )
+            )
+        }
+        pending_requirements: list[
             tuple[ContextExecutionOption, tuple[CapabilityRequirementProposal, ...]]
         ] = []
-        for context_code in created_context_codes:
+        for context_code in definition_context_codes:
             definition = definitions[context_code]
             target = context_rows[context_code]
             for option_proposal in definition.options:
-                option = ContextExecutionOption(
-                    id=uuid.uuid4(),
-                    target_context_id=target.id,
-                    execution_context_id=context_rows[
-                        option_proposal.execution_context_code
-                    ].id,
-                    code=option_proposal.code,
-                    display_name=option_proposal.display_name,
-                    role=option_proposal.role,
-                    priority=option_proposal.priority,
-                    limitations=option_proposal.limitations,
-                )
-                session.add(option)
-                option_requirements.append(
+                key = (target.id, option_proposal.code)
+                option = existing_options.get(key)
+                if option is None:
+                    option = ContextExecutionOption(
+                        id=uuid.uuid4(),
+                        target_context_id=target.id,
+                        execution_context_id=context_rows[
+                            option_proposal.execution_context_code
+                        ].id,
+                        code=option_proposal.code,
+                        display_name=option_proposal.display_name,
+                        role=option_proposal.role,
+                        priority=option_proposal.priority,
+                        limitations=option_proposal.limitations,
+                    )
+                    session.add(option)
+                pending_requirements.append(
                     (option, tuple(option_proposal.requirements))
                 )
 
-        if option_requirements:
+        if pending_requirements:
             await session.flush()
-        for option, requirements in option_requirements:
+
+        involved_option_ids = {option.id for option, _ in pending_requirements}
+        existing_links = {
+            (row.execution_option_id, row.capability_id)
+            for row in await session.scalars(
+                select(ExecutionOptionCapability).where(
+                    ExecutionOptionCapability.execution_option_id.in_(
+                        involved_option_ids
+                    )
+                )
+            )
+        }
+        for option, requirements in pending_requirements:
             for requirement in requirements:
+                pair = (option.id, capability_rows[requirement.capability_code].id)
+                if pair in existing_links:
+                    continue
                 session.add(
                     ExecutionOptionCapability(
                         execution_option_id=option.id,
@@ -469,6 +527,7 @@ class TrainingCatalogPublicationService:
                         importance=requirement.importance,
                     )
                 )
+                existing_links.add(pair)
 
     @staticmethod
     async def _lock_catalog(session: AsyncSession) -> None:

@@ -41,6 +41,7 @@ from app.domain.enums import (
     TrainingImportContext,
     UserStatus,
 )
+from app.repositories.activities import TrainingActivityRepository
 from app.repositories.users import UserRepository
 from app.schemas.common import TelegramIdentity
 from app.schemas.training_import import TelegramDocumentUpload
@@ -51,6 +52,7 @@ from app.services.training_import import (
 )
 
 NOW = datetime(2026, 7, 29, 12, tzinfo=UTC)
+REAL_ROOT_ARCHIVES = tuple(Path(__file__).resolve().parents[3].glob("*.zip"))
 
 
 @pytest_asyncio.fixture
@@ -340,6 +342,69 @@ async def test_existing_athlete_apple_history_import_stays_available(
                 "unit": "kcal",
             }
         ]
+
+
+@pytest.mark.asyncio
+async def test_real_root_zip_persists_hr_calories_and_read_metrics(
+    persistence: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
+    tmp_path: Path,
+) -> None:
+    if not REAL_ROOT_ARCHIVES:
+        pytest.skip("The real root-level Apple Health ZIP is not present")
+
+    _, factory = persistence
+    owner = identity(9199)
+    user_id = await stage_user(factory, owner=owner)
+    outcome, _ = await upload(
+        service(factory, temp_dir=tmp_path / "temporary"),
+        owner=owner,
+        source=REAL_ROOT_ARCHIVES[0],
+        update_id=199,
+    )
+
+    assert outcome.status is AppleHealthImportStatus.SUCCEEDED
+    assert outcome.workouts_found == 28
+    assert outcome.heart_rate_records_matched == 244
+
+    started_at = datetime(2026, 6, 21, 4, 3, 24, tzinfo=UTC)
+    async with factory() as session:
+        workout = await session.scalar(
+            select(Workout).where(
+                Workout.athlete_id == user_id,
+                Workout.started_at == started_at,
+            )
+        )
+        assert workout is not None
+        assert workout.running_details is not None
+        detail = workout.running_details
+        assert detail.distance_meters == 4275
+        assert detail.calories_kcal == 251
+        assert detail.average_heart_rate == pytest.approx(134.75)
+        assert detail.max_heart_rate == 196
+
+        observations = tuple(
+            (
+                await session.scalars(
+                    select(WorkoutHeartRateObservation).where(
+                        WorkoutHeartRateObservation.user_id == user_id,
+                        WorkoutHeartRateObservation.workout_id == workout.id,
+                    )
+                )
+            ).all()
+        )
+        assert len(observations) == 8
+        assert sum(item.beats_per_minute for item in observations) / len(
+            observations
+        ) == pytest.approx(134.75)
+        assert max(item.beats_per_minute for item in observations) == 196
+
+        read = await TrainingActivityRepository(session).serialize_owned(
+            user_id=user_id,
+            workout_id=workout.id,
+        )
+        assert read.details.average_heart_rate == pytest.approx(134.75)
+        assert read.details.max_heart_rate == 196
+        assert read.details.calories_kcal == 251
 
 
 @pytest.mark.asyncio

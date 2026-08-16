@@ -776,18 +776,16 @@ def _match_workout(
 
 
 def _summarize_heart_rate(workout: ParsedWorkout) -> None:
-    precise = [
-        item
+    values = [
+        item.beats_per_minute
         for item in workout.observations
-        if item.temporal_quality
-        in {
-            HeartRateTemporalQuality.EXACT_SAMPLE,
-            HeartRateTemporalQuality.SHORT_INTERVAL,
-        }
+        if item.temporal_quality is not HeartRateTemporalQuality.UNKNOWN
     ]
-    if precise:
-        workout.max_heart_rate = max(item.beats_per_minute for item in precise)
-    if precise:
-        workout.average_heart_rate = sum(
-            item.beats_per_minute for item in precise
-        ) / len(precise)
+    if values:
+        # Keep temporal_quality on each observation so consumers can
+        # distinguish exact/short samples from coarse source intervals. The
+        # aggregate is still useful as a sample summary when an export only
+        # provides coarse values; omitting it made all HR disappear from the
+        # canonical activity detail even though the observations matched.
+        workout.max_heart_rate = max(values)
+        workout.average_heart_rate = sum(values) / len(values)

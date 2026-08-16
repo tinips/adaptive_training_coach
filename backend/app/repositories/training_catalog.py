@@ -18,7 +18,10 @@ from app.db.models import (
     GoalTemplateContext,
     TrainingContext,
 )
-from app.domain.enums import CatalogItemStatus, GoalTemplateKind
+from app.domain.enums import (
+    CatalogItemStatus,
+    GoalTemplateKind,
+)
 
 
 class TrainingCatalogRepository:

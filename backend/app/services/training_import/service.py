@@ -83,7 +83,9 @@ class TrainingFileImportOutcome:
     started_at: datetime | None = None
     duration_seconds: int | None = None
     distance_meters: float | None = None
+    calories_kcal: float | None = None
     average_heart_rate: float | None = None
+    max_heart_rate: float | None = None
 
 
 class TrainingFileImportService:
@@ -678,9 +680,11 @@ class TrainingFileImportService:
                 workout.duration_seconds if workout is not None else None
             ),
             distance_meters=(metrics.distance_meters if metrics is not None else None),
+            calories_kcal=(metrics.calories_kcal if metrics is not None else None),
             average_heart_rate=(
                 metrics.average_heart_rate if metrics is not None else None
             ),
+            max_heart_rate=(metrics.max_heart_rate if metrics is not None else None),
         )
 
     def _require_enabled(self, file_format: TrainingFileFormat) -> None:

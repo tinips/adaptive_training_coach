@@ -96,7 +96,7 @@ def test_discovers_unicode_healthdata_and_normalizes_supported_units(
     )
 
 
-def test_coarse_heart_rate_is_preserved_without_fake_average(
+def test_coarse_heart_rate_is_preserved_and_summarized_from_source_values(
     tmp_path: Path,
 ) -> None:
     archive = tmp_path / "export.zip"
@@ -105,8 +105,8 @@ def test_coarse_heart_rate_is_preserved_without_fake_average(
     workout = parser().parse(archive).workouts[0]
 
     assert len(workout.observations) == 1
-    assert workout.max_heart_rate is None
-    assert workout.average_heart_rate is None
+    assert workout.max_heart_rate == 150
+    assert workout.average_heart_rate == 150
     assert workout.observations[0].temporal_quality is (
         HeartRateTemporalQuality.COARSE_INTERVAL
     )

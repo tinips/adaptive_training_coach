@@ -8,7 +8,13 @@ from collections.abc import Sequence
 from enum import StrEnum
 from typing import Any
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langchain_core.runnables import Runnable, RunnableConfig, RunnableLambda
 from langchain_core.tools import BaseTool
 
@@ -91,6 +97,7 @@ class DeterministicFakeOnboardingModel:
                     _fake_goal_output(
                         value,
                         needs_clarification=needs_clarification,
+                        active_primary_codes=_active_primary_codes(messages),
                     )
                 )
             return StructuredModelResponse(
@@ -197,6 +204,7 @@ def _fake_goal_output(
     user_text: str,
     *,
     needs_clarification: bool,
+    active_primary_codes: set[str],
 ) -> dict[str, object]:
     folded = user_text.casefold()
     code = "GENERAL_RUNNING"
@@ -213,10 +221,17 @@ def _fake_goal_output(
         "10k": "RUNNING_10K",
         "5k": "RUNNING_5K",
     }
-    for phrase, known_code in known.items():
+    known_code: str | None = None
+    for phrase, candidate_code in known.items():
         if phrase in folded:
-            code = known_code
+            known_code = candidate_code
             break
+    if known_code is not None:
+        code = known_code
+        if code not in active_primary_codes:
+            decision = "CREATE"
+            display_name = code.replace("_", " ").title()
+            description = f"General preparation for {display_name.casefold()}."
     else:
         if not any(word in folded for word in ("run", "running")):
             decision = "CREATE"
@@ -275,36 +290,116 @@ def _fake_goal_output(
 def _fake_context_mapping(request_json: str) -> dict[str, object]:
     request = json.loads(request_json)
     templates = request.get("new_templates", [])
+    active_contexts = request.get("active_training_contexts", [])
     rows: list[dict[str, object]] = []
     for template in templates:
         code = str(template["code"])
         kind = str(template["kind"])
-        folded = code.casefold()
-        if "swim" in folded:
-            context_code, discipline = "swimming_pool", "SWIMMING"
-        elif "cycl" in folded or "bike" in folded:
-            context_code, discipline = "cycling_road", "CYCLING"
-        elif "strength" in folded or "muscle" in folded:
-            context_code, discipline = "strength_general", "STRENGTH"
+        goal_tokens = _semantic_tokens(
+            " ".join(
+                str(template.get(field, ""))
+                for field in ("code", "display_name", "description")
+            )
+        )
+        candidates: list[tuple[int, str, dict[str, object]]] = []
+        for context in active_contexts:
+            if not isinstance(context, dict):
+                continue
+            context_tokens = _semantic_tokens(
+                " ".join(
+                    str(context.get(field, ""))
+                    for field in ("code", "display_name", "description")
+                )
+            )
+            overlap = len(goal_tokens & context_tokens)
+            if overlap:
+                candidates.append((overlap, str(context.get("code")), context))
+        selected: dict[str, tuple[int, str, dict[str, object]]] = {}
+        for candidate in candidates:
+            discipline = str(candidate[2].get("discipline", "OTHER"))
+            if discipline not in selected or candidate[:2] > selected[discipline][:2]:
+                selected[discipline] = candidate
+        if selected:
+            chosen = [
+                item[2] for item in sorted(selected.values(), key=lambda item: item[1])
+            ]
+            context_proposals = [
+                {
+                    "decision": "USE_EXISTING",
+                    "code": str(item["code"]),
+                    "display_name": None,
+                    "description": None,
+                    "discipline": str(item["discipline"]),
+                    "role": "SUPPORTING" if kind == "SUPPORTING" else "TARGET",
+                    "priority": index * 10 + 10,
+                }
+                for index, item in enumerate(chosen)
+            ]
         else:
-            context_code, discipline = "running_road", "RUNNING"
+            context_code = f"{code.casefold()}_general"[:64]
+            display_name = f"{code.replace('_', ' ').title()} training"
+            context_proposals = [
+                {
+                    "decision": "CREATE",
+                    "code": context_code,
+                    "display_name": display_name,
+                    "description": (
+                        f"General training context for {display_name.casefold()}."
+                    ),
+                    "discipline": "OTHER",
+                    "role": "SUPPORTING" if kind == "SUPPORTING" else "TARGET",
+                    "priority": 10,
+                }
+            ]
         rows.append(
             {
                 "template_code": code,
-                "contexts": [
-                    {
-                        "decision": "USE_EXISTING",
-                        "code": context_code,
-                        "display_name": None,
-                        "description": None,
-                        "discipline": discipline,
-                        "role": "SUPPORTING" if kind == "SUPPORTING" else "TARGET",
-                        "priority": 10,
-                    }
-                ],
+                "contexts": context_proposals,
             }
         )
     return {"templates": rows}
+
+
+def _active_primary_codes(messages: list[BaseMessage]) -> set[str]:
+    marker = "ACTIVE goal template catalog: "
+    for message in messages:
+        if not isinstance(message, SystemMessage) or not isinstance(
+            message.content, str
+        ):
+            continue
+        raw_catalog = message.content.partition(marker)[2]
+        if not raw_catalog:
+            continue
+        try:
+            catalog = json.loads(raw_catalog)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(catalog, list):
+            continue
+        return {
+            str(item["code"])
+            for item in catalog
+            if isinstance(item, dict) and item.get("template_type") == "PRIMARY"
+        }
+    return set()
+
+
+def _semantic_tokens(value: str) -> set[str]:
+    stop_words = {
+        "and",
+        "event",
+        "for",
+        "general",
+        "goal",
+        "preparation",
+        "the",
+        "training",
+    }
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", value.casefold())
+        if len(token) >= 4 and token not in stop_words
+    }
 
 
 def _fake_context_capabilities(request_json: str) -> dict[str, object]:

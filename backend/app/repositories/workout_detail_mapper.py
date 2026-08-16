@@ -43,6 +43,7 @@ def details_for_import(incoming: ActivityImportData) -> WorkoutDetailsData:
     common = {
         "distance_meters": incoming.distance_meters,
         "moving_duration_seconds": incoming.moving_duration_seconds,
+        "calories_kcal": incoming.calories_kcal,
         "average_heart_rate": incoming.average_heart_rate,
         "max_heart_rate": incoming.max_heart_rate,
     }
@@ -87,6 +88,7 @@ def details_for_import(incoming: ActivityImportData) -> WorkoutDetailsData:
     if incoming.discipline is Discipline.STRENGTH:
         return StrengthWorkoutDetailsData(
             strength_type=incoming.strength_type or StrengthType.OTHER,
+            calories_kcal=incoming.calories_kcal,
             session_focus=incoming.session_focus,
             exercises_jsonb=list(incoming.exercises),
         )
@@ -96,6 +98,7 @@ def details_for_import(incoming: ActivityImportData) -> WorkoutDetailsData:
         raw_sport=incoming.raw_sport,
         raw_sub_sport=incoming.raw_sub_sport,
         distance_meters=incoming.distance_meters,
+        calories_kcal=incoming.calories_kcal,
         average_heart_rate=incoming.average_heart_rate,
         max_heart_rate=incoming.max_heart_rate,
         metrics_jsonb=(

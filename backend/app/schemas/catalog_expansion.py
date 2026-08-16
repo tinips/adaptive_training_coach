@@ -163,8 +163,16 @@ class CatalogExpansionWorkflow(Protocol):
         self,
         *,
         user_id: UUID,
+        goals: tuple[GoalTemplateDraft, ...],
         new_contexts: tuple[GoalContextProposal, ...],
         active_contexts: tuple[TrainingContextSummary, ...],
         active_capabilities: tuple[CapabilitySummary, ...],
     ) -> CatalogExpansionWorkflowResult:
-        """Define execution choices for all newly proposed contexts."""
+        """Define the complete capability set for the goal-context pairs.
+
+        ``new_contexts`` is retained as the protocol name for compatibility;
+        callers supply every context required by the newly created goal,
+        including contexts reused from the canonical catalog. The model must
+        reason about the goal and each context together, reusing canonical
+        capabilities wherever they represent the requirement.
+        """

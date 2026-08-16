@@ -107,11 +107,16 @@ class LangGraphCatalogExpansionWorkflow:
         self,
         *,
         user_id: UUID,
+        goals: tuple[GoalTemplateDraft, ...],
         new_contexts: tuple[GoalContextProposal, ...],
         active_contexts: tuple[TrainingContextSummary, ...],
         active_capabilities: tuple[CapabilitySummary, ...],
     ) -> CatalogExpansionWorkflowResult:
+        # The compatibility parameter name is ``new_contexts``; the payload
+        # deliberately contains every context required by the new goal so the
+        # model cannot silently fall back to a context's generic definition.
         request = {
+            "goals": [item.model_dump(mode="json") for item in goals],
             "new_training_contexts": [
                 item.model_dump(mode="json") for item in new_contexts
             ],

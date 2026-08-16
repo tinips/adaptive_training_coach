@@ -47,7 +47,12 @@ from app.training_catalog_seed import (
     TRAINING_CONTEXTS,
     catalog_id,
 )
-from app.workflows.catalog_expansion.nodes import _CAPABILITIES_SYSTEM, _MAP_SYSTEM
+from app.workflows.prompts.catalog_expansion import (
+    CAPABILITY_EXPANSION_CONTRACT_VERSION,
+    CONTEXT_EXPANSION_CONTRACT_VERSION,
+    GOAL_CONTEXT_CAPABILITY_EXPANSION,
+    NEW_GOAL_CONTEXT_EXPANSION,
+)
 
 
 @pytest_asyncio.fixture
@@ -73,23 +78,35 @@ async def _athlete(session: AsyncSession, telegram_id: int) -> uuid.UUID:
 
 
 def test_catalog_expansion_prompts_explicitly_request_json_mode() -> None:
-    assert "JSON object" in _MAP_SYSTEM
-    assert "JSON object" in _CAPABILITIES_SYSTEM
-    assert "TARGET for direct practice" in _MAP_SYSTEM
-    assert "use OTHER\nfor rowing" in _MAP_SYSTEM
-    assert "USE_EXISTING codes must occur" in _MAP_SYSTEM
-    assert "Option role is PREFERRED or SUBSTITUTE" in _CAPABILITIES_SYSTEM
-    assert "methods, workouts, drills" in _CAPABILITIES_SYSTEM
-    assert "set of capability codes in capabilities must equal" in (
-        _CAPABILITIES_SYSTEM
+    assert "JSON object" in NEW_GOAL_CONTEXT_EXPANSION
+    assert "JSON object" in GOAL_CONTEXT_CAPABILITY_EXPANSION
+    assert CONTEXT_EXPANSION_CONTRACT_VERSION == "2"
+    assert CAPABILITY_EXPANSION_CONTRACT_VERSION == "2"
+    assert "complete training-context structure" in NEW_GOAL_CONTEXT_EXPANSION
+    assert "Do not omit essential training contexts" in NEW_GOAL_CONTEXT_EXPANSION
+    assert "Do not invent database IDs or relationships" in NEW_GOAL_CONTEXT_EXPANSION
+    assert "TARGET context for direct practice" in NEW_GOAL_CONTEXT_EXPANSION
+    assert "distinct challenge as its own TARGET context" in NEW_GOAL_CONTEXT_EXPANSION
+    assert "use OTHER for" in NEW_GOAL_CONTEXT_EXPANSION
+    assert "USE_EXISTING codes must occur" in NEW_GOAL_CONTEXT_EXPANSION
+    assert "goal-context pair" in GOAL_CONTEXT_CAPABILITY_EXPANSION
+    assert "complete capability set, not only missing" in (
+        GOAL_CONTEXT_CAPABILITY_EXPANSION
     )
-    assert "an exact match must be USE_EXISTING" in _CAPABILITIES_SYSTEM
-    assert len(_MAP_SYSTEM) < 1_500
-    assert len(_CAPABILITIES_SYSTEM) < 1_500
+    assert "Option role is PREFERRED or SUBSTITUTE" in GOAL_CONTEXT_CAPABILITY_EXPANSION
+    assert "methods, workouts, drills" in GOAL_CONTEXT_CAPABILITY_EXPANSION
+    assert "set of capability codes in capabilities must equal" in (
+        GOAL_CONTEXT_CAPABILITY_EXPANSION
+    )
+    assert "exact code match with active_capabilities" in (
+        GOAL_CONTEXT_CAPABILITY_EXPANSION
+    )
+    assert len(NEW_GOAL_CONTEXT_EXPANSION) < 2_000
+    assert len(GOAL_CONTEXT_CAPABILITY_EXPANSION) < 1_500
 
 
 @pytest.mark.asyncio
-async def test_seed_integrity_covers_triathlon_hyrox_and_obstacle_race(
+async def test_seed_integrity_covers_triathlon_complete_hyrox_and_obstacle_race(
     catalog_database: async_sessionmaker[AsyncSession],
 ) -> None:
     goal_codes = {row[0] for row in GOAL_TEMPLATES}
@@ -138,7 +155,33 @@ async def test_seed_integrity_covers_triathlon_hyrox_and_obstacle_race(
             .group_by(GoalTemplate.code)
         )
         counts = {code: count for code, count in rows}
-        assert counts == {"HYROX": 2, "OBSTACLE_RACE": 4}
+        assert counts == {"HYROX": 8, "OBSTACLE_RACE": 4}
+        hyrox_contexts = {
+            context.code
+            for context in await session.scalars(
+                select(TrainingContext)
+                .join(
+                    GoalTemplateContext,
+                    GoalTemplateContext.training_context_id == TrainingContext.id,
+                )
+                .join(
+                    GoalTemplate,
+                    GoalTemplate.id == GoalTemplateContext.goal_template_id,
+                )
+                .where(GoalTemplate.code == "HYROX")
+            )
+        }
+        assert "functional_fitness" not in hyrox_contexts
+        assert {
+            "running_road",
+            "hyrox_ski_erg",
+            "hyrox_sled_push_pull",
+            "hyrox_burpee_broad_jump",
+            "hyrox_row",
+            "hyrox_farmer_carry",
+            "hyrox_sandbag_lunge",
+            "hyrox_wall_balls",
+        } == hyrox_contexts
 
 
 @pytest.mark.asyncio
@@ -251,11 +294,45 @@ async def test_new_goal_reuses_existing_context_and_is_immediately_reusable(
         }
     )
     async with catalog_database.begin() as session:
+        definitions = ContextCapabilityOutput.model_validate(
+            {
+                "capabilities": [
+                    {
+                        "decision": "USE_EXISTING",
+                        "code": "running_shoes",
+                        "display_name": None,
+                        "description": None,
+                        "kind": "EQUIPMENT",
+                    }
+                ],
+                "contexts": [
+                    {
+                        "target_context_code": "running_road",
+                        "options": [
+                            {
+                                "code": "stair_running",
+                                "display_name": "Stair-event running",
+                                "execution_context_code": "running_road",
+                                "role": "PREFERRED",
+                                "priority": 10,
+                                "limitations": [],
+                                "requirements": [
+                                    {
+                                        "capability_code": "running_shoes",
+                                        "importance": "REQUIRED",
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
         first = await TrainingCatalogPublicationService().publish(
             session=session,
             templates=(draft,),
             context_mapping=mapping,
-            capability_definition=None,
+            capability_definition=definitions,
         )
         second = await TrainingCatalogPublicationService().publish(
             session=session,
@@ -466,4 +543,186 @@ def test_primary_goal_requires_a_target_context() -> None:
             templates=(draft,),
             context_mapping=mapping,
             active_contexts={"strength_general": Discipline.STRENGTH},
+        )
+
+
+def _marathon_draft() -> GoalTemplateDraft:
+    return GoalTemplateDraft(
+        code="MARATHON",
+        kind=GoalTemplateKind.PRIMARY,
+        display_name="Marathon",
+        description="Road or general marathon event.",
+    )
+
+
+def _running_road_proposal() -> dict[str, object]:
+    return {
+        "decision": "USE_EXISTING",
+        "code": "running_road",
+        "display_name": None,
+        "description": None,
+        "discipline": "RUNNING",
+        "role": "TARGET",
+        "priority": 10,
+    }
+
+
+def _rowing_definitions(
+    *, target_code: str = "rowing_general", include_running: bool = False
+) -> ContextCapabilityOutput:
+    capabilities: list[dict[str, object]] = [
+        {
+            "decision": "CREATE",
+            "code": "rowing_machine",
+            "display_name": "Rowing machine",
+            "description": "An indoor rowing machine.",
+            "kind": "EQUIPMENT",
+        }
+    ]
+    contexts: list[dict[str, object]] = [
+        {
+            "target_context_code": target_code,
+            "options": [
+                {
+                    "code": "indoor_rowing",
+                    "display_name": "Indoor rowing",
+                    "execution_context_code": target_code,
+                    "role": "PREFERRED",
+                    "priority": 10,
+                    "limitations": [],
+                    "requirements": [
+                        {
+                            "capability_code": "rowing_machine",
+                            "importance": "REQUIRED",
+                        }
+                    ],
+                }
+            ],
+        }
+    ]
+    if include_running:
+        capabilities.append(
+            {
+                "decision": "USE_EXISTING",
+                "code": "running_shoes",
+                "display_name": None,
+                "description": None,
+                "kind": "EQUIPMENT",
+            }
+        )
+        contexts.append(
+            {
+                "target_context_code": "running_road",
+                "options": [
+                    {
+                        "code": "outdoor_road",
+                        "display_name": "Outdoor road running",
+                        "execution_context_code": "running_road",
+                        "role": "PREFERRED",
+                        "priority": 10,
+                        "limitations": [],
+                        "requirements": [
+                            {
+                                "capability_code": "running_shoes",
+                                "importance": "REQUIRED",
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+    return ContextCapabilityOutput.model_validate(
+        {
+            "capabilities": capabilities,
+            "contexts": contexts,
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_publish_attaches_new_context_to_existing_template_idempotently(
+    catalog_database: async_sessionmaker[AsyncSession],
+) -> None:
+    draft = _marathon_draft()
+    mapping = GoalContextMappingOutput.model_validate(
+        {
+            "templates": [
+                {
+                    "template_code": draft.code,
+                    "contexts": [
+                        _running_road_proposal(),
+                        {
+                            "decision": "CREATE",
+                            "code": "rowing_general",
+                            "display_name": "General rowing",
+                            "description": "General rowing practice.",
+                            "discipline": "OTHER",
+                            "role": "TARGET",
+                            "priority": 20,
+                        },
+                    ],
+                }
+            ]
+        }
+    )
+    definitions = _rowing_definitions(include_running=True)
+
+    async with catalog_database.begin() as session:
+        first = await TrainingCatalogPublicationService().publish(
+            session=session,
+            templates=(draft,),
+            context_mapping=mapping,
+            capability_definition=definitions,
+        )
+        second = await TrainingCatalogPublicationService().publish(
+            session=session,
+            templates=(draft,),
+            context_mapping=mapping,
+            capability_definition=definitions,
+        )
+        assert first.template_ids[draft.code] == second.template_ids[draft.code]
+        marathon = await session.scalar(
+            select(GoalTemplate).where(GoalTemplate.code == draft.code)
+        )
+        rowing = await session.scalar(
+            select(TrainingContext).where(TrainingContext.code == "rowing_general")
+        )
+        assert marathon is not None
+        assert rowing is not None
+        assert (
+            await session.scalar(
+                select(func.count(GoalTemplate.id)).where(
+                    GoalTemplate.code == draft.code
+                )
+            )
+            == 1
+        )
+        assert (
+            await session.scalar(
+                select(func.count(TrainingContext.id)).where(
+                    TrainingContext.code == "rowing_general"
+                )
+            )
+            == 1
+        )
+        link_count = await session.scalar(
+            select(func.count(GoalTemplateContext.training_context_id)).where(
+                GoalTemplateContext.goal_template_id == marathon.id,
+                GoalTemplateContext.training_context_id == rowing.id,
+            )
+        )
+        assert link_count == 1
+        option = await session.scalar(
+            select(ContextExecutionOption).where(
+                ContextExecutionOption.target_context_id == rowing.id
+            )
+        )
+        assert option is not None
+        assert (
+            await session.scalar(
+                select(func.count(ExecutionOptionCapability.execution_option_id)).where(
+                    ExecutionOptionCapability.execution_option_id == option.id
+                )
+            )
+            == 1
         )

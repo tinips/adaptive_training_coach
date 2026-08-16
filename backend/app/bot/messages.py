@@ -143,10 +143,10 @@ PROFILE_HEIGHT_INTAKE = (
 )
 AVAILABILITY_INTAKE = (
     "Tell me about your weekly training availability in your own words.\n\n"
-    "Include the days you can train, roughly how much time you have, and any places "
-    "or facilities you can use if relevant. \nFor example: "
-    "'I can ride for up to two hours on the weekend. "
-    "I can swim at a pool on Wednesday and Friday, and I can cycle only on weekends."
+    "Include the days you can train and roughly how much time you have during the week."
+    "\n\nFor example: "
+    "\n'I can ride for up to two hours on the weekend. "
+    "I can swim at a pool on Wednesday and Friday, and I can cycle only on weekends.'"
 )
 HEALTH_LIMITATIONS_INTAKE = (
     "Write any current or past injuries, discomfort, or physical limitations that "
@@ -244,6 +244,11 @@ GOAL_OFF_TOPIC = (
     "We can come back to equipment later. Right now, I\u2019m building your athlete "
     "profile.\n\n"
     "What are you currently training for, and what would success look like to you?"
+)
+GOAL_CATALOG_EXPANSION_PROGRESS = (
+    "Processing your goal...\n\n"
+    "I\u2019m preparing the training contexts and equipment/access requirements. "
+    "This may take a moment."
 )
 
 
