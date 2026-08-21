@@ -64,6 +64,8 @@ class Settings(BaseSettings):
     tcx_import_enabled: bool = True
     tcx_import_max_size_mb: int = Field(default=25, ge=1, le=100)
 
+    fitness_window_days: int = Field(default=14, ge=1, le=90)
+
     @field_validator("telegram_bot_username", mode="before")
     @classmethod
     def normalize_telegram_bot_username(cls, value: str | None) -> str | None:
@@ -123,6 +125,7 @@ class Settings(BaseSettings):
             "llm_model": self.llm_model,
             "apple_health_import_enabled": self.apple_health_import_enabled,
             "tcx_import_enabled": self.tcx_import_enabled,
+            "fitness_window_days": self.fitness_window_days,
         }
 
 

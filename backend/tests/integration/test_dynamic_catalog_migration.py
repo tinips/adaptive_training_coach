@@ -24,6 +24,22 @@ def _migration() -> ModuleType:
     return module
 
 
+def _catalog_standardization_migration() -> ModuleType:
+    path = (
+        Path(__file__).parents[2]
+        / "alembic"
+        / "versions"
+        / "0027_standardize_catalog_execution_options.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "catalog_option_standardization_migration", path
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_backfill_classifies_goals_merges_duplicates_and_preserves_ambiguity() -> None:
     migration = _migration()
     engine = sa.create_engine("sqlite:///:memory:")
@@ -122,3 +138,83 @@ def test_migration_is_irreversible_and_drops_both_legacy_tables() -> None:
         assert "restore the required pre-migration backup" in str(exc)
     else:
         raise AssertionError("downgrade must abort explicitly")
+
+
+def test_catalog_option_standardization_is_repeatable_and_scope_safe() -> None:
+    migration = _catalog_standardization_migration()
+    engine = sa.create_engine("sqlite:///:memory:")
+    metadata = sa.MetaData()
+    goals = sa.Table(
+        "goal_templates",
+        metadata,
+        sa.Column("id", sa.Uuid(), primary_key=True),
+        sa.Column("code", sa.String(), nullable=False),
+    )
+    contexts = sa.Table(
+        "training_contexts",
+        metadata,
+        sa.Column("id", sa.Uuid(), primary_key=True),
+        sa.Column("code", sa.String(), nullable=False),
+    )
+    links = sa.Table(
+        "goal_template_contexts",
+        metadata,
+        sa.Column("goal_template_id", sa.Uuid(), nullable=False),
+        sa.Column("training_context_id", sa.Uuid(), nullable=False),
+        sa.Column("role", sa.String(), nullable=False),
+    )
+    metadata.create_all(engine)
+    hyrox_goal = uuid.uuid4()
+    rowing_goal = uuid.uuid4()
+    hyrox_row = uuid.uuid4()
+    rowing_regatta = uuid.uuid4()
+    with engine.begin() as connection:
+        connection.execute(
+            goals.insert(),
+            [
+                {"id": hyrox_goal, "code": "HYROX"},
+                {"id": rowing_goal, "code": "ROWING_REGATTA"},
+            ],
+        )
+        connection.execute(
+            contexts.insert(),
+            [
+                {"id": hyrox_row, "code": "hyrox_row"},
+                {"id": rowing_regatta, "code": "rowing_regatta"},
+            ],
+        )
+        connection.execute(
+            links.insert(),
+            [
+                {
+                    "goal_template_id": hyrox_goal,
+                    "training_context_id": hyrox_row,
+                    "role": "TARGET",
+                },
+                {
+                    "goal_template_id": rowing_goal,
+                    "training_context_id": hyrox_row,
+                    "role": "SUPPORTING",
+                },
+                {
+                    "goal_template_id": rowing_goal,
+                    "training_context_id": rowing_regatta,
+                    "role": "TARGET",
+                },
+            ],
+        )
+        migration.op = type(
+            "MigrationOperations", (), {"get_bind": lambda _self: connection}
+        )()
+        migration.upgrade()
+        migration.upgrade()
+        rows = connection.execute(
+            sa.select(goals.c.code, contexts.c.code, links.c.role)
+            .join(links, links.c.goal_template_id == goals.c.id)
+            .join(contexts, links.c.training_context_id == contexts.c.id)
+        ).all()
+
+    assert set(rows) == {
+        ("HYROX", "hyrox_row", "TARGET"),
+        ("ROWING_REGATTA", "rowing_regatta", "TARGET"),
+    }

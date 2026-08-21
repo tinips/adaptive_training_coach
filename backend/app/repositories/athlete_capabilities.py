@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Collection
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import AthleteCapability, Capability, User
@@ -81,6 +81,15 @@ class AthleteCapabilityRepository:
                 )
             else:
                 row.status = status
+        await self._session.flush()
+
+    async def clear_for_athlete(self, *, athlete_id: uuid.UUID) -> None:
+        """Remove every equipment/access answer for one athlete."""
+
+        await self._require_athlete(athlete_id)
+        await self._session.execute(
+            delete(AthleteCapability).where(AthleteCapability.athlete_id == athlete_id)
+        )
         await self._session.flush()
 
     async def _require_athlete(self, athlete_id: uuid.UUID) -> None:

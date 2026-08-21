@@ -46,6 +46,7 @@ from app.schemas.catalog_expansion import (
     CapabilitySummary,
     CatalogExpansionWorkflowResult,
     ContextCapabilityOutput,
+    ExecutionOptionSummary,
     GoalContextMappingOutput,
     GoalContextProposal,
     GoalTemplateDraft,
@@ -174,8 +175,16 @@ class QueueCatalogExpansionWorkflow:
         new_contexts: tuple[GoalContextProposal, ...],
         active_contexts: tuple[TrainingContextSummary, ...],
         active_capabilities: tuple[CapabilitySummary, ...],
+        active_execution_options: tuple[ExecutionOptionSummary, ...],
     ) -> CatalogExpansionWorkflowResult:
-        del user_id, goals, new_contexts, active_contexts, active_capabilities
+        del (
+            user_id,
+            goals,
+            new_contexts,
+            active_contexts,
+            active_capabilities,
+            active_execution_options,
+        )
         self.capability_calls += 1
         return self.capabilities.pop(0)
 
@@ -741,6 +750,7 @@ async def test_dynamic_expansion_failure_is_atomic_and_retry_publishes_everythin
                 "target_context_code": "rowing_indoor",
                 "options": [
                     {
+                        "decision": "CREATE",
                         "code": "rowing_machine_execution",
                         "display_name": "Indoor rowing machine",
                         "execution_context_code": "rowing_indoor",
@@ -1373,6 +1383,11 @@ def _rowing_capability_result(
                         "target_context_code": target_code,
                         "options": [
                             {
+                                "decision": (
+                                    "USE_EXISTING"
+                                    if target_code == "running_road"
+                                    else "CREATE"
+                                ),
                                 "code": (
                                     "outdoor_road"
                                     if target_code == "running_road"

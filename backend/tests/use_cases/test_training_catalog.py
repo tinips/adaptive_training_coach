@@ -81,7 +81,7 @@ def test_catalog_expansion_prompts_explicitly_request_json_mode() -> None:
     assert "JSON object" in NEW_GOAL_CONTEXT_EXPANSION
     assert "JSON object" in GOAL_CONTEXT_CAPABILITY_EXPANSION
     assert CONTEXT_EXPANSION_CONTRACT_VERSION == "2"
-    assert CAPABILITY_EXPANSION_CONTRACT_VERSION == "2"
+    assert CAPABILITY_EXPANSION_CONTRACT_VERSION == "3"
     assert "complete training-context structure" in NEW_GOAL_CONTEXT_EXPANSION
     assert "Do not omit essential training contexts" in NEW_GOAL_CONTEXT_EXPANSION
     assert "Do not invent database IDs or relationships" in NEW_GOAL_CONTEXT_EXPANSION
@@ -310,6 +310,7 @@ async def test_new_goal_reuses_existing_context_and_is_immediately_reusable(
                         "target_context_code": "running_road",
                         "options": [
                             {
+                                "decision": "CREATE",
                                 "code": "stair_running",
                                 "display_name": "Stair-event running",
                                 "execution_context_code": "running_road",
@@ -396,6 +397,7 @@ async def test_new_context_and_capability_are_published_in_dependency_order(
                     "target_context_code": "rowing_general",
                     "options": [
                         {
+                            "decision": "CREATE",
                             "code": "indoor_rowing",
                             "display_name": "Indoor rowing",
                             "execution_context_code": "rowing_general",
@@ -483,6 +485,7 @@ def test_catalog_validation_rejects_unknown_capability_references() -> None:
                     "target_context_code": "rowing_indoor",
                     "options": [
                         {
+                            "decision": "CREATE",
                             "code": "rowing_machine_execution",
                             "display_name": "Indoor rowing machine",
                             "execution_context_code": "rowing_indoor",
@@ -567,8 +570,153 @@ def _running_road_proposal() -> dict[str, object]:
     }
 
 
+def _running_option_definition(
+    *,
+    decision: str = "USE_EXISTING",
+    execution_context_code: str = "running_road",
+    requirement_code: str = "running_shoes",
+) -> ContextCapabilityOutput:
+    return ContextCapabilityOutput.model_validate(
+        {
+            "capabilities": [
+                {
+                    "decision": "USE_EXISTING",
+                    "code": requirement_code,
+                    "display_name": None,
+                    "description": None,
+                    "kind": "EQUIPMENT",
+                }
+            ],
+            "contexts": [
+                {
+                    "target_context_code": "running_road",
+                    "options": [
+                        {
+                            "decision": decision,
+                            "code": "outdoor_road",
+                            "display_name": (
+                                None
+                                if decision == "USE_EXISTING"
+                                else "Outdoor road running"
+                            ),
+                            "execution_context_code": execution_context_code,
+                            "role": "PREFERRED",
+                            "priority": 10,
+                            "limitations": [],
+                            "requirements": [
+                                {
+                                    "capability_code": requirement_code,
+                                    "importance": "REQUIRED",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+
+def _running_mapping(template_code: str) -> GoalContextMappingOutput:
+    return GoalContextMappingOutput.model_validate(
+        {
+            "templates": [
+                {
+                    "template_code": template_code,
+                    "contexts": [_running_road_proposal()],
+                }
+            ]
+        }
+    )
+
+
+def _running_draft(code: str) -> GoalTemplateDraft:
+    return GoalTemplateDraft(
+        code=code,
+        kind=GoalTemplateKind.PRIMARY,
+        display_name="Road race",
+        description="General preparation for a road race.",
+    )
+
+
+@pytest.mark.asyncio
+async def test_existing_execution_option_is_reused_without_new_links(
+    catalog_database: async_sessionmaker[AsyncSession],
+) -> None:
+    draft = _running_draft("ROAD_RACE_OPTION_REUSE")
+    async with catalog_database.begin() as session:
+        await TrainingCatalogPublicationService().publish(
+            session=session,
+            templates=(draft,),
+            context_mapping=_running_mapping(draft.code),
+            capability_definition=_running_option_definition(),
+        )
+        count = await session.scalar(
+            select(func.count(ContextExecutionOption.id)).where(
+                ContextExecutionOption.code == "outdoor_road"
+            )
+        )
+        assert count == 1
+
+
+@pytest.mark.asyncio
+async def test_existing_execution_option_reuse_requires_exact_definition(
+    catalog_database: async_sessionmaker[AsyncSession],
+) -> None:
+    draft = _running_draft("ROAD_RACE_OPTION_MISMATCH")
+    async with catalog_database.begin() as session:
+        with pytest.raises(
+            CatalogExpansionError, match="execution_option_definition_mismatch"
+        ):
+            await TrainingCatalogPublicationService().publish(
+                session=session,
+                templates=(draft,),
+                context_mapping=_running_mapping(draft.code),
+                capability_definition=_running_option_definition(
+                    execution_context_code="running_treadmill"
+                ),
+            )
+
+
+@pytest.mark.asyncio
+async def test_create_cannot_collide_with_existing_execution_option(
+    catalog_database: async_sessionmaker[AsyncSession],
+) -> None:
+    draft = _running_draft("ROAD_RACE_OPTION_COLLISION")
+    async with catalog_database.begin() as session:
+        with pytest.raises(
+            CatalogExpansionError, match="execution_option_code_collision"
+        ):
+            await TrainingCatalogPublicationService().publish(
+                session=session,
+                templates=(draft,),
+                context_mapping=_running_mapping(draft.code),
+                capability_definition=_running_option_definition(decision="CREATE"),
+            )
+
+
+@pytest.mark.asyncio
+async def test_execution_context_code_cannot_be_a_capability(
+    catalog_database: async_sessionmaker[AsyncSession],
+) -> None:
+    draft = _running_draft("ROAD_RACE_OPTION_CAPABILITY_CONTEXT")
+    async with catalog_database.begin() as session:
+        with pytest.raises(CatalogExpansionError, match="unknown_execution_context"):
+            await TrainingCatalogPublicationService().publish(
+                session=session,
+                templates=(draft,),
+                context_mapping=_running_mapping(draft.code),
+                capability_definition=_running_option_definition(
+                    execution_context_code="running_shoes"
+                ),
+            )
+
+
 def _rowing_definitions(
-    *, target_code: str = "rowing_general", include_running: bool = False
+    *,
+    target_code: str = "rowing_general",
+    include_running: bool = False,
+    rowing_option_decision: str = "CREATE",
 ) -> ContextCapabilityOutput:
     capabilities: list[dict[str, object]] = [
         {
@@ -584,6 +732,7 @@ def _rowing_definitions(
             "target_context_code": target_code,
             "options": [
                 {
+                    "decision": rowing_option_decision,
                     "code": "indoor_rowing",
                     "display_name": "Indoor rowing",
                     "execution_context_code": target_code,
@@ -615,6 +764,7 @@ def _rowing_definitions(
                 "target_context_code": "running_road",
                 "options": [
                     {
+                        "decision": "USE_EXISTING",
                         "code": "outdoor_road",
                         "display_name": "Outdoor road running",
                         "execution_context_code": "running_road",
@@ -678,7 +828,10 @@ async def test_publish_attaches_new_context_to_existing_template_idempotently(
             session=session,
             templates=(draft,),
             context_mapping=mapping,
-            capability_definition=definitions,
+            capability_definition=_rowing_definitions(
+                include_running=True,
+                rowing_option_decision="USE_EXISTING",
+            ),
         )
         assert first.template_ids[draft.code] == second.template_ids[draft.code]
         marathon = await session.scalar(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Collection
+from dataclasses import dataclass
 from typing import cast
 
 from sqlalchemy import select
@@ -22,6 +23,14 @@ from app.domain.enums import (
     CatalogItemStatus,
     GoalTemplateKind,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionOptionCatalogEntry:
+    option: ContextExecutionOption
+    target_context: TrainingContext
+    execution_context: TrainingContext
+    requirements: tuple[tuple[ExecutionOptionCapability, Capability], ...]
 
 
 class TrainingCatalogRepository:
@@ -114,9 +123,10 @@ class TrainingCatalogRepository:
                 execution.status == CatalogItemStatus.ACTIVE,
             )
             .order_by(
-                ContextExecutionOption.target_context_id,
+                target.code,
                 ContextExecutionOption.role,
                 ContextExecutionOption.priority,
+                ContextExecutionOption.code,
             )
         )
         return tuple(rows.tuples())
@@ -136,3 +146,31 @@ class TrainingCatalogRepository:
             .order_by(Capability.display_name)
         )
         return tuple(rows.tuples())
+
+    async def execution_option_catalog(
+        self, *, context_ids: Collection[uuid.UUID]
+    ) -> tuple[ExecutionOptionCatalogEntry, ...]:
+        """Load active execution options together with their requirements."""
+
+        options = await self.execution_options(context_ids=context_ids)
+        if not options:
+            return ()
+        requirements = await self.option_requirements(
+            option_ids={option.id for option, _, _ in options}
+        )
+        requirements_by_option: dict[
+            uuid.UUID, list[tuple[ExecutionOptionCapability, Capability]]
+        ] = {}
+        for requirement, capability in requirements:
+            requirements_by_option.setdefault(
+                requirement.execution_option_id, []
+            ).append((requirement, capability))
+        return tuple(
+            ExecutionOptionCatalogEntry(
+                option=option,
+                target_context=target,
+                execution_context=execution,
+                requirements=tuple(requirements_by_option.get(option.id, ())),
+            )
+            for option, target, execution in options
+        )

@@ -426,6 +426,7 @@ def _fake_context_capabilities(request_json: str) -> dict[str, object]:
                 "target_context_code": code,
                 "options": [
                     {
+                        "decision": "CREATE",
                         "code": "standard_access",
                         "display_name": "Standard access",
                         "execution_context_code": code,

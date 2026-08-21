@@ -200,6 +200,7 @@ class SemanticDatasetModel(DeterministicFakeOnboardingModel):
                 "target_context_code": context.code,
                 "options": [
                     {
+                        "decision": "CREATE",
                         "code": f"semantic_{context.code}",
                         "display_name": (
                             f"{context.code.replace('_', ' ').title()} execution"
@@ -364,6 +365,12 @@ async def test_semantic_goal_dataset_through_real_catalog_flow(
         assert {item["code"] for item in request_contexts} == {
             item.code for item in case.contexts
         }
+        active_options = model.requests["capabilities"][0]["active_execution_options"]
+        assert isinstance(active_options, list)
+        assert all(
+            {"target_context_code", "code", "execution_context_code"} <= set(option)
+            for option in active_options
+        )
 
     equipment = await onboarding.handle_text(athlete, "Weekday mornings.")
     assert equipment.capability_review is not None

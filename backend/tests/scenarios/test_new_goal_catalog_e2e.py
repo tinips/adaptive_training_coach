@@ -247,6 +247,7 @@ class SemanticHYROXModel(DeterministicFakeOnboardingModel):
                     "target_context_code": "running_road",
                     "options": [
                         {
+                            "decision": "CREATE",
                             "code": "hyrox_running",
                             "display_name": "HYROX running",
                             "execution_context_code": "running_road",
@@ -268,8 +269,9 @@ class SemanticHYROXModel(DeterministicFakeOnboardingModel):
                     "target_context_code": code,
                     "options": [
                         {
+                            "decision": "USE_EXISTING",
                             "code": f"{code}_execution",
-                            "display_name": display_name,
+                            "display_name": None,
                             "execution_context_code": code,
                             "role": "PREFERRED",
                             "priority": 10,

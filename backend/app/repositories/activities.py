@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.base import utc_now
 from app.db.models import Workout
 from app.domain.enums import ActivitySource
 from app.integrations.apple_health.models import ParsedWorkout
@@ -257,7 +258,7 @@ class TrainingActivityRepository:
                 "Exact source identity points to a legacy cross-source workout"
             )
 
-        changed = _assign_workout_values(
+        workout_changed, fitness_input_changed = _assign_workout_values(
             workout,
             discipline=incoming.discipline,
             started_at=as_utc(incoming.started_at),
@@ -265,7 +266,8 @@ class TrainingActivityRepository:
             title=incoming.title,
             notes=incoming.notes,
         )
-        changed = apply_exact_detail(workout, details) or changed
+        detail_changed = apply_exact_detail(workout, details)
+        changed = workout_changed or detail_changed
         _link, link_changed = await self._source_links.ensure(
             user_id=user_id,
             workout=workout,
@@ -274,16 +276,16 @@ class TrainingActivityRepository:
             import_job_id=import_job_id,
         )
         changed = changed or link_changed
-        changed = (
-            await self._heart_rate.synchronize(
-                user_id=user_id,
-                workout_id=workout.id,
-                source=incoming.source,
-                observations=incoming.heart_rate_observations,
-                import_job_id=import_job_id,
-            )
-            or changed
+        heart_rate_changed = await self._heart_rate.synchronize(
+            user_id=user_id,
+            workout_id=workout.id,
+            source=incoming.source,
+            observations=incoming.heart_rate_observations,
+            import_job_id=import_job_id,
         )
+        changed = heart_rate_changed or changed
+        if fitness_input_changed or detail_changed:
+            workout.fitness_input_updated_at = utc_now()
         await self._source_links.attach_import_job(
             user_id=user_id,
             import_job_id=import_job_id,
@@ -302,8 +304,9 @@ def _assign_workout_values(
     duration_seconds: int,
     title: str | None,
     notes: str | None,
-) -> bool:
+) -> tuple[bool, bool]:
     changed = False
+    fitness_input_changed = False
     for name, value in {
         "discipline": discipline,
         "started_at": started_at,
@@ -311,10 +314,20 @@ def _assign_workout_values(
         "title": title,
         "notes": notes,
     }.items():
-        if getattr(workout, name) != value:
+        current = getattr(workout, name)
+        same_value = (
+            as_utc(current) == as_utc(value)
+            if name == "started_at"
+            and isinstance(current, datetime)
+            and isinstance(value, datetime)
+            else current == value
+        )
+        if not same_value:
             setattr(workout, name, value)
             changed = True
-    return changed
+            if name in {"discipline", "started_at", "duration_seconds"}:
+                fitness_input_changed = True
+    return changed, fitness_input_changed
 
 
 __all__ = [

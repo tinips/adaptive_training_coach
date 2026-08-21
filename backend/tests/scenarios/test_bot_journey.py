@@ -264,7 +264,7 @@ async def test_journey_collects_profile_goal_and_required_context_before_complet
     assert "select every resource" in equipment.text.casefold()
     assert messages.HEALTH_LIMITATIONS_INTAKE in limitations.text
     assert history.text == messages.TRAINING_HISTORY_IMPORT
-    assert completed.text == messages.ONBOARDING_COMPLETED
+    assert completed.text == messages.TRAINING_HISTORY_SKIP_SUGGESTION
     assert "Birth year: 1990" in displayed_profile.text
     assert "Category: Female" in displayed_profile.text
     assert "Running shoes" in displayed_profile.text

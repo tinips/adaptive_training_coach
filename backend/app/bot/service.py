@@ -116,17 +116,12 @@ class CoachBotApplicationService:
                 keyboards.LABELS["profile"]: "/profile",
                 keyboards.LABELS["delete"]: "/delete_me",
             }.get(content, content)
-        if event_type == "text" and content.startswith("/dev_step "):
-            return await self._render_onboarding(
-                identity,
-                await self._onboarding.seed_development_step(
-                    identity, content.removeprefix("/dev_step ").strip()
-                ),
+        if event_type == "text":
+            development_response = await self._handle_development_command(
+                identity, content
             )
-        if event_type == "text" and content == "/dev_reset":
-            return await self._render_onboarding(
-                identity, await self._onboarding.reset_development_onboarding(identity)
-            )
+            if development_response is not None:
+                return development_response
         deterministic_routes = {
             "/start",
             "/help",
@@ -192,6 +187,16 @@ class CoachBotApplicationService:
             "/cancel": self.cancel,
             "/delete_me": self.delete_me,
         }
+        development_response = await self._handle_development_command(identity, content)
+        if development_response is not None:
+            return development_response
+        if content in routes:
+            return await routes[content](identity)
+        return await self.handle_text(identity, content)
+
+    async def _handle_development_command(
+        self, identity: TelegramIdentity, content: str
+    ) -> TelegramResponse | None:
         if content.startswith("/dev_step "):
             return await self._render_onboarding(
                 identity,
@@ -199,13 +204,21 @@ class CoachBotApplicationService:
                     identity, content.removeprefix("/dev_step ").strip()
                 ),
             )
+        if content == "/dev_import_history":
+            return await self._render_onboarding(
+                identity,
+                await self._onboarding.seed_development_step(identity, "history"),
+            )
         if content == "/dev_reset":
             return await self._render_onboarding(
                 identity, await self._onboarding.reset_development_onboarding(identity)
             )
-        if content in routes:
-            return await routes[content](identity)
-        return await self.handle_text(identity, content)
+        if content == "/dev_reset_goal_equipment":
+            return await self._render_onboarding(
+                identity,
+                await self._onboarding.reset_development_goal_and_equipment(identity),
+            )
+        return None
 
     async def _help(self, _: TelegramIdentity) -> TelegramResponse:
         return TelegramResponse(messages.HELP, keyboards.information_keyboard())
@@ -650,7 +663,11 @@ class CoachBotApplicationService:
             )
         if result.kind == "onboarding_completed":
             return TelegramResponse(
-                messages.ONBOARDING_COMPLETED,
+                (
+                    messages.TRAINING_HISTORY_SKIP_SUGGESTION
+                    if result.training_history_skipped
+                    else messages.ONBOARDING_COMPLETED
+                ),
                 user_keyboard=keyboards.completed_onboarding_keyboard(),
             )
         if result.kind in mapping:

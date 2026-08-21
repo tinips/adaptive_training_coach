@@ -12,6 +12,7 @@ from datetime import date, datetime
 from enum import StrEnum
 
 from sqlalchemy import (
+    CHAR,
     JSON,
     BigInteger,
     CheckConstraint,
@@ -47,6 +48,7 @@ from app.domain.enums import (
     CyclingType,
     Discipline,
     ExecutionOptionRole,
+    FitnessBaselineSource,
     GoalContextRole,
     GoalTemplateKind,
     HeartRateTemporalQuality,
@@ -166,6 +168,12 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         uselist=False,
     )
     workouts: Mapped[list[Workout]] = relationship(
+        back_populates="athlete",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="raise",
+    )
+    baseline_assessments: Mapped[list[AthleteBaselineAssessment]] = relationship(
         back_populates="athlete",
         cascade="all, delete-orphan",
         passive_deletes=True,
@@ -580,6 +588,12 @@ class Workout(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             name="uq_workouts_athlete_source_external_id",
         ),
         Index("ix_workouts_athlete_started_at", "athlete_id", "started_at"),
+        Index(
+            "ix_workouts_athlete_discipline_started_at",
+            "athlete_id",
+            "discipline",
+            "started_at",
+        ),
         CheckConstraint("duration_seconds > 0", name="duration_positive"),
     )
 
@@ -594,6 +608,11 @@ class Workout(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
+        nullable=False,
+    )
+    fitness_input_updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
         nullable=False,
     )
     duration_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -700,6 +719,185 @@ class Workout(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     @name.setter
     def name(self, value: str | None) -> None:
         self.title = value
+
+
+class _BaselineEvidenceColumns:
+    """Persisted evidence fields for an immutable baseline assessment."""
+
+    source: Mapped[FitnessBaselineSource] = mapped_column(
+        persisted_enum(
+            FitnessBaselineSource,
+            name="fitness_baseline_source",
+            length=32,
+        ),
+        nullable=False,
+    )
+    analysis_started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    analysis_ended_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    calculated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    session_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    active_day_count: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    total_duration_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    known_distance_meters: Mapped[float | None] = mapped_column(Float, nullable=True)
+    distance_session_count: Mapped[int] = mapped_column(
+        SmallInteger,
+        nullable=False,
+    )
+    longest_duration_seconds: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    longest_distance_meters: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    total_calories_kcal: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reliable_hr_sample_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    reliable_average_hr_bpm: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    reliable_max_hr_bpm: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    discipline_metrics_jsonb: Mapped[dict[str, object]] = mapped_column(
+        json_document(),
+        default=dict,
+        nullable=False,
+    )
+    evidence_summary_jsonb: Mapped[dict[str, object]] = mapped_column(
+        json_document(),
+        default=dict,
+        nullable=False,
+    )
+    quality_flags_jsonb: Mapped[list[str]] = mapped_column(
+        json_document(),
+        default=list,
+        nullable=False,
+    )
+    source_workout_through_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    input_updated_through_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    input_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    calculation_version: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+def _baseline_evidence_constraints() -> tuple[CheckConstraint, ...]:
+    """Return fresh constraints for the baseline evidence record."""
+
+    return (
+        CheckConstraint(
+            "analysis_ended_at >= analysis_started_at",
+            name="analysis_window_order",
+        ),
+        CheckConstraint("session_count >= 0", name="session_count_nonnegative"),
+        CheckConstraint(
+            "active_day_count >= 0 AND active_day_count <= session_count",
+            name="active_day_count_range",
+        ),
+        CheckConstraint(
+            "total_duration_seconds >= 0",
+            name="total_duration_nonnegative",
+        ),
+        CheckConstraint(
+            "known_distance_meters IS NULL OR known_distance_meters >= 0",
+            name="known_distance_nonnegative",
+        ),
+        CheckConstraint(
+            "distance_session_count >= 0 AND distance_session_count <= session_count",
+            name="distance_session_count_range",
+        ),
+        CheckConstraint(
+            "longest_duration_seconds IS NULL OR longest_duration_seconds >= 0",
+            name="longest_duration_nonnegative",
+        ),
+        CheckConstraint(
+            "longest_distance_meters IS NULL OR longest_distance_meters >= 0",
+            name="longest_distance_nonnegative",
+        ),
+        CheckConstraint(
+            "total_calories_kcal IS NULL OR total_calories_kcal >= 0",
+            name="total_calories_nonnegative",
+        ),
+        CheckConstraint(
+            "reliable_hr_sample_count >= 0",
+            name="reliable_hr_sample_count_nonnegative",
+        ),
+        CheckConstraint(
+            "reliable_average_hr_bpm IS NULL OR reliable_average_hr_bpm > 0",
+            name="reliable_average_hr_positive",
+        ),
+        CheckConstraint(
+            "reliable_max_hr_bpm IS NULL OR reliable_max_hr_bpm > 0",
+            name="reliable_max_hr_positive",
+        ),
+        CheckConstraint(
+            "confidence >= 0 AND confidence <= 1",
+            name="confidence_range",
+        ),
+        CheckConstraint(
+            "calculation_version > 0",
+            name="calculation_version_positive",
+        ),
+    )
+
+
+class AthleteBaselineAssessment(
+    UUIDPrimaryKeyMixin,
+    _BaselineEvidenceColumns,
+    Base,
+):
+    """Immutable first eligible workout-window assessment per discipline."""
+
+    __tablename__ = "athlete_baseline_assessments"
+    __table_args__ = (
+        *_baseline_evidence_constraints(),
+        UniqueConstraint(
+            "athlete_id",
+            "discipline",
+            name="uq_athlete_baseline_assessments_athlete_discipline",
+        ),
+    )
+
+    athlete_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    discipline: Mapped[Discipline] = mapped_column(
+        persisted_enum(
+            Discipline,
+            name="athlete_fitness_discipline",
+            length=16,
+        ),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        nullable=False,
+    )
+
+    athlete: Mapped[User] = relationship(
+        back_populates="baseline_assessments",
+        lazy="raise",
+    )
 
 
 class RunningWorkoutDetails(Base):

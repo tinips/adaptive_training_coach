@@ -50,6 +50,28 @@ class CapabilitySummary(BaseModel):
     kind: CapabilityKind
 
 
+class CapabilityRequirementSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    capability_code: str = Field(pattern=r"^[a-z][a-z0-9_]{2,63}$")
+    importance: CapabilityImportance
+
+
+class ExecutionOptionSummary(BaseModel):
+    """Canonical execution option supplied to catalog expansion."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    target_context_code: str = Field(pattern=r"^[a-z][a-z0-9_]{2,63}$")
+    code: str = Field(pattern=r"^[a-z][a-z0-9_]{2,63}$")
+    display_name: str = Field(min_length=1, max_length=120)
+    execution_context_code: str = Field(pattern=r"^[a-z][a-z0-9_]{2,63}$")
+    role: ExecutionOptionRole
+    priority: int = Field(ge=0, le=1000)
+    limitations: tuple[str, ...] = ()
+    requirements: tuple[CapabilityRequirementSummary, ...] = ()
+
+
 class GoalContextProposal(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -111,8 +133,9 @@ class CapabilityRequirementProposal(BaseModel):
 class ExecutionOptionProposal(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    decision: CatalogDecision
     code: str = Field(pattern=r"^[a-z][a-z0-9_]{2,63}$")
-    display_name: str = Field(min_length=1, max_length=120)
+    display_name: str | None = Field(default=None, max_length=120)
     execution_context_code: str = Field(pattern=r"^[a-z][a-z0-9_]{2,63}$")
     role: ExecutionOptionRole
     priority: int = Field(ge=0, le=1000)
@@ -121,6 +144,12 @@ class ExecutionOptionProposal(BaseModel):
         min_length=1,
         max_length=8,
     )
+
+    @model_validator(mode="after")
+    def require_created_definition(self) -> ExecutionOptionProposal:
+        if self.decision == "CREATE" and not self.display_name:
+            raise ValueError("created execution options require a display name")
+        return self
 
 
 class ContextExecutionDefinition(BaseModel):
@@ -167,6 +196,7 @@ class CatalogExpansionWorkflow(Protocol):
         new_contexts: tuple[GoalContextProposal, ...],
         active_contexts: tuple[TrainingContextSummary, ...],
         active_capabilities: tuple[CapabilitySummary, ...],
+        active_execution_options: tuple[ExecutionOptionSummary, ...],
     ) -> CatalogExpansionWorkflowResult:
         """Define the complete capability set for the goal-context pairs.
 
@@ -174,5 +204,6 @@ class CatalogExpansionWorkflow(Protocol):
         callers supply every context required by the newly created goal,
         including contexts reused from the canonical catalog. The model must
         reason about the goal and each context together, reusing canonical
-        capabilities wherever they represent the requirement.
+        capabilities and execution options wherever they represent the
+        requirement. New contexts are outside this phase.
         """

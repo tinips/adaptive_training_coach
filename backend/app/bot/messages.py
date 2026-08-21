@@ -219,6 +219,10 @@ def equipment_summary(summary: GoalExecutionAssessment) -> str:
 ONBOARDING_COMPLETED = (
     "Your onboarding is complete. You can change your profile settings at any time."
 )
+TRAINING_HISTORY_SKIP_SUGGESTION = (
+    "That's fine — we'll start conservatively. You can import an Apple Health export "
+    "or TCX workout later to give your coaching a more personalized starting point."
+)
 PROFILE_SETTINGS_MENU = "Choose a profile setting to change."
 PROFILE_SETTINGS_CLOSED = "Done. Your profile settings are closed."
 PROFILE_SETTINGS_UNPROMPTED = "Use Change profile to choose what you want to update."

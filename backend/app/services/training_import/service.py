@@ -46,6 +46,7 @@ from app.repositories.users import UserRepository
 from app.schemas.common import TelegramIdentity
 from app.schemas.training_import import TelegramDocumentUpload
 from app.schemas.workouts import workout_metrics
+from app.services.fitness import BaselineAssessmentService
 from app.services.onboarding import OnboardingApplicationError
 
 logger = logging.getLogger(__name__)
@@ -101,6 +102,7 @@ class TrainingFileImportService:
         self._session_factory = session_factory
         self._settings = settings
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._baseline_assessments = BaselineAssessmentService(settings=settings)
         self._apple_parser = AppleHealthParser(
             AppleHealthArchiveLimits(
                 max_compressed_bytes=(
@@ -376,6 +378,7 @@ class TrainingFileImportService:
             imported = 0
             updated = 0
             unchanged = 0
+            fitness_input_changed = False
             latest: Workout | None = None
             for workout in workouts:
                 activity, outcome = await activities.import_apple_workout(
@@ -392,6 +395,14 @@ class TrainingFileImportService:
                     updated += 1
                 else:
                     unchanged += 1
+                fitness_input_changed = (
+                    fitness_input_changed
+                    or _fitness_input_changed_in_import(
+                        activity=activity,
+                        outcome=outcome,
+                        job=job,
+                    )
+                )
             completed = await jobs.mark_succeeded(
                 user_id=user_id,
                 job_id=job.id,
@@ -408,6 +419,15 @@ class TrainingFileImportService:
                 session=session,
                 job=completed,
             )
+            if fitness_input_changed:
+                baselines = self._baseline_assessments
+                await (
+                    baselines.create_missing_baselines_for_goal_disciplines_in_session(
+                        session,
+                        athlete_id=user_id,
+                        calculated_at=self._clock(),
+                    )
+                )
             return await self._outcome_in_session(session, completed)
 
     async def _process_tcx(
@@ -460,6 +480,19 @@ class TrainingFileImportService:
                 session=session,
                 job=completed,
             )
+            if _fitness_input_changed_in_import(
+                activity=activity,
+                outcome=outcome,
+                job=job,
+            ):
+                baselines = self._baseline_assessments
+                await (
+                    baselines.create_missing_baselines_for_goal_disciplines_in_session(
+                        session,
+                        athlete_id=user_id,
+                        calculated_at=self._clock(),
+                    )
+                )
             return await self._outcome_in_session(session, completed)
 
     async def _mark_processing(
@@ -757,6 +790,17 @@ class TrainingFileImportError(ValueError):
     def __init__(self, code: str) -> None:
         self.code = code
         super().__init__(code)
+
+
+def _fitness_input_changed_in_import(
+    *,
+    activity: Workout,
+    outcome: str,
+    job: AppleHealthImportJob,
+) -> bool:
+    """Ignore source-link-only reimports when deciding to create a baseline."""
+
+    return outcome == "inserted" or activity.fitness_input_updated_at >= job.created_at
 
 
 def _inspect_file(

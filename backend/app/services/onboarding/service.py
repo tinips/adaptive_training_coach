@@ -45,10 +45,12 @@ from app.repositories.training_catalog import TrainingCatalogRepository
 from app.repositories.users import UserRepository
 from app.schemas.capabilities import CapabilityReview, GoalExecutionAssessment
 from app.schemas.catalog_expansion import (
+    CapabilityRequirementSummary,
     CapabilitySummary,
     CatalogExpansionWorkflow,
     CatalogExpansionWorkflowResult,
     ContextCapabilityOutput,
+    ExecutionOptionSummary,
     GoalContextMappingOutput,
     GoalContextProposal,
     GoalTemplateDraft,
@@ -306,6 +308,38 @@ class OnboardingService:
             await session.flush()
             return self._result(user, onboarding)
 
+    async def reset_development_goal_and_equipment(
+        self, identity: TelegramIdentity
+    ) -> OnboardingServiceResult:
+        """Reset just one development athlete's goal and capability answers."""
+
+        await self.start(identity)
+        async with self._session_factory.begin() as session:
+            user, onboarding = await self._locked_state(session, identity)
+            active_job = await AppleHealthRepository(session).get_active_job(
+                user_id=user.id
+            )
+            if active_job is not None:
+                raise OnboardingApplicationError("import_already_active")
+            await ProfileRepository(session).delete_training_goal(user_id=user.id)
+            await AthleteCapabilityRepository(session).clear_for_athlete(
+                athlete_id=user.id
+            )
+            await ProfileSettingsRepository(session).save(
+                user_id=user.id,
+                step=ProfileSettingsStep.MENU,
+                pending={},
+            )
+            onboarding.status = OnboardingStatus.ACTIVE
+            onboarding.current_step = OnboardingStep.GOAL_INTAKE
+            onboarding.answers = {"consent": True}
+            user = await UserRepository(session).update_status(
+                user_id=user.id,
+                status=UserStatus.ONBOARDING_IN_PROGRESS,
+            )
+            await session.flush()
+            return self._result(user, onboarding)
+
     async def confirm_consent(
         self,
         identity: TelegramIdentity,
@@ -441,6 +475,35 @@ class OnboardingService:
             capability_outcome=payload.capability_result,
         )
 
+    @staticmethod
+    async def _execution_option_summaries(
+        catalog: TrainingCatalogRepository,
+        context_ids: tuple[uuid.UUID, ...],
+    ) -> tuple[ExecutionOptionSummary, ...]:
+        entries = await catalog.execution_option_catalog(context_ids=context_ids)
+        return tuple(
+            ExecutionOptionSummary(
+                target_context_code=entry.target_context.code,
+                code=entry.option.code,
+                display_name=entry.option.display_name,
+                execution_context_code=entry.execution_context.code,
+                role=entry.option.role,
+                priority=entry.option.priority,
+                limitations=tuple(entry.option.limitations),
+                requirements=tuple(
+                    CapabilityRequirementSummary(
+                        capability_code=capability.code,
+                        importance=requirement.importance,
+                    )
+                    for requirement, capability in sorted(
+                        entry.requirements,
+                        key=lambda item: item[1].code,
+                    )
+                ),
+            )
+            for entry in entries
+        )
+
     async def _run_catalog_expansion(
         self,
         *,
@@ -482,6 +545,7 @@ class OnboardingService:
                 )
                 for item in await catalog.active_goal_templates()
             )
+            active_context_rows = await catalog.active_contexts()
             active_contexts = tuple(
                 TrainingContextSummary(
                     code=item.code,
@@ -489,7 +553,7 @@ class OnboardingService:
                     description=item.description,
                     discipline=item.discipline,
                 )
-                for item in await catalog.active_contexts()
+                for item in active_context_rows
             )
             answers = self._answers(onboarding)
             answers[_CATALOG_EXPANSION_IN_FLIGHT_KEY] = cast(
@@ -542,6 +606,7 @@ class OnboardingService:
         mapping: GoalContextMappingOutput | None = None
         required_contexts: tuple[GoalContextProposal, ...] = ()
         active_capabilities: tuple[CapabilitySummary, ...] = ()
+        active_execution_options: tuple[ExecutionOptionSummary, ...] = ()
         capability_usage_id: uuid.UUID | None = None
         async with self._session_factory.begin() as session:
             onboarding = await OnboardingRepository(session).lock_for_user(
@@ -614,6 +679,7 @@ class OnboardingService:
             current_contexts = {
                 item.code: item for item in await catalog.active_contexts()
             }
+            active_context_rows = tuple(current_contexts.values())
             active_contexts = tuple(
                 TrainingContextSummary(
                     code=item.code,
@@ -621,7 +687,11 @@ class OnboardingService:
                     description=item.description,
                     discipline=item.discipline,
                 )
-                for item in current_contexts.values()
+                for item in active_context_rows
+            )
+            active_execution_options = await self._execution_option_summaries(
+                catalog,
+                tuple(item.id for item in active_context_rows),
             )
             adjusted_templates = []
             for mapped_template in mapping.templates:
@@ -690,11 +760,13 @@ class OnboardingService:
                 new_contexts=required_contexts,
                 active_contexts=active_contexts,
                 active_capabilities=active_capabilities,
+                active_execution_options=active_execution_options,
             )
         )
         logger.info(
             "catalog_capability_expansion_finished user_id=%s run_id=%s "
-            "outcome=%s error_code=%s defined_contexts=%s capabilities=%s",
+            "outcome=%s error_code=%s defined_contexts=%s capabilities=%s "
+            "options=%s",
             user_id,
             run_id,
             capability_result.outcome,
@@ -718,6 +790,18 @@ class OnboardingService:
                         if capability_result.capability_definition is not None
                         else ()
                     )
+                )
+            )
+            or "none",
+            ",".join(
+                sorted(
+                    f"{context.target_context_code}:{option.code}:{option.decision}"
+                    for context in (
+                        capability_result.capability_definition.contexts
+                        if capability_result.capability_definition is not None
+                        else ()
+                    )
+                    for option in context.options
                 )
             )
             or "none",
@@ -1192,7 +1276,7 @@ class OnboardingService:
                 status=UserStatus.ONBOARDING_COMPLETED,
             )
             await session.flush()
-            return self._result(user, onboarding)
+            return self._result(user, onboarding, training_history_skipped=True)
 
     async def profile_settings_snapshot(
         self, identity: TelegramIdentity
@@ -1849,6 +1933,10 @@ class OnboardingService:
                 )
                 for item in active_context_rows
             )
+            active_execution_options = await self._execution_option_summaries(
+                catalog,
+                tuple(item.id for item in active_context_rows),
+            )
 
         map_result = await self._catalog_expansion_workflow.map_goal_contexts(
             user_id=user.id,
@@ -1937,6 +2025,7 @@ class OnboardingService:
                     new_contexts=new_contexts,
                     active_contexts=active_contexts,
                     active_capabilities=active_capabilities,
+                    active_execution_options=active_execution_options,
                 )
             )
             if (
@@ -3692,6 +3781,7 @@ class OnboardingService:
         confirmation: str | None = None,
         updated_fields: tuple[str, ...] = (),
         created: bool = False,
+        training_history_skipped: bool = False,
         capability_review: CapabilityReview | None = None,
         execution_assessment: GoalExecutionAssessment | None = None,
     ) -> OnboardingServiceResult:
@@ -3744,6 +3834,7 @@ class OnboardingService:
             confirmation=confirmation,
             updated_fields=updated_fields,
             created=created,
+            training_history_skipped=training_history_skipped,
             capability_review=capability_review,
             execution_assessment=execution_assessment,
         )

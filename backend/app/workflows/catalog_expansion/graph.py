@@ -30,6 +30,7 @@ from app.observability.protocol import (
 from app.schemas.catalog_expansion import (
     CapabilitySummary,
     CatalogExpansionWorkflowResult,
+    ExecutionOptionSummary,
     GoalContextProposal,
     GoalTemplateDraft,
     TrainingContextSummary,
@@ -111,6 +112,7 @@ class LangGraphCatalogExpansionWorkflow:
         new_contexts: tuple[GoalContextProposal, ...],
         active_contexts: tuple[TrainingContextSummary, ...],
         active_capabilities: tuple[CapabilitySummary, ...],
+        active_execution_options: tuple[ExecutionOptionSummary, ...],
     ) -> CatalogExpansionWorkflowResult:
         # The compatibility parameter name is ``new_contexts``; the payload
         # deliberately contains every context required by the new goal so the
@@ -125,6 +127,9 @@ class LangGraphCatalogExpansionWorkflow:
             ],
             "active_capabilities": [
                 item.model_dump(mode="json") for item in active_capabilities
+            ],
+            "active_execution_options": [
+                item.model_dump(mode="json") for item in active_execution_options
             ],
         }
         return await self._invoke(

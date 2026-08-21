@@ -9,13 +9,15 @@ from uuid import UUID
 import pytest
 import pytest_asyncio
 from catalog_seed import seed_training_catalog
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.config import Settings
 from app.db.base import Base
-from app.db.models import AppleHealthImportJob
+from app.db.models import AppleHealthImportJob, AthleteCapability, Capability
 from app.domain.enums import (
     AppleHealthImportStatus,
+    AthleteCapabilityStatus,
     AthleteGender,
     OnboardingStatus,
     OnboardingStep,
@@ -189,8 +191,10 @@ async def test_development_steps_seed_only_the_requesting_users_onboarding_state
     assert history.onboarding_status is OnboardingStatus.ACTIVE
     assert skipped.onboarding_status is OnboardingStatus.COMPLETED
     assert skipped.user_status is UserStatus.ONBOARDING_COMPLETED
+    assert skipped.training_history_skipped is True
     assert completed.onboarding_status is OnboardingStatus.COMPLETED
     assert completed.user_status is UserStatus.ONBOARDING_COMPLETED
+    assert completed.training_history_skipped is False
 
     async with profile_database() as session:
         users = UserRepository(session)
@@ -222,6 +226,46 @@ async def test_development_steps_seed_only_the_requesting_users_onboarding_state
     assert reset.current_step is OnboardingStep.CONSENT
     assert reset.onboarding_status is OnboardingStatus.ACTIVE
     assert reset.user_status is UserStatus.ONBOARDING_IN_PROGRESS
+
+
+@pytest.mark.asyncio
+async def test_development_goal_equipment_reset_preserves_profile_and_history(
+    profile_database: async_sessionmaker[AsyncSession],
+) -> None:
+    identity = _identity()
+    service = OnboardingService(
+        session_factory=profile_database,
+        goal_extractor=NeverGoalExtractor(),
+        settings=Settings(environment="development", llm_mode="mock"),
+    )
+    seeded = await service.seed_development_step(identity, "history")
+    async with profile_database.begin() as session:
+        capability_id = await session.scalar(select(Capability.id).limit(1))
+        assert capability_id is not None
+        session.add(
+            AthleteCapability(
+                athlete_id=seeded.user_id,
+                capability_id=capability_id,
+                status=AthleteCapabilityStatus.AVAILABLE,
+            )
+        )
+
+    reset = await service.reset_development_goal_and_equipment(identity)
+
+    assert reset.current_step is OnboardingStep.GOAL_INTAKE
+    assert reset.onboarding_status is OnboardingStatus.ACTIVE
+    assert reset.user_status is UserStatus.ONBOARDING_IN_PROGRESS
+    async with profile_database() as session:
+        profiles = ProfileRepository(session)
+        assert await profiles.get_training_goal(user_id=seeded.user_id) is None
+        profile = await profiles.get_athlete_profile(user_id=seeded.user_id)
+        assert profile is not None
+        remaining_capabilities = await session.scalar(
+            select(AthleteCapability).where(
+                AthleteCapability.athlete_id == seeded.user_id
+            )
+        )
+        assert remaining_capabilities is None
 
 
 @pytest.mark.asyncio

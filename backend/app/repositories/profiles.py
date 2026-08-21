@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.base import utc_now
@@ -61,6 +61,14 @@ class ProfileRepository:
             statement = statement.where(TrainingGoal.id == goal_id)
         return (await self._session.execute(statement)).scalar_one_or_none()
 
+    async def delete_training_goal(self, *, user_id: uuid.UUID) -> None:
+        """Delete only the requesting athlete's current goal."""
+
+        await self._session.execute(
+            delete(TrainingGoal).where(TrainingGoal.user_id == user_id)
+        )
+        await self._session.flush()
+
     async def upsert_conversational_training_goal(
         self,
         *,
@@ -73,7 +81,10 @@ class ProfileRepository:
         goal_template_id: uuid.UUID | None = None,
         supporting_goal_template_id: uuid.UUID | None = None,
     ) -> TrainingGoal:
-        await self._require_user(user_id)
+        # Goal template changes determine baseline eligibility. Serialize them
+        # with import-time baseline creation, which locks this same owner row
+        # before reading the live goal.
+        await self.lock_owner(user_id=user_id)
         goal = await self.get_training_goal(user_id=user_id)
         if goal is None:
             goal = TrainingGoal(user_id=user_id)
@@ -138,6 +149,8 @@ class ProfileRepository:
             }
         ):
             raise ValueError("unsupported training goal update field")
+        if {"goal_template_id", "supporting_goal_template_id"} & set(payload):
+            await self.lock_owner(user_id=user_id)
         goal = await self._session.scalar(
             update(TrainingGoal)
             .where(TrainingGoal.user_id == user_id)

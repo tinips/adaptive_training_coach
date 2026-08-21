@@ -178,6 +178,13 @@ class TrainingCatalogPublicationService:
             if code not in context_rows:
                 raise CatalogExpansionError("unknown_execution_context")
 
+        if capability_definition is not None:
+            await self._validate_persisted_execution_options(
+                session=session,
+                context_rows=context_rows,
+                output=capability_definition,
+            )
+
         # Persist catalog parents before inserting rows that reference their UUIDs.
         # The execution option table has two FKs to training_contexts, so relying on
         # SQLAlchemy's mapper ordering alone is not sufficient on PostgreSQL when
@@ -385,7 +392,8 @@ class TrainingCatalogPublicationService:
             ):
                 raise CatalogExpansionError("preferred_execution_required")
             for option in definition.options:
-                cls._validate_general_text(option.display_name)
+                if option.display_name is not None:
+                    cls._validate_general_text(option.display_name)
                 if len(set(option.limitations)) != len(option.limitations):
                     raise CatalogExpansionError("duplicate_limitation")
                 for limitation in option.limitations:
@@ -418,6 +426,87 @@ class TrainingCatalogPublicationService:
                     capability_proposal.display_name,
                     capability_proposal.description,
                 )
+
+    @staticmethod
+    async def _validate_persisted_execution_options(
+        *,
+        session: AsyncSession,
+        context_rows: dict[str, TrainingContext],
+        output: ContextCapabilityOutput,
+    ) -> None:
+        """Validate reuse/create decisions against the canonical database rows."""
+
+        option_proposals = [
+            option for definition in output.contexts for option in definition.options
+        ]
+        execution_codes = {option.execution_context_code for option in option_proposals}
+        capability_codes = {item.code for item in output.capabilities}
+        persisted_capability_codes = set(
+            await session.scalars(
+                select(Capability.code).where(Capability.code.in_(execution_codes))
+            )
+        )
+        if execution_codes & (capability_codes | persisted_capability_codes):
+            raise CatalogExpansionError("unknown_execution_context")
+
+        target_ids = {
+            context_rows[definition.target_context_code].id
+            for definition in output.contexts
+        }
+        existing_options = {
+            (option.target_context_id, option.code): option
+            for option in await session.scalars(
+                select(ContextExecutionOption).where(
+                    ContextExecutionOption.target_context_id.in_(target_ids)
+                )
+            )
+        }
+        existing_option_ids = {option.id for option in existing_options.values()}
+        existing_requirements: dict[uuid.UUID, set[tuple[str, str]]] = {}
+        if existing_option_ids:
+            rows = await session.execute(
+                select(ExecutionOptionCapability, Capability)
+                .join(
+                    Capability,
+                    Capability.id == ExecutionOptionCapability.capability_id,
+                )
+                .where(
+                    ExecutionOptionCapability.execution_option_id.in_(
+                        existing_option_ids
+                    )
+                )
+            )
+            for requirement, capability in rows.tuples():
+                existing_requirements.setdefault(
+                    requirement.execution_option_id, set()
+                ).add((capability.code, requirement.importance.value))
+
+        for definition in output.contexts:
+            target = context_rows[definition.target_context_code]
+            for proposal in definition.options:
+                execution_context = context_rows.get(proposal.execution_context_code)
+                if execution_context is None:
+                    raise CatalogExpansionError("unknown_execution_context")
+                existing = existing_options.get((target.id, proposal.code))
+                if proposal.decision == "CREATE":
+                    if existing is not None:
+                        raise CatalogExpansionError("execution_option_code_collision")
+                    continue
+                if existing is None:
+                    raise CatalogExpansionError("invalid_option_reuse")
+                expected_requirements = {
+                    (item.capability_code, item.importance.value)
+                    for item in proposal.requirements
+                }
+                actual_requirements = existing_requirements.get(existing.id, set())
+                if (
+                    existing.execution_context_id != execution_context.id
+                    or existing.role is not proposal.role
+                    or existing.priority != proposal.priority
+                    or tuple(existing.limitations) != tuple(proposal.limitations)
+                    or actual_requirements != expected_requirements
+                ):
+                    raise CatalogExpansionError("execution_option_definition_mismatch")
 
     @staticmethod
     async def _publish_context_definitions(
@@ -477,26 +566,35 @@ class TrainingCatalogPublicationService:
         pending_requirements: list[
             tuple[ContextExecutionOption, tuple[CapabilityRequirementProposal, ...]]
         ] = []
+        reused_options: list[str] = []
+        created_options: list[str] = []
         for context_code in definition_context_codes:
             definition = definitions[context_code]
             target = context_rows[context_code]
             for option_proposal in definition.options:
                 key = (target.id, option_proposal.code)
                 option = existing_options.get(key)
-                if option is None:
-                    option = ContextExecutionOption(
-                        id=uuid.uuid4(),
-                        target_context_id=target.id,
-                        execution_context_id=context_rows[
-                            option_proposal.execution_context_code
-                        ].id,
-                        code=option_proposal.code,
-                        display_name=option_proposal.display_name,
-                        role=option_proposal.role,
-                        priority=option_proposal.priority,
-                        limitations=option_proposal.limitations,
-                    )
-                    session.add(option)
+                if option is not None:
+                    if option_proposal.decision != "USE_EXISTING":
+                        raise CatalogExpansionError("execution_option_code_collision")
+                    reused_options.append(f"{context_code}:{option_proposal.code}")
+                    continue
+                if option_proposal.decision != "CREATE":
+                    raise CatalogExpansionError("invalid_option_reuse")
+                option = ContextExecutionOption(
+                    id=uuid.uuid4(),
+                    target_context_id=target.id,
+                    execution_context_id=context_rows[
+                        option_proposal.execution_context_code
+                    ].id,
+                    code=option_proposal.code,
+                    display_name=option_proposal.display_name,
+                    role=option_proposal.role,
+                    priority=option_proposal.priority,
+                    limitations=option_proposal.limitations,
+                )
+                session.add(option)
+                created_options.append(f"{context_code}:{option_proposal.code}")
                 pending_requirements.append(
                     (option, tuple(option_proposal.requirements))
                 )
@@ -528,6 +626,12 @@ class TrainingCatalogPublicationService:
                     )
                 )
                 existing_links.add(pair)
+
+        logger.info(
+            "catalog_execution_options_published reused=%s created=%s",
+            ",".join(sorted(reused_options)) or "none",
+            ",".join(sorted(created_options)) or "none",
+        )
 
     @staticmethod
     async def _lock_catalog(session: AsyncSession) -> None:

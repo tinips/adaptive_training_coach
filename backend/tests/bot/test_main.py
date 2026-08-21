@@ -11,6 +11,7 @@ from telegram.ext import CommandHandler, MessageHandler, filters
 
 from app.bot.handlers import (
     BOT_SERVICE_KEY,
+    DEV_USER_IDS_KEY,
     add_workout_handler,
     document_handler,
 )
@@ -76,7 +77,13 @@ def test_create_application_registers_development_commands_only_in_development()
         if isinstance(handler, CommandHandler)
         for command in handler.commands
     }
-    assert {"dev_step", "dev_reset"} <= command_names
+    assert {
+        "dev_step",
+        "dev_reset",
+        "dev_import_history",
+        "dev_reset_goal_equipment",
+    } <= command_names
+    assert application.bot_data[DEV_USER_IDS_KEY] == frozenset({206072865})
 
 
 @pytest.mark.asyncio

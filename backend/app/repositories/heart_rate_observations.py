@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
+from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.base import utc_now
 from app.db.models import Workout, WorkoutHeartRateObservation
 from app.domain.enums import ActivitySource
 from app.repositories.errors import OwnedRecordNotFoundError
@@ -85,10 +87,12 @@ class HeartRateObservationRepository:
                 )
 
         changed = False
+        fitness_input_changed = False
         for key, persisted in current_by_key.items():
             if key not in incoming:
                 await self._session.delete(persisted)
                 changed = True
+                fitness_input_changed = True
 
         for key, item in incoming.items():
             values = {
@@ -111,12 +115,33 @@ class HeartRateObservationRepository:
                     )
                 )
                 changed = True
+                fitness_input_changed = True
                 continue
             for name, value in values.items():
-                if getattr(existing, name) != value:
+                current_value = getattr(existing, name)
+                same_value = (
+                    as_utc(current_value) == as_utc(value)
+                    if name in {"started_at", "ended_at"}
+                    and isinstance(current_value, datetime)
+                    and isinstance(value, datetime)
+                    else current_value == value
+                )
+                if not same_value:
                     setattr(existing, name, value)
                     changed = True
+                    if name in {
+                        "started_at",
+                        "ended_at",
+                        "beats_per_minute",
+                        "temporal_quality",
+                    }:
+                        fitness_input_changed = True
 
+        if fitness_input_changed:
+            # HR facts are calculator input, while their own rows have no
+            # fitness watermark. Keep the parent workout's input version in
+            # sync for an immutable baseline created in this same transaction.
+            workout.fitness_input_updated_at = utc_now()
         await self._session.flush()
         return changed
 

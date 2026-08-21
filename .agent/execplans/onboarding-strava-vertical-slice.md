@@ -1876,6 +1876,17 @@ personalisation.
   configured development account: `/dev_step equipment` rendered the material
   review and `/dev_reset` rendered the consent prompt.
 
+### Follow-up: faster import and goal/equipment checks
+
+- [x] Add `/dev_import_history` as an explicit shortcut to the final optional
+  training-history import screen.
+- [x] Add `/dev_reset_goal_equipment` to remove only the requesting development
+  athlete's goal and equipment/access selections, reset their durable settings
+  UI state, and return them to goal intake. It preserves the athlete profile,
+  workouts, import jobs, and immutable baselines.
+- [x] Enforce the existing `DEV_TELEGRAM_USER_IDS` allowlist for every
+  development shortcut.
+
 ## 2026-08-07 availability examples
 
 - [x] Extend the free-text availability prompt with one neutral example that
@@ -2459,3 +2470,76 @@ Validation evidence: prompt contract length remains below the regression limit;
 targeted prompt/onboarding tests pass. Docker must be rebuilt before retrying
 the live callback; successful live publication remains unclaimed until the
 retry shows matching scopes and `catalog_publication_finished`.
+
+## Follow-up: deterministic execution-option catalog compiler (2026-08-20)
+
+- [x] Supply active execution options and their exact capability requirements to
+  goal-context capability expansion.
+- [x] Require explicit `USE_EXISTING`/`CREATE` decisions and validate reuse
+  against the persisted target, execution context, role, priority, limitations,
+  and requirement set.
+- [x] Keep context creation in the mapping phase; capability expansion can only
+  create capabilities and execution options.
+- [x] Add safe publication logs that list option codes grouped by reuse/create
+  decision, without model payloads or personal text.
+- [x] Add idempotent migration `0027_catalog_option_standard` to remove only
+  `ROWING_REGATTA -> hyrox_row`, preserving the HYROX station context and the
+  `rowing_ergometer` capability.
+- [x] Exercise reuse, collision, definition-mismatch, invalid execution-context,
+  atomicity, and semantic dataset regressions.
+
+Validation evidence: live DeepSeek execution in a disposable PostgreSQL database
+completed a new HYROX semantic goal through context mapping, capability expansion,
+deterministic publication, and capability assessment. The resulting assessment
+read `hyrox_row` and `rowing_ergometer` from the persisted graph. The real Docker
+database is at `0027_catalog_option_standard`; its HYROX graph retains eight
+contexts and no `ROWING_REGATTA -> hyrox_row` relation. Complete validation passes
+`257 passed, 3 skipped`, Ruff, Ruff format, mypy, and `git diff --check`; the API
+is healthy and the bot is running with the rebuilt image.
+
+## Fitness-state design investigation (2026-08-20)
+
+This investigation established the reduced baseline design implemented in the
+follow-up below. The original baseline and Strava implementation had been
+removed from the active application schema and code during the development
+cleanup; the older Alembic history still contains their historical tables but is
+not an active application contract.
+
+- The current durable evidence sources are Apple Health ZIP and TCX imports.
+  They preserve UTC start time, elapsed duration, distance when supplied,
+  calories, per-discipline type/environment, average/max heart rate, and
+  quality-labelled HR observations. TCX additionally preserves cadence,
+  elevation, and route points in source provenance.
+- Neither active importer supplies `moving_duration_seconds`, power, laps, or
+  splits. Derived canonical pace/speed is therefore normally unavailable; any
+  elapsed-duration pace calculated by a future engine must be explicitly
+  labelled lower-quality evidence rather than sustainable performance.
+- The reduced fitness milestone introduces only immutable historical
+  `athlete_baseline_assessments`. A future current projection and immutable
+  snapshots remain deferred. Baselines use the existing broad `Discipline`
+  enum rather than a foreign key to the dynamic planning catalog, whose
+  contexts can be arbitrary goal-specific concepts.
+- Versioned deterministic calculation inputs, evidence summaries, source-workout
+  watermark, confidence, and calculation version are required so the future
+  planner can consume the current projection while results remain reproducible.
+
+## Follow-up: immutable goal-scoped import baseline (2026-08-20)
+
+- [x] Keep only `athlete_baseline_assessments`, keyed by the existing
+  `Discipline` enum; defer current fitness, snapshots, and a scheduler.
+- [x] Build one immutable 14-day evidence baseline from the most recent owned
+  workout in each primary/supporting-goal discipline, preserving provenance,
+  quality flags, confidence, and a deterministic input digest.
+- [x] Run that calculation only inside successful non-duplicate Apple Health
+  and TCX import transactions; never recalculate an existing baseline.
+- [x] Preserve the owned workout evidence timestamp/index and conservatively
+  exclude likely Apple/TCX cross-source duplicate pairs from aggregates.
+- [x] On an explicit history Skip, complete onboarding and explain that a later
+  Apple Health or TCX import can personalize the starting point.
+
+Validation: `pytest` passes `266 passed, 3 skipped`; Ruff, Ruff format, mypy,
+and `git diff --check` pass. The isolated SQLite 0028 migration round-trip
+(upgrade, downgrade, re-upgrade) also passes, including cleanup of the locally
+superseded current/snapshot tables. Docker Desktop is unavailable in this
+environment, so the requested PostgreSQL `alembic upgrade head` and `alembic
+check` could not connect.

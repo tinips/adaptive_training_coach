@@ -114,6 +114,23 @@ def service(
     )
 
 
+class BaselineAssessmentRecorder:
+    def __init__(self) -> None:
+        self.calls: list[tuple[uuid.UUID, datetime]] = []
+
+    async def create_missing_baselines_for_goal_disciplines_in_session(
+        self,
+        session: AsyncSession,
+        *,
+        athlete_id: uuid.UUID,
+        calculated_at: datetime | None = None,
+    ) -> tuple[object, ...]:
+        del session
+        assert calculated_at is not None
+        self.calls.append((athlete_id, calculated_at))
+        return ()
+
+
 def write_tcx(
     path: Path,
     *,
@@ -466,6 +483,60 @@ async def test_exact_apple_reimport_keeps_workout_and_observation_counts_stable(
         )
         assert workout_count == 1
         assert observation_count == 1
+
+
+@pytest.mark.asyncio
+async def test_successful_imports_assess_missing_baselines_but_duplicates_do_not(
+    persistence: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
+    tmp_path: Path,
+) -> None:
+    _, factory = persistence
+    owner = identity(9114)
+    user_id = await stage_user(factory, owner=owner)
+    import_service = service(factory, temp_dir=tmp_path / "temporary")
+    recorder = BaselineAssessmentRecorder()
+    import_service._baseline_assessments = recorder
+
+    tcx = write_tcx(tmp_path / "baseline.tcx", activity_id="2026-07-28T11:00:00Z")
+    first_tcx, _ = await upload(
+        import_service,
+        owner=owner,
+        source=tcx,
+        update_id=114,
+    )
+    duplicate_tcx, _ = await upload(
+        import_service,
+        owner=owner,
+        source=tcx,
+        update_id=115,
+    )
+    unchanged_source = tmp_path / "same-workout.tcx"
+    unchanged_source.write_text(
+        tcx.read_text(encoding="utf-8") + "\n", encoding="utf-8"
+    )
+    unchanged_tcx, _ = await upload(
+        import_service,
+        owner=owner,
+        source=unchanged_source,
+        update_id=116,
+    )
+    apple, _ = await upload(
+        import_service,
+        owner=owner,
+        source=write_apple_zip(tmp_path / "baseline-history.zip"),
+        update_id=117,
+    )
+
+    assert first_tcx.exact_file_duplicate is False
+    assert duplicate_tcx.exact_file_duplicate is True
+    assert unchanged_tcx.exact_file_duplicate is False
+    assert unchanged_tcx.activities_imported == 0
+    # A new file hash updates provenance, but it must not be treated as new
+    # workout evidence or create/recalculate a baseline.
+    assert unchanged_tcx.activities_updated == 1
+    assert unchanged_tcx.activities_skipped == 0
+    assert apple.exact_file_duplicate is False
+    assert recorder.calls == [(user_id, NOW), (user_id, NOW)]
 
 
 @pytest.mark.asyncio

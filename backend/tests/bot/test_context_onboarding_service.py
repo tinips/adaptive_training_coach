@@ -46,6 +46,7 @@ def _result(
     step: OnboardingStep,
     *,
     answers: dict[str, str] | None = None,
+    training_history_skipped: bool = False,
     capability_review: CapabilityReview | None = None,
 ) -> OnboardingServiceResult:
     return OnboardingServiceResult(
@@ -55,6 +56,7 @@ def _result(
         onboarding_status=OnboardingStatus.ACTIVE,
         current_step=step,
         answers=answers or {},
+        training_history_skipped=training_history_skipped,
         capability_review=capability_review,
     )
 
@@ -175,6 +177,30 @@ async def test_health_callback_uses_only_deterministic_onboarding_method() -> No
 
 
 @pytest.mark.asyncio
+async def test_history_skip_renders_suggestion_and_completed_controls() -> None:
+    identity = _identity()
+    onboarding = SimpleNamespace(
+        skip_training_history=AsyncMock(
+            return_value=_result(
+                "onboarding_completed",
+                OnboardingStep.TRAINING_HISTORY_IMPORT,
+                training_history_skipped=True,
+            )
+        )
+    )
+
+    response = await _facade(onboarding).handle_callback(
+        identity,
+        "ob:v1:history:skip",
+    )
+
+    onboarding.skip_training_history.assert_awaited_once_with(identity)
+    assert response.text == messages.TRAINING_HISTORY_SKIP_SUGGESTION
+    assert response.user_keyboard == keyboards.completed_onboarding_keyboard()
+    assert response.edit_existing is True
+
+
+@pytest.mark.asyncio
 async def test_profile_settings_callbacks_strip_the_transport_prefix() -> None:
     identity = _identity()
     onboarding = SimpleNamespace(
@@ -239,6 +265,48 @@ async def test_development_step_bypasses_global_agent_for_completed_accounts() -
     onboarding.seed_development_step.assert_awaited_once_with(identity, "availability")
     workspace.invoke.assert_not_awaited()
     assert response.text == messages.AVAILABILITY_INTAKE
+
+
+@pytest.mark.asyncio
+async def test_development_import_history_shortcut_bypasses_global_agent() -> None:
+    identity = _identity()
+    onboarding = SimpleNamespace(
+        seed_development_step=AsyncMock(
+            return_value=_result(
+                "training_history_import", OnboardingStep.TRAINING_HISTORY_IMPORT
+            )
+        )
+    )
+    workspace = SimpleNamespace(invoke=AsyncMock())
+
+    response = await _facade(onboarding, agent_workspace=workspace).handle_agent_input(
+        identity, HumanMessage(content="/dev_import_history")
+    )
+
+    onboarding.seed_development_step.assert_awaited_once_with(identity, "history")
+    workspace.invoke.assert_not_awaited()
+    assert response.text == messages.TRAINING_HISTORY_IMPORT
+    assert response.keyboard == keyboards.training_history_import_keyboard()
+
+
+@pytest.mark.asyncio
+async def test_development_goal_equipment_reset_bypasses_global_agent() -> None:
+    identity = _identity()
+    onboarding = SimpleNamespace(
+        reset_development_goal_and_equipment=AsyncMock(
+            return_value=_result("goal_intake", OnboardingStep.GOAL_INTAKE)
+        )
+    )
+    workspace = SimpleNamespace(invoke=AsyncMock())
+
+    response = await _facade(onboarding, agent_workspace=workspace).handle_agent_input(
+        identity, HumanMessage(content="/dev_reset_goal_equipment")
+    )
+
+    onboarding.reset_development_goal_and_equipment.assert_awaited_once_with(identity)
+    workspace.invoke.assert_not_awaited()
+    assert response.text == messages.GOAL_INTAKE
+    assert response.keyboard == keyboards.goal_input_keyboard()
 
 
 @pytest.mark.asyncio

@@ -113,6 +113,12 @@ class Discipline(StrEnum):
     SWIM = "SWIMMING"
 
 
+class FitnessBaselineSource(StrEnum):
+    """Provenance for an immutable athlete fitness baseline."""
+
+    IMPORTED_WORKOUT_WINDOW = "IMPORTED_WORKOUT_WINDOW"
+
+
 class RunningType(StrEnum):
     OUTDOOR = "OUTDOOR"
     TRAIL = "TRAIL"

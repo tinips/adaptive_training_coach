@@ -20,6 +20,7 @@ from app.schemas.training_import import TelegramDocumentUpload
 logger = logging.getLogger(__name__)
 BOT_SERVICE_KEY = "coach_bot_service"
 ALLOWED_USER_IDS_KEY = "telegram_allowed_user_ids"
+DEV_USER_IDS_KEY = "dev_telegram_user_ids"
 
 
 async def start_handler(
@@ -65,6 +66,8 @@ async def delete_handler(
 
 
 async def dev_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _development_authorized(update, context):
+        return
     message = update.effective_message
     if message is not None and message.text is not None:
         await _agent_delegate(update, context, message.text)
@@ -257,6 +260,16 @@ def _authorized(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     # Test-only contexts that do not construct the production application have
     # no security configuration.  The real application always sets this key.
     return allowed is None or user.id in allowed
+
+
+def _development_authorized(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Allow development shortcuts only for the explicit development allowlist."""
+
+    user = update.effective_user
+    if user is None or not _authorized(update, context):
+        return False
+    development_users = context.application.bot_data.get(DEV_USER_IDS_KEY)
+    return development_users is None or user.id in development_users
 
 
 def _service(context: ContextTypes.DEFAULT_TYPE) -> CoachBotService:

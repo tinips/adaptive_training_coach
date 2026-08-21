@@ -6,7 +6,9 @@ collects the athlete's birth year, competition category / biological sex,
 weight, and height, then records a confirmed athlete goal, raw weekly
 availability, deterministic equipment access, and training limitations.
 The final optional step imports objective workout history from Apple Health or
-TCX. Baseline calculation and plan generation remain outside this phase.
+TCX. Imported workouts deterministically refresh a 14-day fitness-evidence
+projection for the disciplines selected by the athlete's active goal. Training
+plan generation remains outside this phase.
 
 The interface is English-only. Goal answers may be written naturally in any
 language supported by the configured model. The application does not provide
@@ -48,8 +50,9 @@ First, let\u2019s build your athlete profile.
 What year were you born? Send the four-digit year (1940 to 2008).
 ```
 
-Workout-history import stores source facts for future coaching. It does not
-calculate a baseline or generate a plan.
+Workout-history import stores source facts for future coaching and creates a
+deterministic initial baseline when the athlete has a resolved catalog goal and
+eligible evidence. It does not generate a plan.
 
 Commands, callbacks, and completed-profile chat routing use one global
 tool-calling LangGraph workspace. Active onboarding events bypass that workspace
@@ -206,7 +209,8 @@ Completed athletes can continue to use:
 
 - normalized profile reads;
 - Apple Health ZIP history imports;
-- TCX single-workout imports.
+- TCX single-workout imports;
+- immutable initial baseline assessments for active goal disciplines.
 
 The same importer serves the optional final onboarding step and completed
 athletes using **Add workout**. Import jobs record whether they belong to
@@ -223,8 +227,7 @@ or baseline-preference records.
 This slice does not implement:
 
 - derived normalization of availability, equipment, or injury context;
-- baseline selection during onboarding;
-- athlete baseline calculation;
+- a universal `fitness_score` or a physiological fitness model;
 - goal feasibility or safety assessment;
 - roadmap, weekly plan, or adaptive replanning;
 - RAG, embeddings, a vector database, or multiple agents;
@@ -300,8 +303,10 @@ docker compose up --build
 ```
 
 Compose starts PostgreSQL, runs `alembic upgrade head`, then starts FastAPI and
-the Telegram bot. The API is available at `http://localhost:8000`; the local
-PostgreSQL port is `55432`.
+the Telegram bot. A successful Apple Health or TCX import creates the athlete's
+first immutable, goal-scoped baseline when eligible workout evidence exists; no
+separate fitness scheduler runs in this milestone. The API is available at
+`http://localhost:8000`; the local PostgreSQL port is `55432`.
 
 Useful checks:
 
@@ -370,8 +375,14 @@ the canonical representation, removes redundant `goal_type`, `event_name`, and
 Migration `0012_remove_fitness_level` removes the unused transient
 `fitness_level` column introduced by revision `0011`.
 
+Migration `0028_athlete_fitness_projections` adds the owned immutable
+`athlete_baseline_assessments` table. It uses the existing broad `Discipline`
+enum and preserves quality/evidence JSON, a deterministic redacted input digest,
+and calculation version. It also backfills `workouts.fitness_input_updated_at`
+and adds the owned goal-scoped read index `(athlete_id, discipline, started_at)`.
+
 The migration supports upgrade, downgrade, and re-upgrade in the portable
-SQLite migration tests and is also validated against Compose PostgreSQL.
+SQLite migration tests.
 
 ## Validation
 
@@ -411,6 +422,10 @@ LLM, or live Strava journey.
   heart-rate observations retain source identity and temporal quality so future
   algorithms can recompute aggregates; clinical CDA, sleep, body composition,
   gait, audio, and general daily HealthKit records are ignored.
+- Fitness projections retain aggregate volume, available distance/calories,
+  reliable exact/short-interval HR only, discipline-specific aggregate metrics,
+  stable quality flags, and a one-way digest of calculation inputs. They do not
+  retain workout titles, notes, routes, raw exercise names, or source metadata.
 - Strava tokens are encrypted at rest and account deletion requires explicit
   confirmation.
 - Goal intake records intent only. It does not decide whether a goal is safe or
