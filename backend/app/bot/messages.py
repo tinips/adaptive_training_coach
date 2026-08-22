@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from html import escape
 from typing import Any
 
 from app.domain.enums import ProfileSettingsStep
 from app.schemas.capabilities import CapabilityReview, GoalExecutionAssessment
+from app.schemas.weekly_plans import PlanReadiness, WeeklyPlan
 
 TELEGRAM_MESSAGE_LIMIT = 4096
 _TRUNCATED_MARKER = "\u2026 [truncated for Telegram]"
@@ -95,6 +96,19 @@ ADD_WORKOUT_REQUEST = (
     "TCX is recommended for a single new workout.\n"
     "Apple Health ZIP can update or enrich your history."
 )
+MOBILE_SYNC_UNAVAILABLE = "iPhone workout sync is not enabled right now."
+IPHONE_DISCONNECTED = (
+    "Your iPhone connection has been disconnected. The app can no longer sync workouts."
+)
+IPHONE_NOT_CONNECTED = "There is no active iPhone connection to disconnect."
+WEEKLY_PLAN_UNAVAILABLE = (
+    "I could not create a weekly plan right now. No plan was saved. Please try again "
+    "in a moment."
+)
+WEEKLY_PLAN_NOT_FOUND = (
+    "There is no saved plan for next week yet. Choose Plan next week when you are "
+    "ready."
+)
 _ONBOARDING_FIELD_LABELS = {
     "birth_year": "birth year",
     "gender": "category",
@@ -104,6 +118,18 @@ _ONBOARDING_FIELD_LABELS = {
     "health_limitations_text": "training limitations",
 }
 ONBOARDING_MODIFICATION_FALLBACK = "Your athlete data has been updated."
+
+
+def iphone_pairing_code(code: str, expires_at: datetime) -> str:
+    """Render a short-lived pairing code without logging or persisting it here."""
+
+    expires_utc = expires_at.astimezone(UTC).strftime("%H:%M UTC")
+    return (
+        "Open Coach Health Sync on your iPhone and enter this one-time pairing "
+        "code:\n\n"
+        f"<code>{escape(code)}</code>\n\n"
+        f"It expires at {expires_utc}. Keep this code private."
+    )
 
 
 def onboarding_modification_response(confirmation: str | None) -> str:
@@ -223,6 +249,48 @@ TRAINING_HISTORY_SKIP_SUGGESTION = (
     "That's fine — we'll start conservatively. You can import an Apple Health export "
     "or TCX workout later to give your coaching a more personalized starting point."
 )
+
+
+def weekly_plan_readiness(readiness: PlanReadiness) -> str:
+    """Explain the deterministic evidence gate without exposing workout details."""
+
+    missing = [item for item in readiness.disciplines if not item.ready]
+    rows = "\n".join(
+        "• "
+        f"{item.discipline.value.title()}: {item.session_count}/3 sessions, "
+        f"{item.active_day_count}/2 active days"
+        for item in missing
+    )
+    return (
+        "I need a little more recent training history before I can create a "
+        "personalized plan for next week. In the last 30 days, each target "
+        "discipline needs at least 3 sessions across 2 active days.\n\n"
+        f"{rows}\n\n"
+        "Import an Apple Health export or TCX workout file, then try again."
+    )
+
+
+def weekly_plan(plan: WeeklyPlan) -> str:
+    """Render the saved seven-day structure compactly for Telegram."""
+
+    lines = [f"Your plan for the week of {plan.week_start.isoformat()}"]
+    for day in plan.days:
+        heading = day.date.strftime("%A %d %b")
+        if not day.sessions:
+            lines.append(f"\n<b>{heading}</b> — {escape(day.rest_note or 'Rest')}")
+            continue
+        rendered = []
+        for session in day.sessions:
+            rendered.append(
+                f"• <b>{escape(session.discipline.value.title())}</b> — "
+                f"{escape(session.objective)} ({session.duration_minutes} min, "
+                f"{escape(session.intensity.title())})\n"
+                f"  {escape(session.structure)}"
+            )
+        lines.append(f"\n<b>{heading}</b>\n" + "\n".join(rendered))
+    return _assert_telegram_length("\n".join(lines))
+
+
 PROFILE_SETTINGS_MENU = "Choose a profile setting to change."
 PROFILE_SETTINGS_CLOSED = "Done. Your profile settings are closed."
 PROFILE_SETTINGS_UNPROMPTED = "Use Change profile to choose what you want to update."

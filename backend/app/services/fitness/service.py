@@ -90,6 +90,37 @@ class BaselineAssessmentService:
             catalog=TrainingCatalogRepository(session),
             athlete_id=athlete_id,
         )
+        return await self.create_missing_baselines_for_disciplines_in_session(
+            session,
+            athlete_id=athlete_id,
+            disciplines=disciplines,
+            calculated_at=now,
+            owner_locked=True,
+        )
+
+    async def create_missing_baselines_for_disciplines_in_session(
+        self,
+        session: AsyncSession,
+        *,
+        athlete_id: uuid.UUID,
+        disciplines: tuple[Discipline, ...],
+        calculated_at: datetime | None = None,
+        owner_locked: bool = False,
+    ) -> tuple[Discipline, ...]:
+        """Create baselines for an explicit, already-resolved discipline scope.
+
+        The planner uses this narrower entry point so a supporting context can
+        never cause a baseline to be created merely because a weekly plan was
+        requested for the primary goal.
+        """
+
+        now = _as_utc(calculated_at or utc_now())
+        if not disciplines:
+            return ()
+        profiles = ProfileRepository(session)
+        if not owner_locked:
+            await profiles.lock_owner(user_id=athlete_id)
+        await session.flush()
         if not disciplines:
             return ()
 

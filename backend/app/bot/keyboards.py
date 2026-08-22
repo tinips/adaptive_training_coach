@@ -64,6 +64,8 @@ LABELS = {
     "resume_menu": "Resume",
     "profile": "Profile",
     "change_profile": "Change profile",
+    "plan_next_week": "Plan next week",
+    "view_weekly_plan": "View weekly plan",
     "delete": "Delete",
 }
 
@@ -188,12 +190,20 @@ def onboarding_keyboard() -> ReplyKeyboardMarkup:
     return _reply_rows([[LABELS["resume_menu"]], [LABELS["delete"]]])
 
 
-def completed_onboarding_keyboard() -> ReplyKeyboardMarkup:
+def completed_onboarding_keyboard(
+    *, plan_available: bool = False
+) -> ReplyKeyboardMarkup:
     """Expose the durable completed-account actions."""
 
     return _reply_rows(
         [
             [LABELS["profile"], LABELS["change_profile"]],
+            [
+                LABELS["add_workout"],
+                LABELS["view_weekly_plan"]
+                if plan_available
+                else LABELS["plan_next_week"],
+            ],
             [LABELS["delete"]],
         ]
     )

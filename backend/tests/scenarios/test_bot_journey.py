@@ -279,6 +279,7 @@ async def test_journey_collects_profile_goal_and_required_context_before_complet
     assert "Running shoes" in profile_button.text
     assert _reply_buttons(profile_button) == [
         ["Profile", "Change profile"],
+        ["Add workout", "Plan next week"],
         ["Delete"],
     ]
 

@@ -88,6 +88,8 @@ class DeterministicFakeOnboardingModel:
                 output = schema.model_validate(
                     {"accepted": not needs_clarification},
                 )
+            elif schema.__name__ == "WeeklyPlan":
+                output = schema.model_validate(_fake_weekly_plan(user_text))
             elif set(schema.model_fields) == {"templates"}:
                 output = schema.model_validate(_fake_context_mapping(user_text))
             elif set(schema.model_fields) == {"capabilities", "contexts"}:
@@ -450,6 +452,51 @@ def _is_free_text_validation_schema(schema: StructuredOutputSchema) -> bool:
     """Recognize the isolated validator without importing workflow modules."""
 
     return set(schema.model_fields) == {"accepted"}
+
+
+def _fake_weekly_plan(request_json: str) -> dict[str, object]:
+    """Return a stable valid weekly plan for local bot and service tests."""
+
+    from datetime import date, timedelta
+
+    request = json.loads(request_json)
+    week_start = date.fromisoformat(str(request["week_start"]))
+    contexts = request.get("goal", {}).get("target_contexts", [])
+    discipline = (
+        str(contexts[0].get("discipline", "OTHER"))
+        if isinstance(contexts, list) and contexts and isinstance(contexts[0], dict)
+        else "OTHER"
+    )
+    days: list[dict[str, object]] = []
+    for offset in range(7):
+        day = week_start + timedelta(days=offset)
+        if offset in {1, 4, 6}:
+            days.append(
+                {
+                    "date": day.isoformat(),
+                    "sessions": [
+                        {
+                            "discipline": discipline,
+                            "objective": "Build consistent aerobic training",
+                            "duration_minutes": 45,
+                            "intensity": "EASY",
+                            "structure": (
+                                "Easy warm-up, steady main set, easy cool-down."
+                            ),
+                        }
+                    ],
+                    "rest_note": None,
+                }
+            )
+        else:
+            days.append(
+                {
+                    "date": day.isoformat(),
+                    "sessions": [],
+                    "rest_note": "Rest or gentle mobility.",
+                }
+            )
+    return {"week_start": week_start.isoformat(), "days": days}
 
 
 def _fake_onboarding_update(user_text: str) -> dict[str, object]:

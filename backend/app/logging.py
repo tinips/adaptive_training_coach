@@ -18,13 +18,25 @@ class SensitiveValueFilter(logging.Filter):
         "password",
         "encryption_key",
         "authorization",
+        "pairing_code",
+        "device_token",
+        "installation_id",
+        "healthkit",
+        "workout_uuid",
+        "activity_type",
+        "started_at",
+        "ended_at",
+        "duration_seconds",
+        "distance_meters",
+        "calories_kcal",
         "health_description",
         "user_text",
         "prompt",
     )
     _query_value = re.compile(
-        r"(?i)([?&](?:ticket|state|code|access_token|refresh_token|"
-        r"client_secret|verify_token|hub\.verify_token)=)[^&\s\"]+"
+        r"(?i)([?&](?:ticket|state|code|pairing_code|access_token|refresh_token|"
+        r"device_token|mobile_token|client_secret|verify_token|hub\.verify_token)="
+        r")[^&\s\"]+"
     )
     _telegram_bot_path = re.compile(r"(?i)(https://api\.telegram\.org/bot)[^/\s\"]+")
     _database_password = re.compile(

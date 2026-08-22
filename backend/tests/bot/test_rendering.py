@@ -94,6 +94,7 @@ def test_lifecycle_reply_keyboards_expose_exact_account_actions() -> None:
     ]
     assert [[button.text for button in row] for row in completed.keyboard] == [
         ["Profile", "Change profile"],
+        ["Add workout", "Plan next week"],
         ["Delete"],
     ]
     assert all(

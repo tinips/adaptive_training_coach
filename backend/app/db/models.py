@@ -179,6 +179,12 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         passive_deletes=True,
         lazy="raise",
     )
+    weekly_training_plans: Mapped[list[WeeklyTrainingPlan]] = relationship(
+        back_populates="athlete",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="raise",
+    )
     apple_health_import_jobs: Mapped[list[AppleHealthImportJob]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
@@ -209,6 +215,13 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
         lazy="raise",
+    )
+    mobile_sync_credential: Mapped[MobileSyncCredential | None] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="raise",
+        uselist=False,
     )
 
 
@@ -896,6 +909,56 @@ class AthleteBaselineAssessment(
 
     athlete: Mapped[User] = relationship(
         back_populates="baseline_assessments",
+        lazy="raise",
+    )
+
+
+class WeeklyTrainingPlan(UUIDPrimaryKeyMixin, Base):
+    """One immutable published Monday-to-Sunday plan for an athlete."""
+
+    __tablename__ = "weekly_training_plans"
+    __table_args__ = (
+        UniqueConstraint(
+            "athlete_id",
+            "week_start",
+            name="uq_weekly_training_plans_athlete_week_start",
+        ),
+        CheckConstraint(
+            "calculation_version > 0",
+            name="calculation_version_positive",
+        ),
+        CheckConstraint(
+            "prompt_version > 0",
+            name="prompt_version_positive",
+        ),
+    )
+
+    athlete_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    week_start: Mapped[date] = mapped_column(Date, nullable=False)
+    plan_jsonb: Mapped[dict[str, object]] = mapped_column(
+        json_document(),
+        nullable=False,
+    )
+    evidence_snapshot_jsonb: Mapped[dict[str, object]] = mapped_column(
+        json_document(),
+        nullable=False,
+    )
+    input_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    prompt_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    calculation_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    planner_model: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        nullable=False,
+    )
+
+    athlete: Mapped[User] = relationship(
+        back_populates="weekly_training_plans",
         lazy="raise",
     )
 
@@ -1729,6 +1792,53 @@ class WorkoutFlowSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         self.workout_id = value
 
 
+class MobileSyncCredential(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """One revocable iPhone companion credential for an owned athlete."""
+
+    __tablename__ = "mobile_sync_credentials"
+    __table_args__ = (
+        UniqueConstraint("user_id", name="uq_mobile_sync_credentials_user_id"),
+        UniqueConstraint(
+            "pairing_code_hash",
+            name="uq_mobile_sync_credentials_pairing_code_hash",
+        ),
+        Index(
+            "ix_mobile_sync_credentials_device_token_hash",
+            "device_token_hash",
+        ),
+        CheckConstraint(
+            "pairing_code_hash IS NULL OR pairing_code_expires_at IS NOT NULL",
+            name="pairing_code_requires_expiry",
+        ),
+    )
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    pairing_code_hash: Mapped[str | None] = mapped_column(CHAR(64), nullable=True)
+    pairing_code_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    device_token_hash: Mapped[str | None] = mapped_column(CHAR(64), nullable=True)
+    installation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    last_used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    user: Mapped[User] = relationship(
+        back_populates="mobile_sync_credential",
+        lazy="raise",
+    )
+
+
 class LLMUsage(UUIDPrimaryKeyMixin, Base):
     """Safe rate-limit and usage metadata; never raw prompts or answers."""
 
@@ -1758,6 +1868,7 @@ class LLMUsage(UUIDPrimaryKeyMixin, Base):
         ),
         nullable=False,
     )
+    feature: Mapped[str | None] = mapped_column(String(64), nullable=True)
     provider_mode: Mapped[LLMProviderMode] = mapped_column(
         persisted_enum(
             LLMProviderMode,
@@ -1799,6 +1910,7 @@ __all__ = [
     "Activity",
     "ActivitySourceLink",
     "AppleHealthImportJob",
+    "AthleteBaselineAssessment",
     "AthleteCapability",
     "AthleteProfile",
     "Capability",
@@ -1810,6 +1922,7 @@ __all__ = [
     "HikingWorkoutDetails",
     "LLMProviderMode",
     "LLMUsage",
+    "MobileSyncCredential",
     "OnboardingSession",
     "OtherWorkoutDetails",
     "PoolSwimmingDetails",
@@ -1819,6 +1932,7 @@ __all__ = [
     "TrainingContext",
     "TrainingGoal",
     "User",
+    "WeeklyTrainingPlan",
     "Workout",
     "WorkoutFlowSession",
     "WorkoutHeartRateObservation",

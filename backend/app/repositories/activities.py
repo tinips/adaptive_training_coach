@@ -157,6 +157,26 @@ class TrainingActivityRepository:
             import_job_id=import_job_id,
         )
 
+    async def import_activity(
+        self,
+        *,
+        user_id: uuid.UUID,
+        incoming: ActivityImportData,
+    ) -> tuple[Workout, ActivityUpsertOutcome]:
+        """Persist a source-neutral activity outside the file-import workflow.
+
+        Mobile and future provider adapters retain the same exact-identity and
+        normalization boundary as Apple Health ZIP and TCX imports, without
+        manufacturing a file hash or an Apple import job.
+        """
+
+        return await self._import_activity(
+            user_id=user_id,
+            incoming=incoming,
+            file_sha256=None,
+            import_job_id=None,
+        )
+
     async def _import_activity(
         self,
         *,

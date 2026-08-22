@@ -11,3 +11,4 @@ htmlcov/
 .agent/tmp/
 backend/.venv/
 .vscode/
+ios/CoachHealthSync/Config/Developer.xcconfig

@@ -43,6 +43,7 @@ def test_preformatted_connect_ticket_and_structured_secret_are_redacted() -> Non
         lineno=1,
         msg=(
             "GET /integrations/connect?ticket=raw-ticket "
+            "https://api.example.test/v1/mobile/pair?pairing_code=raw-pairing "
             "https://api.telegram.org/botraw-telegram/sendMessage "
             "postgresql+asyncpg://coach:raw-password@localhost/db"
         ),
@@ -54,8 +55,14 @@ def test_preformatted_connect_ticket_and_structured_secret_are_redacted() -> Non
         level=logging.INFO,
         pathname=__file__,
         lineno=1,
-        msg="provider context %(client_secret)s",
-        args=({"client_secret": "raw-secret"},),
+        msg="provider context %(client_secret)s %(workout_uuid)s %(duration_seconds)s",
+        args=(
+            {
+                "client_secret": "raw-secret",
+                "workout_uuid": "raw-workout-uuid",
+                "duration_seconds": 1800,
+            },
+        ),
         exc_info=None,
     )
     filter_ = SensitiveValueFilter()
@@ -63,9 +70,12 @@ def test_preformatted_connect_ticket_and_structured_secret_are_redacted() -> Non
     assert filter_.filter(access)
     assert filter_.filter(structured)
     assert "raw-ticket" not in access.getMessage()
+    assert "raw-pairing" not in access.getMessage()
     assert "raw-telegram" not in access.getMessage()
     assert "raw-password" not in access.getMessage()
     assert "raw-secret" not in structured.getMessage()
+    assert "raw-workout-uuid" not in structured.getMessage()
+    assert "1800" not in structured.getMessage()
 
 
 def test_configuration_attaches_redaction_to_uvicorn_access_handler() -> None:

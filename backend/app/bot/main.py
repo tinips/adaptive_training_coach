@@ -21,9 +21,11 @@ from app.db.session import create_engine, create_session_factory
 from app.integrations.llm.factory import create_goal_extraction_model
 from app.logging import configure_logging
 from app.services.accounts import AccountQueryService, AccountService
+from app.services.mobile_sync import MobileSyncService
 from app.services.onboarding import OnboardingService
 from app.services.profiles import ProfileService
 from app.services.training_import import TrainingFileImportService
+from app.services.weekly_planning import WeeklyPlanningService
 from app.workflows.onboarding_context import create_context_onboarding_workflow
 from app.workflows.onboarding_goal.graph import create_goal_extractor
 from app.workflows.telegram_orchestrator import TelegramAgentWorkspace
@@ -77,6 +79,10 @@ def build_runtime(
         session_factory=session_factory,
         settings=runtime_settings,
     )
+    mobile_sync = MobileSyncService(
+        session_factory=session_factory,
+        settings=runtime_settings,
+    )
     service = CoachBotApplicationService(
         onboarding=OnboardingService(
             session_factory=session_factory,
@@ -90,6 +96,13 @@ def build_runtime(
         apple_health=apple_health,
         apple_health_enabled=runtime_settings.apple_health_import_enabled,
         tcx_enabled=runtime_settings.tcx_import_enabled,
+        mobile_sync=mobile_sync,
+        mobile_sync_enabled=runtime_settings.mobile_sync_enabled,
+        planning=WeeklyPlanningService(
+            session_factory=session_factory,
+            settings=runtime_settings,
+            model=create_goal_extraction_model(runtime_settings),
+        ),
         agent_workspace=agent_workspace,
     )
     return BotRuntime(

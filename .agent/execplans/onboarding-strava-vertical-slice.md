@@ -2543,3 +2543,78 @@ and `git diff --check` pass. The isolated SQLite 0028 migration round-trip
 superseded current/snapshot tables. Docker Desktop is unavailable in this
 environment, so the requested PostgreSQL `alembic upgrade head` and `alembic
 check` could not connect.
+
+## Follow-up: weekly plan from imported workouts (2026-08-21)
+
+- [x] Add a single immutable `weekly_training_plans` record per athlete and
+  following Monday, with a structured seven-day plan, redacted evidence
+  snapshot, deterministic digest, model/prompt/calculation versions, and safe
+  planner LLM-usage feature metadata.
+- [x] Gate model invocation per primary-goal `TARGET` discipline with a
+  planner-specific 30-day calculator window: at least three deduplicated sessions over two
+  active days. Supporting contexts do not affect that gate.
+- [x] Create only missing TARGET baselines after passing the gate; preserve the
+  existing immutable baseline behavior and use current aggregated evidence in
+  the planner prompt.
+- [x] Add deterministic Telegram routes and persistent keyboard state for Add
+  workout, Plan next week, and View weekly plan. Viewing reads the saved plan
+  only; insufficient evidence and provider failures create no plan.
+- [x] Add migration `0029_weekly_training_plans`; it also removes two obsolete
+  local current-fitness prototype tables when upgrading a developer database.
+
+Validation: `274 passed, 3 skipped` (the three skipped tests require explicit
+live-provider credentials); Ruff, Ruff format, mypy, `git diff --check`,
+`alembic upgrade head`, `alembic current`, and `alembic check` pass against
+the local PostgreSQL database. The applied head is
+`0029_weekly_training_plans`.
+
+## Follow-up: planner prompt and evidence separation (2026-08-21)
+
+- [x] Move the versioned weekly planner prompt and message construction into
+  `app.workflows.prompts.weekly_planning`, alongside the existing onboarding
+  and catalog prompt contracts.
+- [x] Move planner-only readiness, redacted evidence snapshot, and input-digest
+  transforms into `app.services.weekly_planning.evidence`; retain database and
+  provider orchestration in the service.
+- [x] Add `planner_window_days=30`; only planning preflight and recent context
+  use it. Immutable imported baselines retain `fitness_window_days=14`.
+
+Validation: `279 passed, 3 skipped`; Ruff, Ruff format, mypy, `git diff
+--check`, and `alembic check` pass. No schema migration was needed.
+
+## Follow-up: manual iPhone HealthKit POC (2026-08-21)
+
+- [x] Add a deliberately opt-in, revocable mobile credential owned by one
+  athlete. Telegram issues a one-time ten-minute pairing code; PostgreSQL stores
+  only SHA-256 hashes for that code and the opaque iPhone bearer token.
+- [x] Add deterministic `/connect_iphone` and `/disconnect_iphone` bot commands
+  with no LLM invocation, plus disabled and missing-connection responses that
+  reveal no credential data.
+- [x] Add authenticated pairing and HealthKit workout-sync API routes. The
+  bounded POC payload contains only the HealthKit workout UUID, activity type,
+  UTC interval, duration, optional distance, and optional active calories; it
+  never accepts an athlete ID.
+- [x] Reuse the source-neutral workout import boundary with
+  `APPLE_HEALTH` / `healthkit:<uuid>` exact identity and safe
+  `HEALTHKIT_IOS_POC` provenance. Sync deliberately never creates a baseline;
+  the 30-day planner gate remains responsible for creating any missing baseline.
+- [x] Add the isolated `ios/CoachHealthSync` SwiftUI project: Keychain-only
+  token storage, HealthKit workout-read permission, a seven-day summary list,
+  single-workout manual sync, local ignored HTTPS configuration, and a Monday
+  device-test guide.
+- [x] Add mobile payload/credential log redaction and tests for pairing expiry,
+  one-time use, revocation, ownership, idempotency, invalid payloads, no
+  baseline creation, migration ownership, adapter mapping, and planner
+  visibility.
+
+Validation: backend `pytest` passes `296 passed, 3 skipped`; Ruff, Ruff format,
+mypy, and `git diff --check` pass. PostgreSQL migration verification completed
+with `alembic upgrade head`, `alembic downgrade 0029_weekly_training_plans`,
+`alembic upgrade head`, and `alembic check`; the head is
+`0030_mobile_sync_credentials`. The iOS project received static source/project
+reference checks on Windows, but its Xcode build, HealthKit permission flow,
+Xiaomi-to-Apple-Health bridge, and live HTTPS-tunnel sync remain pending the
+MacBook/iPhone proof described in `ios/CoachHealthSync/README.md`.
+The local API and bot containers were rebuilt; `/ready` and the disabled mobile
+route contract are available locally, but no live Telegram or iPhone pairing is
+claimed while the opt-in flag remains off.

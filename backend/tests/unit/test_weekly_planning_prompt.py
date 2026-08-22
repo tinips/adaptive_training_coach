@@ -1,0 +1,29 @@
+"""Contract tests for the versioned weekly-planner prompt."""
+
+from __future__ import annotations
+
+import json
+
+from langchain_core.messages import HumanMessage, SystemMessage
+
+from app.workflows.prompts.weekly_planning import (
+    WEEKLY_PLANNER_PROMPT_VERSION,
+    build_weekly_planner_messages,
+)
+
+
+def test_weekly_planner_prompt_is_versioned_and_serializes_exact_context() -> None:
+    context: dict[str, object] = {
+        "week_start": "2026-08-24",
+        "availability": "Tuesday evening only",
+        "recent_evidence": {"RUNNING": {"session_count": 3}},
+    }
+
+    messages = build_weekly_planner_messages(context)
+
+    assert WEEKLY_PLANNER_PROMPT_VERSION == 1
+    assert len(messages) == 2
+    assert isinstance(messages[0], SystemMessage)
+    assert "Monday-to-Sunday week" in str(messages[0].content)
+    assert isinstance(messages[1], HumanMessage)
+    assert json.loads(str(messages[1].content)) == context

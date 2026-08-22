@@ -26,6 +26,7 @@ class LLMUsageRepository:
         *,
         user_id: uuid.UUID,
         onboarding_step: OnboardingStep,
+        feature: str | None = None,
         provider_mode: ProviderMode,
         model: str | None,
         status: LLMUsageStatus,
@@ -36,6 +37,7 @@ class LLMUsageRepository:
         usage = LLMUsage(
             user_id=user_id,
             onboarding_step=onboarding_step,
+            feature=feature,
             provider_mode=LLMProviderMode(provider_mode),
             model=model,
             status=status,

@@ -135,6 +135,33 @@ async def test_add_workout_handler_delegates_identity_to_service() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("handler", "command"),
+    [
+        (handlers.connect_iphone_handler, "/connect_iphone"),
+        (handlers.disconnect_iphone_handler, "/disconnect_iphone"),
+    ],
+)
+async def test_iphone_command_handlers_delegate_identity_to_service(
+    handler: object, command: str
+) -> None:
+    service = SimpleNamespace(
+        handle_agent_input=AsyncMock(return_value=TelegramResponse("done")),
+    )
+    update = _update()
+
+    await handler(  # type: ignore[operator]
+        cast(Update, update),
+        cast(ContextTypes.DEFAULT_TYPE, _context(service)),
+    )
+
+    identity, message = service.handle_agent_input.await_args.args
+    assert identity.telegram_user_id == 8172
+    assert message.content == command
+    assert message.additional_kwargs["telegram_event_type"] == "text"
+
+
+@pytest.mark.asyncio
 async def test_callback_handler_acknowledges_and_delegates_action() -> None:
     service = SimpleNamespace(
         handle_agent_input=AsyncMock(

@@ -16,8 +16,10 @@ from app.bot.handlers import (
     add_workout_handler,
     callback_handler,
     cancel_handler,
+    connect_iphone_handler,
     delete_handler,
     dev_handler,
+    disconnect_iphone_handler,
     document_handler,
     global_error_handler,
     help_handler,
@@ -38,6 +40,10 @@ def register_handlers(
     application.add_handler(CommandHandler("help", help_handler))
     application.add_handler(CommandHandler("profile", profile_handler))
     application.add_handler(CommandHandler("add_workout", add_workout_handler))
+    application.add_handler(CommandHandler("connect_iphone", connect_iphone_handler))
+    application.add_handler(
+        CommandHandler("disconnect_iphone", disconnect_iphone_handler)
+    )
     application.add_handler(CommandHandler("cancel", cancel_handler))
     application.add_handler(CommandHandler("delete_me", delete_handler))
     runtime_settings = settings or get_settings()

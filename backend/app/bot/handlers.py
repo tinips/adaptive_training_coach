@@ -51,6 +51,24 @@ async def add_workout_handler(
     await _agent_delegate(update, context, "/add_workout")
 
 
+async def connect_iphone_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Start the deterministic iPhone pairing flow."""
+
+    await _agent_delegate(update, context, "/connect_iphone")
+
+
+async def disconnect_iphone_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Revoke the deterministic iPhone pairing flow."""
+
+    await _agent_delegate(update, context, "/disconnect_iphone")
+
+
 async def cancel_handler(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,

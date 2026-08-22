@@ -25,9 +25,17 @@ from app.schemas.onboarding_service import OnboardingServiceResult
 from app.schemas.profile_settings import ProfileSettingsResult
 from app.schemas.training_import import TelegramDocumentUpload
 from app.services.accounts import AccountQueryService, AccountService
+from app.services.mobile_sync import (
+    MobileSyncDisabledError,
+    MobileSyncIdentityNotFoundError,
+    PairingCodeIssue,
+)
 from app.services.onboarding import OnboardingApplicationError, OnboardingService
 from app.services.profiles import ProfileService
 from app.services.training_import import TrainingFileImportOutcome
+from app.services.weekly_planning.service import (
+    WeeklyPlanningResult,
+)
 from app.workflows.telegram_orchestrator.workspace import (
     TelegramAgentContext,
     TelegramAgentWorkspace,
@@ -51,6 +59,28 @@ class TrainingImportBotPort(Protocol):
     async def cancel_active(self, *, user_id: UUID) -> None: ...
 
 
+class WeeklyPlanningBotPort(Protocol):
+    async def has_plan_for_next_week(self, identity: TelegramIdentity) -> bool: ...
+
+    async def generate_next_week(
+        self, identity: TelegramIdentity
+    ) -> WeeklyPlanningResult: ...
+
+    async def view_next_week(
+        self, identity: TelegramIdentity
+    ) -> WeeklyPlanningResult: ...
+
+
+class MobileHealthSyncBotPort(Protocol):
+    """Mobile sync boundary consumed by deterministic Telegram commands."""
+
+    async def issue_pairing_code(
+        self, identity: TelegramIdentity
+    ) -> PairingCodeIssue: ...
+
+    async def revoke_device(self, identity: TelegramIdentity) -> bool: ...
+
+
 class CoachBotApplicationService:
     def __init__(
         self,
@@ -62,6 +92,9 @@ class CoachBotApplicationService:
         apple_health: TrainingImportBotPort | None = None,
         apple_health_enabled: bool = True,
         tcx_enabled: bool = True,
+        planning: WeeklyPlanningBotPort | None = None,
+        mobile_sync: MobileHealthSyncBotPort | None = None,
+        mobile_sync_enabled: bool = False,
         agent_workspace: TelegramAgentWorkspace | None = None,
     ) -> None:
         self._onboarding = onboarding
@@ -71,6 +104,9 @@ class CoachBotApplicationService:
         self._apple_health = apple_health
         self._apple_health_enabled = apple_health_enabled
         self._tcx_enabled = tcx_enabled
+        self._planning = planning
+        self._mobile_sync = mobile_sync
+        self._mobile_sync_enabled = mobile_sync_enabled
         self._agent_workspace = agent_workspace
 
     async def handle_agent_input(
@@ -79,7 +115,7 @@ class CoachBotApplicationService:
         before = await self._account_queries.lifecycle(identity)
         response = await self._handle_agent_input(identity, message)
         after = await self._account_queries.lifecycle(identity)
-        lifecycle_keyboard = self._keyboard_for_lifecycle(after)
+        lifecycle_keyboard = await self._keyboard_for_lifecycle(identity, after)
         first_label = lifecycle_keyboard.keyboard[0][0].text
         lifecycle_changed = self._lifecycle_category(
             before
@@ -114,6 +150,9 @@ class CoachBotApplicationService:
                 keyboards.LABELS["start"]: "/start",
                 keyboards.LABELS["resume_menu"]: "/start",
                 keyboards.LABELS["profile"]: "/profile",
+                keyboards.LABELS["add_workout"]: "/add_workout",
+                keyboards.LABELS["plan_next_week"]: "/plan_next_week",
+                keyboards.LABELS["view_weekly_plan"]: "/view_weekly_plan",
                 keyboards.LABELS["delete"]: "/delete_me",
             }.get(content, content)
         if event_type == "text":
@@ -127,6 +166,10 @@ class CoachBotApplicationService:
             "/help",
             "/profile",
             "/add_workout",
+            "/connect_iphone",
+            "/disconnect_iphone",
+            "/plan_next_week",
+            "/view_weekly_plan",
             "/cancel",
             "/delete_me",
         }
@@ -184,6 +227,10 @@ class CoachBotApplicationService:
             "/help": self._help,
             "/profile": self.profile,
             "/add_workout": self.add_workout,
+            "/connect_iphone": self.connect_iphone,
+            "/disconnect_iphone": self.disconnect_iphone,
+            "/plan_next_week": self.plan_next_week,
+            "/view_weekly_plan": self.view_weekly_plan,
             "/cancel": self.cancel,
             "/delete_me": self.delete_me,
         }
@@ -284,10 +331,11 @@ class CoachBotApplicationService:
         self, identity: TelegramIdentity
     ) -> ReplyKeyboardMarkup:
         lifecycle = await self._account_queries.lifecycle(identity)
-        return self._keyboard_for_lifecycle(lifecycle)
+        return await self._keyboard_for_lifecycle(identity, lifecycle)
 
-    @staticmethod
-    def _keyboard_for_lifecycle(
+    async def _keyboard_for_lifecycle(
+        self,
+        identity: TelegramIdentity,
         lifecycle: dict[str, object] | None,
     ) -> ReplyKeyboardMarkup:
         if lifecycle is None:
@@ -296,7 +344,14 @@ class CoachBotApplicationService:
             UserStatus.ONBOARDING_COMPLETED,
             UserStatus.PROFILE_COMPLETED,
         }:
-            return keyboards.completed_onboarding_keyboard()
+            plan_available = (
+                await self._planning.has_plan_for_next_week(identity)
+                if self._planning is not None
+                else False
+            )
+            return keyboards.completed_onboarding_keyboard(
+                plan_available=plan_available
+            )
         return keyboards.onboarding_keyboard()
 
     @staticmethod
@@ -429,6 +484,62 @@ class CoachBotApplicationService:
     async def add_workout(self, _: TelegramIdentity) -> TelegramResponse:
         return TelegramResponse(
             messages.ADD_WORKOUT_REQUEST, keyboards.add_workout_keyboard()
+        )
+
+    async def connect_iphone(self, identity: TelegramIdentity) -> TelegramResponse:
+        """Issue a short-lived, one-time code for the companion iPhone app."""
+
+        if not self._mobile_sync_enabled or self._mobile_sync is None:
+            return TelegramResponse(messages.MOBILE_SYNC_UNAVAILABLE)
+        try:
+            pairing = await self._mobile_sync.issue_pairing_code(identity)
+        except MobileSyncDisabledError:
+            return TelegramResponse(messages.MOBILE_SYNC_UNAVAILABLE)
+        except MobileSyncIdentityNotFoundError:
+            return TelegramResponse(messages.NOT_FOUND)
+        return TelegramResponse(
+            messages.iphone_pairing_code(pairing.code, pairing.expires_at)
+        )
+
+    async def disconnect_iphone(self, identity: TelegramIdentity) -> TelegramResponse:
+        """Revoke the paired iPhone's opaque bearer token."""
+
+        if not self._mobile_sync_enabled or self._mobile_sync is None:
+            return TelegramResponse(messages.MOBILE_SYNC_UNAVAILABLE)
+        try:
+            revoked = await self._mobile_sync.revoke_device(identity)
+        except MobileSyncDisabledError:
+            return TelegramResponse(messages.MOBILE_SYNC_UNAVAILABLE)
+        return TelegramResponse(
+            messages.IPHONE_DISCONNECTED if revoked else messages.IPHONE_NOT_CONNECTED
+        )
+
+    async def plan_next_week(self, identity: TelegramIdentity) -> TelegramResponse:
+        if self._planning is None:
+            return TelegramResponse(messages.WEEKLY_PLAN_UNAVAILABLE)
+        result = await self._planning.generate_next_week(identity)
+        return self._render_planning(result, viewing=False)
+
+    async def view_weekly_plan(self, identity: TelegramIdentity) -> TelegramResponse:
+        if self._planning is None:
+            return TelegramResponse(messages.WEEKLY_PLAN_NOT_FOUND)
+        result = await self._planning.view_next_week(identity)
+        return self._render_planning(result, viewing=True)
+
+    @staticmethod
+    def _render_planning(
+        result: WeeklyPlanningResult,
+        *,
+        viewing: bool,
+    ) -> TelegramResponse:
+        if result.kind in {"created", "existing"} and result.plan is not None:
+            return TelegramResponse(messages.weekly_plan(result.plan))
+        if result.kind == "insufficient" and result.readiness is not None:
+            return TelegramResponse(messages.weekly_plan_readiness(result.readiness))
+        return TelegramResponse(
+            messages.WEEKLY_PLAN_NOT_FOUND
+            if viewing
+            else messages.WEEKLY_PLAN_UNAVAILABLE
         )
 
     async def cancel(self, identity: TelegramIdentity) -> TelegramResponse:

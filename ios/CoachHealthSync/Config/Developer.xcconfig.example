@@ -1,0 +1,4 @@
+// Copy this file to Developer.xcconfig before building locally.
+// Use an HTTPS tunnel URL that reaches your local Coach API. Do not commit the
+// copied Developer.xcconfig file.
+COACH_API_BASE_URL = https://replace-with-your-public-https-tunnel.example
