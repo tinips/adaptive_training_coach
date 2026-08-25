@@ -12,3 +12,4 @@ htmlcov/
 backend/.venv/
 .vscode/
 ios/CoachHealthSync/Config/Developer.xcconfig
+backend/scripts/.verify_server.log
