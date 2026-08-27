@@ -3,6 +3,7 @@ import SwiftUI
 
 struct ContentView: View {
     @ObservedObject var viewModel: SyncViewModel
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         NavigationStack {
@@ -105,6 +106,11 @@ struct ContentView: View {
             }
             .task {
                 viewModel.prepare()
+                await viewModel.autoSyncOnLaunch()
+            }
+            .onChange(of: scenePhase) { _, newPhase in
+                guard newPhase == .active else { return }
+                Task { await viewModel.autoSyncOnLaunch() }
             }
         }
     }

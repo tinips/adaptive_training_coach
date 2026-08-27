@@ -71,6 +71,49 @@ final class SyncViewModel: ObservableObject {
         }
     }
 
+    /// Syncs every recent workout without requiring a manual selection.
+    ///
+    /// Called on launch and whenever the app returns to the foreground. Each
+    /// workout is synced individually through the same idempotent endpoint
+    /// `syncSelectedWorkout()` uses, so re-running this after a partial
+    /// failure or on an unchanged workout is always safe.
+    func autoSyncOnLaunch() async {
+        guard isPaired, let apiClient, let accessToken else {
+            return
+        }
+
+        await performWork {
+            try await healthKitService.requestWorkoutReadAuthorization()
+            try await loadWorkouts()
+
+            guard !workouts.isEmpty else {
+                return
+            }
+
+            var insertedCount = 0
+            var unchangedCount = 0
+            var updatedCount = 0
+
+            for workout in workouts {
+                do {
+                    let result = try await apiClient.sync(workout: workout, accessToken: accessToken)
+                    switch result.outcome {
+                    case .inserted: insertedCount += 1
+                    case .unchanged: unchangedCount += 1
+                    case .updated: updatedCount += 1
+                    }
+                } catch let APIClientError.invalidHTTPStatus(statusCode) where statusCode == 401 {
+                    try? keychainStore.deleteAccessToken()
+                    self.accessToken = nil
+                    isPaired = false
+                    throw APIClientError.invalidHTTPStatus(401)
+                }
+            }
+
+            statusMessage = "Auto-synced: \(insertedCount) new, \(updatedCount) updated, \(unchangedCount) unchanged."
+        }
+    }
+
     func syncSelectedWorkout() async {
         guard let selectedWorkout = workouts.first(where: { $0.id == selectedWorkoutID }) else {
             errorMessage = "Select one workout to synchronize."
