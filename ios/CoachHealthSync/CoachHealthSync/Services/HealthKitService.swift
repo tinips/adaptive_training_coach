@@ -30,7 +30,7 @@ final class HealthKitService: HealthKitServicing {
     func requestWorkoutReadAuthorization() async throws {
         let workoutType = HKObjectType.workoutType()
 
-        try await withCheckedThrowingContinuation { continuation in
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             healthStore.requestAuthorization(toShare: [], read: [workoutType]) { success, error in
                 if let error {
                     continuation.resume(throwing: error)

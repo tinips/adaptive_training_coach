@@ -87,7 +87,7 @@ final class SyncViewModel: ObservableObject {
                 statusMessage = "Workout synchronized: \(result.outcome.rawValue)."
             } catch let APIClientError.invalidHTTPStatus(statusCode) where statusCode == 401 {
                 try? keychainStore.deleteAccessToken()
-                accessToken = nil
+                self.accessToken = nil
                 isPaired = false
                 throw APIClientError.invalidHTTPStatus(401)
             }

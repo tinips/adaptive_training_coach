@@ -175,7 +175,7 @@
 /* Begin PBXNativeTarget section */
 		E10000000000000000000001 /* CoachHealthSync */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = F10000000000000000000001 /* Build configuration list for PBXNativeTarget \"CoachHealthSync\" */;
+			buildConfigurationList = G10000000000000000000001 /* Build configuration list for PBXNativeTarget "CoachHealthSync" */;
 			buildPhases = (
 				D10000000000000000000004 /* Sources */,
 				D10000000000000000000002 /* Frameworks */,
@@ -192,7 +192,7 @@
 		};
 		E10000000000000000000002 /* CoachHealthSyncTests */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = F10000000000000000000002 /* Build configuration list for PBXNativeTarget \"CoachHealthSyncTests\" */;
+			buildConfigurationList = G10000000000000000000002 /* Build configuration list for PBXNativeTarget "CoachHealthSyncTests" */;
 			buildPhases = (
 				D10000000000000000000006 /* Sources */,
 				D10000000000000000000003 /* Frameworks */,
@@ -232,7 +232,7 @@
 					};
 				};
 			};
-			buildConfigurationList = F10000000000000000000003 /* Build configuration list for PBXProject \"CoachHealthSync\" */;
+			buildConfigurationList = G10000000000000000000003 /* Build configuration list for PBXProject "CoachHealthSync" */;
 			compatibilityVersion = "Xcode 14.0";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
@@ -315,7 +315,10 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = CoachHealthSync/Resources/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.adaptivetrainingcoach.healthsync;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -337,7 +340,10 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = CoachHealthSync/Resources/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.adaptivetrainingcoach.healthsync;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -355,7 +361,11 @@
 				CODE_SIGN_STYLE = Automatic;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @loader_path/Frameworks @executable_path/Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@loader_path/Frameworks",
+					"@executable_path/Frameworks",
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.adaptivetrainingcoach.healthsync.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -372,7 +382,11 @@
 				CODE_SIGN_STYLE = Automatic;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @loader_path/Frameworks @executable_path/Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@loader_path/Frameworks",
+					"@executable_path/Frameworks",
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.adaptivetrainingcoach.healthsync.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -425,7 +439,7 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		F10000000000000000000001 /* Build configuration list for PBXNativeTarget "CoachHealthSync" */ = {
+		G10000000000000000000001 /* Build configuration list for PBXNativeTarget "CoachHealthSync" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				F10000000000000000000001 /* Debug */,
@@ -434,7 +448,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		F10000000000000000000002 /* Build configuration list for PBXNativeTarget "CoachHealthSyncTests" */ = {
+		G10000000000000000000002 /* Build configuration list for PBXNativeTarget "CoachHealthSyncTests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				F10000000000000000000003 /* Debug */,
@@ -443,7 +457,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		F10000000000000000000003 /* Build configuration list for PBXProject "CoachHealthSync" */ = {
+		G10000000000000000000003 /* Build configuration list for PBXProject "CoachHealthSync" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				F10000000000000000000005 /* Debug */,
