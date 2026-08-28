@@ -3,6 +3,15 @@
 The Alembic migration and focused tests share these immutable tuples.  Existing
 entries must not be edited after release; publish later catalog corrections as
 new migrations or runtime-generated definitions.
+
+Historical migrations `0022_dynamic_training_catalog.py` and
+`0026_complete_hyrox_catalog.py` import these tuples directly and index into
+them at migration-apply time, not just at initial-release time. Any future
+pruning here must audit those two (and any other migration importing from this
+module) for the same fresh-database hazard: a migration that filters these
+tuples by a hardcoded set of codes and then indexes unconditionally into the
+result will crash on a from-scratch `alembic upgrade head` once this module no
+longer carries the codes it expects.
 """
 
 from __future__ import annotations
