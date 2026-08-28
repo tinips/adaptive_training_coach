@@ -12,8 +12,11 @@ properly when we reach them.
 
 **This is the design, not the implementation plan.** It says what should be true and
 why. The ordered, task-by-task plan for building it is a separate artifact and does
-not exist yet. Section 11 should be settled before that plan is written, because its
-outcome changes sections 4.3, 4.4 and 4.5.
+not exist yet.
+
+The experiment in section 11 has been run. Its results are folded into sections 2,
+4.3 and 4.5, and the headline is that the weekly planner is broken for every request
+today, which nobody knew because the readiness gate has always refused first.
 
 ---
 
@@ -94,10 +97,30 @@ those words appear in the prompt.
 The same codebase already does this correctly elsewhere: the catalog expansion prompt
 sends `schema.model_json_schema()` (`app/workflows/catalog_expansion/nodes.py:47`).
 
-### The planner has never run
+### The planner has never run, and it would fail if it did
 
 The `llm_usage` table holds exactly one row ever, an onboarding clarification. The
 weekly planner has never been called against a live model.
+
+**Measured 2026-08-28 against live DeepSeek** with a realistic synthetic context, on
+today's exact code path: the reply fails `WeeklyPlan` validation with **21 errors**.
+The model guesses `week_start` and `days` correctly, because `week_start` appears in
+the context it is given, and then invents `day_of_week` and `rest_day`, which the
+schema forbids, and returns an `intensity` value outside the permitted
+`EASY`/`MODERATE`/`HARD` set.
+
+This is not a flaky failure mode. The current planner is broken for every request,
+and nothing has ever surfaced it because the readiness gate has always refused before
+reaching the model.
+
+**The `malformed` flag was `False` on that completely invalid reply.** It reports
+whether the adapter had to repair the JSON, not whether the result matches the
+schema. Section 4.5 must not lean on it for conformance.
+
+The failure is then swallowed: `WeeklyPlan.model_validate` raises inside the broad
+`except Exception` in `generate_next_week`, which records a provider error and
+returns `unavailable`. The athlete is told the coach is unavailable, with no
+indication that the response arrived and was unusable.
 
 ### Indoor rides record zero distance and it is treated as real
 
@@ -394,9 +417,23 @@ weeks, so it caches well.
 
 **Variable message.** The briefing.
 
-**Plus the schema**, which today is never sent at all. Either as a tool definition
-(`method="function_calling"`) or written into the prompt as the catalog expansion code
-already does.
+**Plus the schema**, which today is never sent at all.
+
+**Decided: `method="function_calling"`.** Both options were tested against live
+DeepSeek on 2026-08-28 and both produced a valid `WeeklyPlan` where today's code
+produced 21 validation errors. Either fixes the problem.
+
+`function_calling` is preferred over writing the schema into the prompt because the
+schema cannot drift from the Pydantic model, and because it keeps the prompt small.
+Today's call is 761 prompt tokens; the serialized schema would roughly triple that on
+every request, which matters more once the briefing grows.
+
+Writing the schema into the prompt is a proven fallback, verified working, and it
+matches the existing pattern in `app/workflows/catalog_expansion/nodes.py:47`. Switch
+to it if `function_calling` causes trouble with a future provider.
+
+This composes with the per-request schema in 4.4: a dynamically built schema works
+identically through either route.
 
 ### 4.4 Constrain the schema per request
 
@@ -416,7 +453,21 @@ Things a schema cannot express, because they are relationships rather than shape
 - The volume safety net from 4.6. Not a target range, only the dangerous extremes.
 - No `THIN` or `NONE` sport received a `HARD` session.
 - The week fits the athlete's stated availability.
-- The `malformed` flag from the provider adapter, which today is set and never read.
+
+**Scope narrowed by the experiment.** These are semantic checks only. Schema
+conformance is now handled structurally by 4.3 and 4.4, so the repair call in step 8
+exists for content that is wrong, not for shape that is wrong.
+
+**Do not check the `malformed` flag for conformance.** An earlier draft listed it
+here. Testing showed it was `False` on a reply carrying 21 validation errors, because
+it only reports whether the adapter had to repair the raw JSON. It is still worth
+logging, but it proves nothing about the plan being usable.
+
+**Do not swallow validation failures.** Today `WeeklyPlan.model_validate` raises
+inside a broad `except Exception` that reports `unavailable`, which is
+indistinguishable from the provider being down. A schema failure and a network
+failure need separate handling and separate logging, or this class of bug stays
+invisible again.
 
 ### 4.6 Volume: the model decides, code catches danger
 
@@ -906,27 +957,36 @@ missed-training model (7.5), the 15 percent drift threshold and quiet-by-default
 
 ---
 
-## 11. Settle this before writing the implementation plan
+## 11. Experiment: run and settled
 
-The planner has never been called. Not once, against any model.
+**Run 2026-08-28** against live DeepSeek (`deepseek-v4-flash`) with a realistic
+synthetic context for the current athlete. Three calls.
 
-So sections 4.3, 4.4 and 4.5 are designed against behaviour nobody has observed.
-Writing repair logic for failures that have never been seen is guesswork, and if
-DeepSeek turns out to handle `function_calling` badly, or to conform fine without
-help, those three sections change and the tasks written from them get rewritten.
+| Call | Setup | Result |
+|---|---|---|
+| 1 | Today's exact path: `json_mode`, schema never sent | **21 validation errors** |
+| 2 | `json_mode`, JSON schema written into the prompt | **Valid** |
+| 3 | `function_calling`, schema as a tool definition | **Valid** |
 
-**The experiment.** Two real calls with synthetic evidence. One with the prompt
-exactly as it is today. One with the schema sent. Compare what comes back.
+**What call 1 got wrong.** It produced `week_start` and `days` correctly, which is
+unsurprising since `week_start` appears in the context it receives. It then invented
+`day_of_week` and `rest_day`, which the schema forbids, and returned an `intensity`
+outside the permitted `EASY`/`MODERATE`/`HARD` set.
 
-**What each outcome changes:**
+**Consequences, all now folded into the sections above:**
 
-| Result | Consequence |
-|---|---|
-| Guesses the shape badly today, conforms with the schema sent | 4.3 and 4.4 confirmed as written; 4.5 can be lighter |
-| Conforms fine either way | 4.4's per-request schema is still worth it for the sport restriction, but the urgency drops |
-| Struggles even with the schema sent | `function_calling` may not suit DeepSeek; reconsider 4.3, and 4.5 becomes load-bearing rather than a safety net |
+1. The planner is not occasionally unreliable. It fails on every request. Section 2
+   records this.
+2. Either fix works. `function_calling` is chosen in 4.3, with schema-in-prompt as a
+   verified fallback.
+3. The `malformed` flag is not a conformance signal. It was `False` on the failing
+   reply. Section 4.5 no longer relies on it.
+4. The post-generation checks in 4.5 narrow to semantic content only, since shape is
+   now handled structurally.
+5. A new problem surfaced that was not in the original design: schema failures are
+   swallowed by a broad `except Exception` and reported as `unavailable`, identical
+   to the provider being down. That is why this bug survived. Section 4.5 requires
+   them to be separated.
 
-This is roughly twenty minutes and two API calls. It should happen before the
-implementation plan is written, not after.
-
-*Not yet run. Awaiting a decision.*
+The script was throwaway and lives outside the repository. Reproducing it costs three
+API calls.
