@@ -80,3 +80,33 @@ def test_real_distance_is_still_counted() -> None:
     assert calculation.distance_session_count == 1
     assert calculation.known_distance_meters == 10_000.0
     assert "MISSING_DISTANCE" not in calculation.quality_flags_jsonb
+
+
+def test_confidence_is_capped_when_no_heart_rate_is_available() -> None:
+    """Volume alone must not read as full confidence: effort is unknown."""
+
+    workouts = tuple(
+        _workout(
+            discipline=Discipline.RUNNING,
+            started_at=NOW - timedelta(days=day),
+            distance_meters=10_000.0,
+        )
+        for day in (2, 4, 6, 8, 10, 12)
+    )
+    calculation = calculate_baseline_window(
+        discipline=Discipline.RUNNING,
+        workouts=workouts,
+        window_started_at=NOW - timedelta(days=30),
+        window_ended_at=NOW,
+        calculated_at=NOW,
+    )
+
+    assert calculation is not None
+    assert calculation.reliable_hr_sample_count == 0
+    assert calculation.confidence <= 0.6
+
+
+def test_calculation_version_is_two() -> None:
+    from app.services.fitness.calculator import CALCULATION_VERSION
+
+    assert CALCULATION_VERSION == 2

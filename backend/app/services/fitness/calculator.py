@@ -17,7 +17,12 @@ from app.domain.enums import (
 )
 from app.schemas.fitness import BaselineCalculation, FitnessWorkoutEvidence
 
-CALCULATION_VERSION = 1
+CALCULATION_VERSION = 2
+
+# With no reliable heart rate anywhere in the window, effort is entirely
+# unknown, so the score must not read as certainty however many sessions
+# there are.
+_NO_HEART_RATE_CONFIDENCE_CEILING = 0.6
 
 _RELIABLE_HR_QUALITIES = {
     HeartRateTemporalQuality.EXACT_SAMPLE,
@@ -417,6 +422,8 @@ def _confidence(
     confidence += 0.12 * (distance_session_count / session_count)
     if reliable_hr_sample_count:
         confidence += 0.08
+    else:
+        confidence = min(confidence, _NO_HEART_RATE_CONFIDENCE_CEILING)
     if "MISSING_DISTANCE" in quality_flags:
         confidence -= 0.04
     if "COARSE_HR_ONLY" in quality_flags:
