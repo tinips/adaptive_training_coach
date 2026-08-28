@@ -29,6 +29,32 @@ there is no notion of progress, no feedback, and no way to change a plan once wr
 The goal of this work is a coach that gives you a plan, keeps up with you as you get
 fitter, and lets you push back on it.
 
+### 1.1 Who this must work for
+
+**The system is not being built for one triathlete.** The examples throughout this
+document use the only real athlete in the database, who is training for a half
+Ironman, because that is what could be verified. The design must not assume them.
+
+Three requirements follow, and they constrain nearly every section:
+
+**Any number of target sports, from one upward.** A runner training only to run has a
+single target sport. Nothing may assume three, and no message may read oddly when
+there is one. The whole-athlete floor in 3.1 already generalises: three sessions on
+two days across whatever sports the athlete has. The `all()` veto that motivated it
+is simply invisible when there is only one sport.
+
+**A race date is optional.** `training_goals.event_date` is nullable, and an athlete
+whose goal is "get fitter" or "run consistently" has no date at all. The phase
+calculation in 4.10 must return an undated phase rather than fail or invent one, and
+the fixed instruction must say what to do with it.
+
+**Phase boundaries cannot be tuned to one event.** A marathon, a 5k and a half
+Ironman have different block lengths. Section 4.10 uses one set of defaults that
+degrades sensibly for any runway, and notes the extension point.
+
+Every acceptance test in the implementation plan should cover at least the
+single-sport case and the no-race-date case alongside the multisport one.
+
 ---
 
 ## 2. What we verified
@@ -338,20 +364,38 @@ so both can proceed independently, and so mocked data is shaped like the real th
 recording app. A third-party app or an older watch may omit them. The model must
 degrade gracefully when they are absent, not assume they are present.
 
-**Heart rate.** Send readings covering 30 seconds each, not a single average for the
-workout.
+**Heart rate. Send what the watch actually recorded, unmodified.**
 
-Reason: readings covering 60 seconds or less are graded reliable by the existing
-calculator and flow through the existing observation pipeline with no changes. A
-single workout-long average is graded coarse and excluded from every reliable
-aggregate, so it would need calculator changes to be useful at all. Thirty second
-readings also give time-in-zone later at no extra cost.
+Do not average, bucket or downsample on the phone. Send each HealthKit heart rate
+sample with its own start and end timestamps.
 
-Size: a 90 minute run is about 180 readings. A normal daily sync is one to three
-workouts. The case to handle is the first sync after pairing, which may carry a year
-of backfill.
+Reason: the existing calculator grades each reading by the time span it covers
+(`app/integrations/apple_health/parser.py:494-502`). An instant sample is graded
+`EXACT_SAMPLE`, the best grade. Anything spanning over a minute is graded
+`COARSE_INTERVAL` and excluded from every reliable aggregate. So raw samples are both
+the highest quality option and the one needing no new code, because they flow through
+the same observation pipeline the TCX import already uses.
 
-*This recommendation is technical and was not explicitly confirmed. Flag for review.*
+An earlier draft proposed bucketing to 30 seconds. Rejected: it is strictly worse
+data, it needs bucketing logic that would have to be written and tested, and it buys
+only a size reduction that is better handled by batching.
+
+**Nobody has measured what the watch actually produces.** Apple Watch is generally
+understood to sample every few seconds during a workout, but that varies by device,
+by workout type and by power mode, and it has not been checked for this athlete. The
+first implementation task should log the real sample count per workout before any
+sizing decision is treated as settled.
+
+**Size, and the batching change it forces.** The sync endpoint currently caps a
+request at 50 workouts (`app/schemas/mobile_sync.py:80`). That cap was written for
+payloads of seven scalar fields. With raw heart rate attached, fifty workouts could
+carry tens of thousands of samples in one request.
+
+**Decided:** cap the request by total heart rate samples rather than by workout
+count, and have the phone fill each batch up to that cap. A workout whose own sample
+count exceeds the cap is sent alone. Normal daily syncing carries one to three
+workouts and never approaches it; the case this protects is the first sync after
+pairing, which may carry a year of history.
 
 ### 3.7 History and backfill
 
@@ -574,6 +618,38 @@ which is a small, readable, arguable set of numbers. See open questions.
 
 ---
 
+### 4.10 The phase calculation
+
+**Decided**, counting backwards from the race date:
+
+| Weeks until the race | Phase |
+|---|---|
+| under 1 | `RACE_WEEK` |
+| 1 to 3 | `TAPER` |
+| 3 to 7 | `PEAK` |
+| 7 to 19 | `BUILD` |
+| 19 or more | `BASE` |
+| no race date | `GENERAL` |
+
+At 45 weeks out the current athlete is in `BASE`, which matches expectation.
+
+**Why counting backwards works for any runway.** An athlete 10 weeks from a 10k lands
+in `BUILD`, and one 3 weeks out lands in `TAPER`. The scheme degrades sensibly
+whether the runway is 3 weeks or 3 years, without special cases.
+
+**`GENERAL` is a real phase, not an error.** An athlete with no event gets steady
+progressive training with no peak and no taper. The fixed instruction must define it
+alongside the others.
+
+**These numbers are an opinion and they are not a coached one.** They are the common
+structure for endurance events. They live in configuration, in one place, and they
+are expected to be wrong for some athletes. A 45 week runway would normally have base
+split in two with a smaller race in the middle, and taper length properly varies with
+event distance. Per-goal-template boundaries are the natural extension when that
+matters; one default set is enough now.
+
+---
+
 ## 5. Fitness and progress
 
 ### 5.1 The word "baseline" is doing two jobs
@@ -631,6 +707,12 @@ of history a coach wants and the system currently cannot record at all.
 **Undeclared gaps are not excluded.** A period is only skipped when the athlete gives
 a reason. Silence means the gap counts, which is the conservative direction: it
 lowers the estimate rather than flattering it.
+
+**The trigger is the athlete volunteering, not the bot asking.** See 7.5. The bot
+does not chase missed training in this iteration, so the only way a period gets
+excluded is the athlete saying so. That keeps the mechanism but removes the
+conversation, and it means the machinery can be deferred: nothing else in the design
+depends on it existing.
 
 ### 5.3 Measuring progress
 
@@ -751,9 +833,23 @@ An earlier draft said a missed session is simply gone and the week does not
 compensate. That was rejected, correctly. It treats missing as normal and does
 nothing with the information.
 
-**Decided:** a significant miss means the plan no longer matches reality. The right
-response is to find out why, and rebuild from where the athlete actually is, rather
-than patching a hole.
+**Decided for this iteration: the bot does not ask.** No chasing, no threshold, no
+"why did you miss Tuesday" conversation. Missed training is simply visible in the
+numbers, and the athlete may volunteer a reason whenever they want.
+
+Rationale: the value of asking is entirely in the answer, and an unanswered question
+is worse than no question, because it trains the athlete to ignore the bot. Better to
+learn how often training is actually missed before deciding to chase it.
+
+**What still holds.** A significant miss does mean the plan no longer matches
+reality, and the response is to rebuild from where the athlete actually is rather
+than patch a hole. That happens naturally: current fitness is recomputed from real
+workouts, and the model sees last week's plan, its stated intent, and what was
+actually done. It reasons about the gap without anyone being interrogated.
+
+**What is deferred, and stays designed for when it is wanted:** the ask-why
+conversation, the excluded-period machinery in 5.2, and the reason-to-response
+mapping below. None of the rest of the design depends on them.
 
 **The reason is load-bearing, not politeness.** Current fitness is recomputed from
 workouts in a rolling window, so a lost week drops it by roughly a quarter of a 30
@@ -761,8 +857,9 @@ day window. Real detraining over one week off is far smaller. Without a reason, 
 naive recompute punishes illness: the athlete looks unfit, gets an easy week, does
 less, and looks less fit again. The plan walks downhill and nobody notices.
 
-The reason decides whether the gap is excluded from the fitness window (section 5.2)
-and what happens to the plan:
+When a reason is volunteered, it decides whether the gap is excluded from the fitness
+window (section 5.2) and what happens to the plan. *Deferred, not built in this
+iteration:*
 
 | Reason | Response |
 |---|---|
@@ -774,18 +871,15 @@ and what happens to the plan:
 Mechanically, "do not mark down" means the period is recorded as excluded and the
 fitness window extends past it, per 5.2. Nothing is held, overridden, or frozen.
 
-### 7.6 How the two thresholds relate
+### 7.6 Only one threshold is live
 
-Sections 7.4 and 7.5 both fire on training not happening. They are **one escalating
-mechanism, not two independent ones.**
+An earlier draft had two: a 15 percent drift proposal and a 60 percent
+ask-why-and-replan. With 7.5 deferring the asking, **only the 15 percent drift
+proposal exists.** There is no second threshold and no escalation to manage.
 
-| Situation | Response |
-|---|---|
-| Projected week more than 15% off plan | propose an adjustment to the rest of the week |
-| Too little done for the week to be salvageable, suggested at under 60% of planned hours by midweek | do not propose an adjustment. Ask why, and offer to replan from current fitness |
-
-The second supersedes the first. At 40 percent off, the athlete gets the ask-why
-conversation, not a tinkering proposal followed by a second message.
+If chasing is added later, the two become one escalating mechanism rather than two
+independent ones: propose an adjustment above 15 percent, and once too little is left
+to salvage, stop proposing and ask instead.
 
 ### 7.7 Pain: what it may and may not do on its own
 
@@ -925,22 +1019,17 @@ into.
 
 ## 9. Open questions
 
-1. **Where the phase boundaries sit.** Proposed, counting back from race day: race
-   week is the last week, taper the two before it, peak the four before that, build
-   the twelve before that, base everything earlier. At 45 weeks out that puts the
-   current athlete deep in base. This is the common structure, not a coached opinion,
-   and a 45 week runway is long enough that a coach would likely split base in two
-   and place a smaller race mid-season. Not confirmed.
-2. **Whether 30 second heart rate readings are the right granularity** (section 3.6).
-   Recommended on mechanical grounds. Not confirmed.
-3. **What counts as a significant miss** (section 7.5). A starting suggestion is less
-   than 60 percent of planned hours completed by midweek, measured on proportion of
-   time rather than session count. Not confirmed.
+**None blocking.** All three remaining questions were settled on 2026-08-28.
 
-Settled during the session and no longer open: the volume decision (4.6), the
-missed-training model (7.5), the 15 percent drift threshold and quiet-by-default
-(7.4), the interface (section 8), and how the schema reaches the model (4.3,
-settled by the experiment in section 11).
+| Question | Resolution |
+|---|---|
+| Where the phase boundaries sit | Delegated. Defaults recorded in 4.10, explicitly labelled an uncoached opinion, kept in configuration in one place |
+| Heart rate granularity | Send raw samples unmodified (3.6). The 30 second bucketing proposal is rejected as strictly worse data |
+| What counts as a significant miss | Moot. The bot does not chase missed training in this iteration (7.5) |
+
+**Known unknown, not a blocker.** Nobody has measured what the watch actually
+produces for heart rate. The first implementation task logs real sample counts before
+any sizing decision is treated as settled (3.6).
 
 ---
 
