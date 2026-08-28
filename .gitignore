@@ -16,3 +16,4 @@ ios/CoachHealthSync/Config/Developer.xcconfig
 backend/scripts/.verify_server.log
 .DS_Store
 xcuserdata/
+build/
