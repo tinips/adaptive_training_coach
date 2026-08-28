@@ -101,6 +101,8 @@ def build_evidence_snapshot(
         "baselines": [
             {
                 "discipline": item.discipline.value,
+                "analysis_started_at": item.analysis_started_at.isoformat(),
+                "analysis_ended_at": item.analysis_ended_at.isoformat(),
                 "calculated_at": item.calculated_at.isoformat(),
                 "session_count": item.session_count,
                 "active_day_count": item.active_day_count,

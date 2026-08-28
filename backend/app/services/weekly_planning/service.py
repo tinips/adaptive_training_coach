@@ -271,6 +271,8 @@ class WeeklyPlanningService:
                 disciplines=disciplines,
                 calculated_at=now,
                 owner_locked=True,
+                window_started_at=window_started_at,
+                window_ended_at=now,
             )
             repository = FitnessRepository(session)
             baseline_rows: list[AthleteBaselineAssessment] = []

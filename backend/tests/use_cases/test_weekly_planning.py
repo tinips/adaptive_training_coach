@@ -326,9 +326,8 @@ async def test_planner_accepts_sessions_from_the_full_30_day_window(
         == (NOW - timedelta(days=30)).isoformat()
     )
     assert baseline is not None
-    assert baseline.analysis_ended_at - baseline.analysis_started_at == timedelta(
-        days=14
-    )
+    assert baseline.analysis_started_at.replace(tzinfo=UTC) == NOW - timedelta(days=30)
+    assert baseline.analysis_ended_at.replace(tzinfo=UTC) == NOW
 
 
 @pytest.mark.asyncio
@@ -416,3 +415,40 @@ async def test_an_outage_is_logged_as_a_provider_error(
     assert result.kind == "unavailable"
     assert "weekly_plan_provider_error" in caplog.text
     assert "weekly_plan_response_invalid" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_the_frozen_baseline_uses_the_window_the_gate_evaluated(
+    database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Three runs spread across the 30 day window must all reach the baseline.
+
+    Under the old 14-days-before-the-latest-workout window only the most
+    recent run fell inside, so a permanent number was frozen from one session
+    after a check that had seen three.
+    """
+
+    _, factory = database
+    monkeypatch.setattr("app.services.weekly_planning.service.utc_now", lambda: NOW)
+    async with factory.begin() as session:
+        athlete_id = await _seed_target_goal(session)
+        for days_ago in (28, 20, 2):
+            await _add_running(
+                session,
+                athlete_id=athlete_id,
+                started_at=NOW - timedelta(days=days_ago),
+            )
+
+    result = await _service(factory).generate_next_week(_identity())
+
+    assert result.kind == "created"
+    async with factory() as session:
+        baseline = await session.scalar(
+            select(AthleteBaselineAssessment).where(
+                AthleteBaselineAssessment.athlete_id == athlete_id
+            )
+        )
+    assert baseline is not None
+    assert baseline.session_count == 3
+    assert baseline.analysis_started_at is not None

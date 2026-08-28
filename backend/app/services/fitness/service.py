@@ -106,12 +106,15 @@ class BaselineAssessmentService:
         disciplines: tuple[Discipline, ...],
         calculated_at: datetime | None = None,
         owner_locked: bool = False,
+        window_started_at: datetime | None = None,
+        window_ended_at: datetime | None = None,
     ) -> tuple[Discipline, ...]:
         """Create baselines for an explicit, already-resolved discipline scope.
 
-        The planner uses this narrower entry point so a supporting context can
-        never cause a baseline to be created merely because a weekly plan was
-        requested for the primary goal.
+        The planner passes the window it just evaluated, so the frozen baseline
+        reflects the evidence that authorised it rather than a narrower slice.
+        Callers that omit the window keep the latest-workout anchoring, which
+        preserves imported historical evidence for the file-import path.
         """
 
         now = _as_utc(calculated_at or utc_now())
@@ -136,30 +139,33 @@ class BaselineAssessmentService:
             ):
                 continue
 
-            latest_started_at = await repository.latest_workout_started_at(
-                athlete_id=athlete_id,
-                discipline=discipline,
-            )
-            if latest_started_at is None:
-                continue
-
-            window_ended_at = _as_utc(latest_started_at)
-            window_started_at = window_ended_at - timedelta(
-                days=self._settings.fitness_window_days
-            )
+            if window_started_at is not None and window_ended_at is not None:
+                discipline_started_at = _as_utc(window_started_at)
+                discipline_ended_at = _as_utc(window_ended_at)
+            else:
+                latest_started_at = await repository.latest_workout_started_at(
+                    athlete_id=athlete_id,
+                    discipline=discipline,
+                )
+                if latest_started_at is None:
+                    continue
+                discipline_ended_at = _as_utc(latest_started_at)
+                discipline_started_at = discipline_ended_at - timedelta(
+                    days=self._settings.fitness_window_days
+                )
             workouts = await repository.workouts_for_window(
                 athlete_id=athlete_id,
                 disciplines=(discipline,),
-                started_at=window_started_at,
-                ended_at=window_ended_at,
+                started_at=discipline_started_at,
+                ended_at=discipline_ended_at,
             )
             calculation = calculate_baseline_window(
                 discipline=discipline,
                 workouts=tuple(
                     _fitness_evidence_for_workout(item) for item in workouts
                 ),
-                window_started_at=window_started_at,
-                window_ended_at=window_ended_at,
+                window_started_at=discipline_started_at,
+                window_ended_at=discipline_ended_at,
                 calculated_at=now,
             )
             if calculation is None:
