@@ -245,7 +245,7 @@ def upgrade() -> None:
         )
     }
     for goal, context, role, priority in GOAL_CONTEXTS:
-        if goal != "HYROX":
+        if goal != "HYROX" or context not in context_rows:
             continue
         pair = (hyrox_goal_id, context_rows[context])
         if pair in existing_links:
@@ -262,20 +262,25 @@ def upgrade() -> None:
         )
         existing_links.add(pair)
 
-    option_rows: dict[tuple[str, str], uuid.UUID] = {
-        (row.target_context_id, row.code): row.id
-        for row in bind.execute(
-            sa.select(
-                options.c.target_context_id,
-                options.c.code,
-                options.c.id,
-            ).where(
-                options.c.target_context_id.in_(
-                    tuple(context_rows[code] for code in _HYROX_STATION_CONTEXT_CODES)
-                )
+    known_station_context_ids = tuple(
+        context_rows[code]
+        for code in _HYROX_STATION_CONTEXT_CODES
+        if code in context_rows
+    )
+    option_rows: dict[tuple[str, str], uuid.UUID] = (
+        {
+            (row.target_context_id, row.code): row.id
+            for row in bind.execute(
+                sa.select(
+                    options.c.target_context_id,
+                    options.c.code,
+                    options.c.id,
+                ).where(options.c.target_context_id.in_(known_station_context_ids))
             )
-        )
-    }
+        }
+        if known_station_context_ids
+        else {}
+    )
     for (
         target,
         code,
@@ -285,7 +290,11 @@ def upgrade() -> None:
         priority,
         limitations,
     ) in EXECUTION_OPTIONS:
-        if target not in _HYROX_STATION_CONTEXT_CODES:
+        if (
+            target not in _HYROX_STATION_CONTEXT_CODES
+            or target not in context_rows
+            or execution not in context_rows
+        ):
             continue
         key = (context_rows[target], code)
         option_id = option_rows.get(key, catalog_id("option", f"{target}:{code}"))
@@ -306,17 +315,27 @@ def upgrade() -> None:
             )
         option_rows[key] = option_id
 
-    existing_requirements = {
-        (row.execution_option_id, row.capability_id)
-        for row in bind.execute(
-            sa.select(
-                requirements.c.execution_option_id,
-                requirements.c.capability_id,
-            ).where(requirements.c.execution_option_id.in_(tuple(option_rows.values())))
-        )
-    }
+    known_option_ids = tuple(option_rows.values())
+    existing_requirements = (
+        {
+            (row.execution_option_id, row.capability_id)
+            for row in bind.execute(
+                sa.select(
+                    requirements.c.execution_option_id,
+                    requirements.c.capability_id,
+                ).where(requirements.c.execution_option_id.in_(known_option_ids))
+            )
+        }
+        if known_option_ids
+        else set()
+    )
     for target, option, capability, importance in OPTION_CAPABILITIES:
-        if target not in _HYROX_STATION_CONTEXT_CODES:
+        if (
+            target not in _HYROX_STATION_CONTEXT_CODES
+            or target not in context_rows
+            or (context_rows[target], option) not in option_rows
+            or capability not in capability_rows
+        ):
             continue
         option_id = option_rows[(context_rows[target], option)]
         pair = (option_id, capability_rows[capability])
