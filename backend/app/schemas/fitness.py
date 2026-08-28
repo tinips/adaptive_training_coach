@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -58,6 +58,7 @@ class BaselineCalculation(_FitnessSchema):
     calculated_at: datetime
     session_count: int = Field(gt=0)
     active_day_count: int = Field(gt=0)
+    active_dates: tuple[date, ...] = ()
     total_duration_seconds: int = Field(gt=0)
     known_distance_meters: float | None = Field(default=None, ge=0)
     distance_session_count: int = Field(ge=0)

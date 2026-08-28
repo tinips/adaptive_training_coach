@@ -7,7 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.domain.enums import Discipline
+from app.domain.enums import Discipline, DisciplineEvidenceState
 
 
 class _WeeklyPlanSchema(BaseModel):
@@ -61,23 +61,27 @@ class WeeklyPlan(_WeeklyPlanSchema):
 
 
 class PlanReadinessDiscipline(_WeeklyPlanSchema):
-    """Recent evidence used to decide whether a discipline may be planned."""
+    """Recent evidence held for one target discipline."""
 
     discipline: Discipline
     session_count: int = Field(ge=0)
     active_day_count: int = Field(ge=0)
-    ready: bool
+    state: DisciplineEvidenceState
     quality_flags: tuple[str, ...] = ()
 
 
 class PlanReadiness(_WeeklyPlanSchema):
-    """The deterministic preflight outcome, before any provider call."""
+    """The deterministic preflight outcome, before any provider call.
+
+    ``ready`` is judged on the athlete as a whole rather than per discipline,
+    so a sport with little history is planned gently instead of blocking the
+    sports that are ready.
+    """
 
     week_start: date
     analysis_started_at: datetime
     analysis_ended_at: datetime
     disciplines: tuple[PlanReadinessDiscipline, ...]
-
-    @property
-    def ready(self) -> bool:
-        return bool(self.disciplines) and all(item.ready for item in self.disciplines)
+    total_session_count: int = Field(ge=0)
+    total_active_day_count: int = Field(ge=0)
+    ready: bool

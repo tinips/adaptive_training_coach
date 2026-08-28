@@ -32,6 +32,7 @@ from app.domain.enums import (
     CatalogItemSource,
     CatalogItemStatus,
     Discipline,
+    DisciplineEvidenceState,
     GoalContextRole,
     GoalTemplateKind,
     RunningType,
@@ -220,11 +221,11 @@ async def test_preflight_blocks_insufficient_recent_target_evidence(
     assert result.kind == "insufficient"
     assert result.readiness is not None
     row = result.readiness.disciplines[0]
-    assert (row.discipline, row.session_count, row.active_day_count, row.ready) == (
+    assert (row.discipline, row.session_count, row.active_day_count, row.state) == (
         Discipline.RUNNING,
         2,
         2,
-        False,
+        DisciplineEvidenceState.THIN,
     )
     async with factory() as session:
         assert (await session.scalars(select(WeeklyTrainingPlan))).all() == []

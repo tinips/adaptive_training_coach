@@ -107,7 +107,8 @@ def calculate_baseline_window(
         excluded=excluded,
     )
     session_count = len(included)
-    active_day_count = len({_as_utc(item.started_at).date() for item in included})
+    active_dates = tuple(sorted({_as_utc(item.started_at).date() for item in included}))
+    active_day_count = len(active_dates)
     distance_session_count = len(distance_workouts)
     return BaselineCalculation(
         discipline=discipline,
@@ -116,6 +117,7 @@ def calculate_baseline_window(
         calculated_at=calculated_at,
         session_count=session_count,
         active_day_count=active_day_count,
+        active_dates=active_dates,
         total_duration_seconds=sum(item.duration_seconds for item in included),
         known_distance_meters=(
             sum(item.distance_meters or 0 for item in distance_workouts)

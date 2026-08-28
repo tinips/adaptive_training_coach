@@ -56,6 +56,14 @@ class HeartRateTemporalQuality(StrEnum):
     UNKNOWN = "UNKNOWN"
 
 
+class DisciplineEvidenceState(StrEnum):
+    """How much recent evidence the planner holds for one target discipline."""
+
+    WELL_EVIDENCED = "WELL_EVIDENCED"
+    THIN = "THIN"
+    NONE = "NONE"
+
+
 class TrainingFileFormat(StrEnum):
     APPLE_HEALTH_ZIP = "APPLE_HEALTH_ZIP"
     TCX = "TCX"
