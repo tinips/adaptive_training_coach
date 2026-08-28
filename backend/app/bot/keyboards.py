@@ -38,12 +38,12 @@ LABELS = {
     "understand_continue": "I understand — continue",
     "build_profile": "Let's build my profile",
     "continue": "Continue",
-    "goal_no_date": "Not yet",
-    "goal_prepare_race": "Prepare for a race",
-    "goal_distance": "Reach a specific distance",
-    "goal_pace": "Improve my pace",
-    "goal_consistency": "Run consistently",
-    "goal_something_else": "Something else",
+    "goal_sport_running": "Running",
+    "goal_sport_cycling": "Cycling",
+    "goal_sport_swimming": "Swimming",
+    "goal_sport_triathlon": "Triathlon",
+    "goal_back": "Back",
+    "support_none": "No supporting goal",
     "health_none": "None",
     "gender_male": "Male",
     "gender_female": "Female",
@@ -108,17 +108,47 @@ def setup_introduction_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def goal_input_keyboard() -> InlineKeyboardMarkup:
-    return _rows([[(LABELS["cancel"], "ob:v1:cancel")]])
+def goal_sport_keyboard(sports: Sequence[str]) -> InlineKeyboardMarkup:
+    """First level: which sport is the goal in.
+
+    Takes plain sport values rather than a service-layer enum, so this module
+    keeps importing nothing but telegram and app.bot.rendering.
+    """
+
+    label_by_sport = {
+        "RUNNING": LABELS["goal_sport_running"],
+        "CYCLING": LABELS["goal_sport_cycling"],
+        "SWIMMING": LABELS["goal_sport_swimming"],
+        "TRIATHLON": LABELS["goal_sport_triathlon"],
+    }
+    rows = [[(label_by_sport[sport], f"ob:v1:goal:sport:{sport}")] for sport in sports]
+    rows.append([(LABELS["cancel"], "ob:v1:cancel")])
+    return _rows(rows)
 
 
-def goal_confirmation_keyboard() -> InlineKeyboardMarkup:
-    return _rows(
-        [
-            [(LABELS["continue"], "ob:v1:goal:confirm")],
-            [(LABELS["cancel"], "ob:v1:cancel")],
-        ]
-    )
+def goal_template_keyboard(
+    options: Sequence[tuple[str, str]],
+) -> InlineKeyboardMarkup:
+    """Second level: which goal within that sport. Takes (code, name) pairs."""
+
+    rows = [
+        [(display_name, f"ob:v1:goal:template:{code}")]
+        for code, display_name in options
+    ]
+    rows.append([(LABELS["goal_back"], "ob:v1:goal:back")])
+    rows.append([(LABELS["cancel"], "ob:v1:cancel")])
+    return _rows(rows)
+
+
+def supporting_goal_keyboard(
+    options: Sequence[tuple[str, str]],
+) -> InlineKeyboardMarkup:
+    """Optional supporting goal, offered to every athlete."""
+
+    rows = [[(name, f"ob:v1:support:{code}")] for code, name in options]
+    rows.append([(LABELS["support_none"], "ob:v1:support:none")])
+    rows.append([(LABELS["cancel"], "ob:v1:cancel")])
+    return _rows(rows)
 
 
 def goal_saved_keyboard() -> InlineKeyboardMarkup:
@@ -235,10 +265,8 @@ def profile_settings_keyboard() -> InlineKeyboardMarkup:
 def profile_goal_keyboard() -> InlineKeyboardMarkup:
     return _rows(
         [
-            [("Main goal", "ps:v1:goal:main")],
             [("Target outcome", "ps:v1:goal:outcome")],
             [("Event date", "ps:v1:goal:date")],
-            [("Secondary priority", "ps:v1:goal:secondary")],
             [("Back", "ps:v1:goal:back")],
         ]
     )
@@ -248,26 +276,8 @@ def profile_goal_text_keyboard() -> InlineKeyboardMarkup:
     return _rows([[("Back", "ps:v1:goal:back")]])
 
 
-def profile_goal_classification_keyboard() -> InlineKeyboardMarkup:
-    return _rows(
-        [
-            [("Confirm", "ps:v1:goal:classification:confirm")],
-            [("Cancel", "ps:v1:goal:classification:cancel")],
-        ]
-    )
-
-
 def profile_goal_date_keyboard() -> InlineKeyboardMarkup:
     return _rows([[("Not yet", "ps:v1:goal:no-date")], [("Back", "ps:v1:goal:back")]])
-
-
-def profile_goal_secondary_keyboard() -> InlineKeyboardMarkup:
-    return _rows(
-        [
-            [("None", "ps:v1:goal:no-secondary")],
-            [("Back", "ps:v1:goal:back")],
-        ]
-    )
 
 
 def profile_health_keyboard() -> InlineKeyboardMarkup:
@@ -329,43 +339,6 @@ def training_history_import_keyboard() -> InlineKeyboardMarkup:
     return _rows(
         [
             [("Skip for now", "ob:v1:history:skip")],
-            [(LABELS["cancel"], "ob:v1:cancel")],
-        ]
-    )
-
-
-def goal_date_clarification_keyboard() -> InlineKeyboardMarkup:
-    return _rows(
-        [
-            [(LABELS["goal_no_date"], "ob:v1:goal:choice:NOT_YET")],
-            [(LABELS["cancel"], "ob:v1:cancel")],
-        ]
-    )
-
-
-def goal_main_clarification_keyboard() -> InlineKeyboardMarkup:
-    return _rows(
-        [
-            [(LABELS["goal_prepare_race"], "ob:v1:goal:choice:PREPARE_RACE")],
-            [
-                (
-                    LABELS["goal_distance"],
-                    "ob:v1:goal:choice:SPECIFIC_DISTANCE",
-                )
-            ],
-            [(LABELS["goal_pace"], "ob:v1:goal:choice:IMPROVE_PACE")],
-            [
-                (
-                    LABELS["goal_consistency"],
-                    "ob:v1:goal:choice:RUN_CONSISTENTLY",
-                )
-            ],
-            [
-                (
-                    LABELS["goal_something_else"],
-                    "ob:v1:goal:choice:SOMETHING_ELSE",
-                )
-            ],
             [(LABELS["cancel"], "ob:v1:cancel")],
         ]
     )

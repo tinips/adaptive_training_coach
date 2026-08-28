@@ -16,15 +16,8 @@ from app.schemas.capabilities import CapabilityReview, GoalExecutionAssessment
 
 OnboardingResultKind = Literal[
     "step",
-    "fallback",
-    "provider_error",
-    "rate_limited",
     "setup_introduction",
     "goal_intake",
-    "goal_clarification",
-    "goal_confirmation",
-    "goal_off_topic",
-    "onboarding_modification",
     "goal_confirmed",
     "profile_birth_year_intake",
     "profile_gender_intake",
@@ -61,3 +54,11 @@ class OnboardingServiceResult(BaseModel):
     training_history_skipped: bool = False
     capability_review: CapabilityReview | None = None
     execution_assessment: GoalExecutionAssessment | None = None
+
+
+class UpdatedOnboardingData(BaseModel):
+    """Sanitized fields written by one ownership-scoped onboarding update."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    updated_fields: dict[str, JsonValue]

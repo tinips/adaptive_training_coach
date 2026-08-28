@@ -29,11 +29,11 @@ WELCOME_NEW = WELCOME
 SETUP_INTRODUCTION = (
     "Before we begin, I will collect the details needed for your athlete profile."
 )
-GOAL_INTAKE = (
-    "What are you currently training for, and what would success look like?\n\n"
-    "For example: 'I am preparing for an Ironman 70.3. I want to finish in a "
-    "decent time while maintaining muscle.'\n\n"
-    "Include an event date if you know it."
+GOAL_INTAKE = "Which sport is your goal in?"
+GOAL_TEMPLATE_PROMPT = "Which goal best matches what you're training for?"
+GOAL_SUPPORT_PROMPT = (
+    "Would you like to add a supporting goal, such as maintaining strength? "
+    "You can skip this."
 )
 COACH_HELP = (
     "How can Adaptive Endurance Coach help me?\n\n"
@@ -54,18 +54,6 @@ PRIVACY_SAFETY = (
     "deletion of your stored data."
 )
 WELCOME_BACK = "Welcome back. I found your saved progress."
-PARSE_RATE_LIMITED = (
-    "You have reached the hourly free-text interpretation limit. You can still use "
-    "all predefined buttons, or try free text again later."
-)
-PARSE_PROVIDER_ERROR = (
-    "I could not interpret that answer right now. No value was saved. You can try "
-    "again or return to the predefined options."
-)
-PARSE_FALLBACK = (
-    "I could not safely structure that answer. No value was saved. Please write it "
-    "again more specifically or return to the predefined options."
-)
 CANCEL_CONFIRM = (
     "Cancel the current onboarding? Your staged answers will remain unavailable "
     "until you restart onboarding."
@@ -190,11 +178,6 @@ EQUIPMENT_UNMATCHED = (
     "I do not have a tailored equipment catalog for that goal yet, so equipment "
     "will not block your onboarding."
 )
-GOAL_CLASSIFICATION_REQUIRED = (
-    "Before Equipment & access, I need to classify your existing goal with the "
-    "new training catalog. Send any message to continue; your saved goal and "
-    "availability will be preserved."
-)
 
 
 def equipment_review(review: CapabilityReview) -> str:
@@ -293,15 +276,8 @@ PROFILE_SETTINGS_MENU = "Choose a profile setting to change."
 PROFILE_SETTINGS_CLOSED = "Done. Your profile settings are closed."
 PROFILE_SETTINGS_UNPROMPTED = "Use Change profile to choose what you want to update."
 PROFILE_GOAL_MENU = "Choose the training goal field to change."
-PROFILE_GOAL_MAIN = "What is your training goal?"
 PROFILE_GOAL_OUTCOME = "What would success or the outcome look like?"
 PROFILE_GOAL_DATE = "When is the event? Send YYYY-MM-DD, or choose Not yet."
-PROFILE_GOAL_SECONDARY = (
-    "What secondary priority should this goal preserve, or choose None?"
-)
-PROFILE_GOAL_CLASSIFICATION_FAILED = (
-    "I could not safely expand that goal type. Nothing was changed. You can retry."
-)
 PROFILE_AVAILABILITY = "Describe your weekly training availability."
 PROFILE_HEALTH = "Write any training limitations, or choose None."
 PROFILE_PERSONAL = "Choose the personal detail to change."
@@ -310,105 +286,11 @@ PROFILE_WEIGHT = "Send your weight in kilograms."
 PROFILE_HEIGHT = "Send your height in centimeters."
 PROFILE_CATEGORY = "Choose your category."
 PROFILE_SAVED = "Saved: {field}."
-GOAL_OFF_TOPIC = (
-    "We can come back to equipment later. Right now, I\u2019m building your athlete "
-    "profile.\n\n"
-    "What are you currently training for, and what would success look like to you?"
-)
 GOAL_CATALOG_EXPANSION_PROGRESS = (
     "Processing your goal...\n\n"
     "I\u2019m preparing the training contexts and equipment/access requirements. "
     "This may take a moment."
 )
-
-
-def goal_clarification(answers: Mapping[str, Any]) -> str:
-    field = answers.get("_goal_clarification_field")
-    hint = answers.get("_goal_clarification_hint")
-    if field == "main_goal":
-        if hint == "race":
-            return "Which race or challenge are you preparing for?"
-        if hint == "distance":
-            return "What distance would you most like to reach?"
-        if hint == "pace":
-            return "Which distance or pace would you most like to improve?"
-        if hint == "other":
-            return "Tell me what you would most like to achieve with your training."
-        return (
-            "I\u2019d like to make that goal a little more specific so I can "
-            "understand "
-            "what you are working towards.\n\n"
-            "What would you most like to achieve with running?"
-        )
-    if field == "target_outcome":
-        return (
-            "What would success look like for this goal?\n\n"
-            "For example, completing it safely, finishing without stopping, or "
-            "reaching a specific time or pace."
-        )
-    if field == "event_date":
-        return "When is the event? Send YYYY-MM-DD, or choose Not yet."
-    return "Could you make your goal a little more specific?"
-
-
-def goal_confirmation(answers: Mapping[str, Any]) -> str:
-    raw_draft = answers.get("goal_draft")
-    draft = raw_draft if isinstance(raw_draft, Mapping) else {}
-    main_goal = escape(str(draft.get("main_goal") or "Not specified"))
-    target_outcome = escape(str(draft.get("target_outcome") or "Not specified"))
-    secondary = escape(str(draft.get("secondary_priority") or "Not specified"))
-    raw_date = draft.get("event_date")
-    raw_primary = draft.get("primary_template")
-    raw_supporting = draft.get("supporting_template")
-    primary = (
-        escape(str(raw_primary.get("display_name") or raw_primary.get("code")))
-        if isinstance(raw_primary, Mapping)
-        else "Not classified"
-    )
-    supporting = (
-        escape(str(raw_supporting.get("display_name") or raw_supporting.get("code")))
-        if isinstance(raw_supporting, Mapping)
-        and raw_supporting.get("decision") not in {"NONE", "UNSUPPORTED"}
-        else "Not classified"
-    )
-    event_date = "Not set"
-    if isinstance(raw_date, str):
-        try:
-            event_date = date.fromisoformat(raw_date).strftime("%B %d, %Y")
-        except ValueError:
-            event_date = "Not set"
-    return (
-        "Here\u2019s what I understood:\n\n"
-        f"Main goal\n{main_goal}\n\n"
-        f"Understood as\n{primary}\n\n"
-        f"Event date\n{event_date}\n\n"
-        f"Target outcome\n{target_outcome}\n\n"
-        f"Secondary priority\n{secondary}\n\n"
-        f"Supporting type\n{supporting}\n\n"
-        "To change anything just write."
-    )
-
-
-def profile_goal_classification_confirmation(
-    pending: Mapping[str, Any],
-) -> str:
-    raw_candidate = pending.get("classification_candidate")
-    candidate = raw_candidate if isinstance(raw_candidate, Mapping) else {}
-    proposed = escape(str(pending.get("proposed_text") or "Not specified"))
-    canonical = escape(
-        str(candidate.get("display_name") or candidate.get("code") or "Not classified")
-    )
-    field = (
-        "Main goal"
-        if pending.get("classification_field") == "primary"
-        else "Secondary priority"
-    )
-    return (
-        f"Confirm the new {field.casefold()}:\n\n"
-        f"Your wording\n{proposed}\n\n"
-        f"Understood as\n{canonical}\n\n"
-        "If this is a new type, confirming may expand the shared training catalog."
-    )
 
 
 VALIDATION_ERRORS: dict[str, str] = {

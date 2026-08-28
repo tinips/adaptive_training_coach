@@ -38,6 +38,10 @@ from app.services.weekly_planning.service import (
 )
 
 TelegramEventType = Literal["text", "callback"]
+# Mirrors OnboardingService's internal `_GOAL_SPORT_KEY`. Kept as a literal here
+# (as "_goal_clarification_field" was) so this module reads plain answer data
+# rather than importing a service-layer enum.
+_GOAL_SPORT_ANSWER_KEY = "goal_sport"
 
 
 class TrainingImportBotPort(Protocol):
@@ -418,12 +422,23 @@ class CoachBotApplicationService:
         if callback_data == "ob:v1:profile":
             result = await self._onboarding.start_profile(identity)
             return await self._render_onboarding(identity, result)
-        if callback_data == "ob:v1:goal:confirm":
-            result = await self._onboarding.confirm_goal(identity)
+        if callback_data.startswith("ob:v1:goal:sport:"):
+            result = await self._onboarding.choose_goal_sport(
+                identity, callback_data.removeprefix("ob:v1:goal:sport:")
+            )
             return await self._render_onboarding(identity, result)
-        if callback_data.startswith("ob:v1:goal:choice:"):
-            result = await self._onboarding.choose_goal_clarification(
-                identity, callback_data.removeprefix("ob:v1:goal:choice:")
+        if callback_data == "ob:v1:goal:back":
+            result = await self._onboarding.reopen_goal_sports(identity)
+            return await self._render_onboarding(identity, result)
+        if callback_data.startswith("ob:v1:goal:template:"):
+            result = await self._onboarding.choose_goal_template(
+                identity, callback_data.removeprefix("ob:v1:goal:template:")
+            )
+            return await self._render_onboarding(identity, result)
+        if callback_data.startswith("ob:v1:support:"):
+            raw = callback_data.removeprefix("ob:v1:support:")
+            result = await self._onboarding.choose_supporting_goal(
+                identity, None if raw == "none" else raw
             )
             return await self._render_onboarding(identity, result)
         if callback_data.startswith("ob:v1:profile:gender:"):
@@ -536,14 +551,6 @@ class CoachBotApplicationService:
 
     @staticmethod
     def _render_profile_settings(result: ProfileSettingsResult) -> TelegramResponse:
-        if result.step.value == "GOAL_CLASSIFICATION_CONFIRM":
-            text = messages.profile_goal_classification_confirmation(result.pending)
-            if result.saved_field == "__classification_failed__":
-                text = f"{messages.PROFILE_GOAL_CLASSIFICATION_FAILED}\n\n{text}"
-            return TelegramResponse(
-                text,
-                keyboards.profile_goal_classification_keyboard(),
-            )
         if result.step.value == "EQUIPMENT" and result.capability_review is not None:
             review = result.capability_review
             text = messages.equipment_review(review)
@@ -574,10 +581,8 @@ class CoachBotApplicationService:
             )
         prompts = {
             "GOAL_MENU": messages.PROFILE_GOAL_MENU,
-            "GOAL_MAIN": messages.PROFILE_GOAL_MAIN,
             "GOAL_OUTCOME": messages.PROFILE_GOAL_OUTCOME,
             "GOAL_DATE": messages.PROFILE_GOAL_DATE,
-            "GOAL_SECONDARY": messages.PROFILE_GOAL_SECONDARY,
             "AVAILABILITY": messages.PROFILE_AVAILABILITY,
             "HEALTH": messages.PROFILE_HEALTH,
             "PERSONAL_MENU": messages.PROFILE_PERSONAL,
@@ -593,22 +598,18 @@ class CoachBotApplicationService:
                 keyboards.profile_goal_date_keyboard()
                 if result.step.value == "GOAL_DATE"
                 else (
-                    keyboards.profile_goal_secondary_keyboard()
-                    if result.step.value == "GOAL_SECONDARY"
+                    keyboards.profile_health_keyboard()
+                    if result.step.value == "HEALTH"
                     else (
-                        keyboards.profile_health_keyboard()
-                        if result.step.value == "HEALTH"
+                        keyboards.profile_personal_keyboard()
+                        if result.step.value == "PERSONAL_MENU"
                         else (
-                            keyboards.profile_personal_keyboard()
-                            if result.step.value == "PERSONAL_MENU"
+                            keyboards.profile_settings_gender_keyboard()
+                            if result.step.value == "PERSONAL_GENDER"
                             else (
-                                keyboards.profile_settings_gender_keyboard()
-                                if result.step.value == "PERSONAL_GENDER"
-                                else (
-                                    keyboards.profile_goal_text_keyboard()
-                                    if result.step.value.startswith("GOAL_")
-                                    else keyboards.profile_settings_text_keyboard()
-                                )
+                                keyboards.profile_goal_text_keyboard()
+                                if result.step.value.startswith("GOAL_")
+                                else keyboards.profile_settings_text_keyboard()
                             )
                         )
                     )
@@ -635,7 +636,6 @@ class CoachBotApplicationService:
                 messages.SETUP_INTRODUCTION,
                 keyboards.setup_introduction_keyboard(),
             ),
-            "goal_intake": (messages.GOAL_INTAKE, keyboards.goal_input_keyboard()),
             "profile_birth_year_intake": (
                 messages.PROFILE_BIRTH_YEAR_INTAKE,
                 keyboards.profile_text_input_keyboard(),
@@ -672,35 +672,23 @@ class CoachBotApplicationService:
             return TelegramResponse(
                 messages.PRIVACY_SAFETY, keyboards.consent_keyboard()
             )
-        if result.kind == "goal_clarification":
-            field = result.answers.get("_goal_clarification_field")
-            keyboard = (
-                keyboards.goal_date_clarification_keyboard()
-                if field == "event_date"
-                else (
-                    keyboards.goal_main_clarification_keyboard()
-                    if field == "main_goal"
-                    else keyboards.goal_input_keyboard()
+        if result.kind == "goal_intake":
+            sport = result.answers.get(_GOAL_SPORT_ANSWER_KEY)
+            if isinstance(sport, str) and sport:
+                templates = await self._onboarding.goal_template_options(sport)
+                return TelegramResponse(
+                    messages.GOAL_TEMPLATE_PROMPT,
+                    keyboards.goal_template_keyboard(templates),
                 )
-            )
+            sports = await self._onboarding.goal_sport_options()
             return TelegramResponse(
-                (
-                    f"{messages.validation_error(result.error_code)}\n\n"
-                    f"{messages.goal_clarification(result.answers)}"
-                    if result.error_code == "invalid_event_date"
-                    else messages.goal_clarification(result.answers)
-                ),
-                keyboard,
+                messages.GOAL_INTAKE, keyboards.goal_sport_keyboard(sports)
             )
-        if result.kind == "goal_confirmation":
+        if result.kind == "goal_confirmed":
+            supporting_options = await self._onboarding.supporting_goal_options()
             return TelegramResponse(
-                messages.goal_confirmation(result.answers),
-                keyboards.goal_confirmation_keyboard(),
-            )
-        if result.kind == "goal_off_topic":
-            return TelegramResponse(
-                messages.GOAL_OFF_TOPIC,
-                keyboards.goal_input_keyboard(),
+                messages.GOAL_SUPPORT_PROMPT,
+                keyboards.supporting_goal_keyboard(supporting_options),
             )
         if result.kind == "context_validation_error":
             retry_prompts = {
@@ -715,17 +703,11 @@ class CoachBotApplicationService:
             }
             prompt, keyboard = retry_prompts.get(
                 result.current_step,
-                (messages.GOAL_INTAKE, keyboards.goal_input_keyboard()),
+                (messages.AVAILABILITY_INTAKE, keyboards.profile_text_input_keyboard()),
             )
             return TelegramResponse(
                 f"{messages.CONTEXT_VALIDATION_ERROR}\n\n{prompt}", keyboard
             )
-        if result.kind == "equipment_recommendation":
-            if result.capability_review is None:
-                return TelegramResponse(
-                    messages.GOAL_CLASSIFICATION_REQUIRED,
-                    keyboards.goal_input_keyboard(),
-                )
         if result.kind in {"equipment_recommendation", "equipment_intake"}:
             if result.capability_review is None:
                 return TelegramResponse(
@@ -771,14 +753,4 @@ class CoachBotApplicationService:
                 messages.validation_error(result.error_code or "invalid_action"),
                 keyboards.profile_text_input_keyboard(),
             )
-        if result.kind == "provider_error":
-            return TelegramResponse(
-                messages.PARSE_PROVIDER_ERROR, keyboards.goal_input_keyboard()
-            )
-        if result.kind == "rate_limited":
-            return TelegramResponse(
-                messages.PARSE_RATE_LIMITED, keyboards.goal_input_keyboard()
-            )
-        return TelegramResponse(
-            messages.PARSE_FALLBACK, keyboards.goal_input_keyboard()
-        )
+        return TelegramResponse(messages.GENERIC_ERROR)

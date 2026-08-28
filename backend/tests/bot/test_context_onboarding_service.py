@@ -436,7 +436,8 @@ async def test_development_goal_equipment_reset_bypasses_global_agent() -> None:
     onboarding = SimpleNamespace(
         reset_development_goal_and_equipment=AsyncMock(
             return_value=_result("goal_intake", OnboardingStep.GOAL_INTAKE)
-        )
+        ),
+        goal_sport_options=AsyncMock(return_value=("RUNNING", "TRIATHLON")),
     )
     response = await _facade(onboarding).handle_agent_input(
         identity, HumanMessage(content="/dev_reset_goal_equipment")
@@ -444,7 +445,7 @@ async def test_development_goal_equipment_reset_bypasses_global_agent() -> None:
 
     onboarding.reset_development_goal_and_equipment.assert_awaited_once_with(identity)
     assert response.text == messages.GOAL_INTAKE
-    assert response.keyboard == keyboards.goal_input_keyboard()
+    assert response.keyboard == keyboards.goal_sport_keyboard(("RUNNING", "TRIATHLON"))
 
 
 @pytest.mark.asyncio
@@ -512,18 +513,56 @@ async def test_context_steps_render_the_correct_prompt_and_controls() -> None:
 
 
 @pytest.mark.asyncio
-async def test_goal_date_clarification_renders_date_choices() -> None:
-    response = await _facade(SimpleNamespace())._render_onboarding(
+async def test_goal_intake_renders_the_sport_menu_before_a_sport_is_chosen() -> None:
+    onboarding = SimpleNamespace(
+        goal_sport_options=AsyncMock(return_value=("RUNNING", "TRIATHLON")),
+    )
+    response = await _facade(onboarding)._render_onboarding(
+        _identity(),
+        _result("goal_intake", OnboardingStep.GOAL_INTAKE),
+    )
+
+    assert response.text == messages.GOAL_INTAKE
+    assert response.keyboard == keyboards.goal_sport_keyboard(("RUNNING", "TRIATHLON"))
+
+
+@pytest.mark.asyncio
+async def test_goal_intake_renders_the_template_menu_once_a_sport_is_chosen() -> None:
+    onboarding = SimpleNamespace(
+        goal_template_options=AsyncMock(return_value=(("MARATHON", "Marathon"),)),
+    )
+    response = await _facade(onboarding)._render_onboarding(
         _identity(),
         _result(
-            "goal_clarification",
+            "goal_intake",
             OnboardingStep.GOAL_INTAKE,
-            answers={"_goal_clarification_field": "event_date"},
+            answers={"goal_sport": "RUNNING"},
         ),
     )
 
-    assert response.text == "When is the event? Send YYYY-MM-DD, or choose Not yet."
-    assert response.keyboard == keyboards.goal_date_clarification_keyboard()
+    onboarding.goal_template_options.assert_awaited_once_with("RUNNING")
+    assert response.text == messages.GOAL_TEMPLATE_PROMPT
+    assert response.keyboard == keyboards.goal_template_keyboard(
+        (("MARATHON", "Marathon"),)
+    )
+
+
+@pytest.mark.asyncio
+async def test_goal_confirmed_renders_the_supporting_goal_menu() -> None:
+    onboarding = SimpleNamespace(
+        supporting_goal_options=AsyncMock(
+            return_value=(("STRENGTH_MAINTENANCE", "Maintain strength"),)
+        ),
+    )
+    response = await _facade(onboarding)._render_onboarding(
+        _identity(),
+        _result("goal_confirmed", OnboardingStep.GOAL_CONFIRMED),
+    )
+
+    assert response.text == messages.GOAL_SUPPORT_PROMPT
+    assert response.keyboard == keyboards.supporting_goal_keyboard(
+        (("STRENGTH_MAINTENANCE", "Maintain strength"),)
+    )
 
 
 @pytest.mark.asyncio

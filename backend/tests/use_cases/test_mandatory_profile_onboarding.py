@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
-from uuid import UUID
 
 import pytest
 import pytest_asyncio
@@ -25,36 +23,11 @@ from app.domain.enums import (
     TrainingImportContext,
     UserStatus,
 )
-from app.integrations.llm.models import (
-    GoalExtractionAction,
-    GoalExtractionOutput,
-    GoalTemplateSummary,
-)
 from app.repositories.onboarding import OnboardingRepository
 from app.repositories.profiles import ProfileRepository
 from app.repositories.users import UserRepository
 from app.schemas.common import TelegramIdentity
-from app.schemas.onboarding_goal import GoalExtractionWorkflowResult
 from app.services.onboarding import OnboardingApplicationError, OnboardingService
-
-
-@dataclass
-class NeverGoalExtractor:
-    calls: int = 0
-
-    async def extract(
-        self,
-        *,
-        user_id: UUID,
-        action: GoalExtractionAction,
-        user_text: str,
-        existing_draft: GoalExtractionOutput | None,
-        goal_catalog: tuple[GoalTemplateSummary, ...],
-        current_date: str,
-    ) -> GoalExtractionWorkflowResult:
-        del user_id, action, user_text, existing_draft, goal_catalog, current_date
-        self.calls += 1
-        raise AssertionError("Mandatory profile intake must not invoke the LLM")
 
 
 @pytest_asyncio.fixture
@@ -83,7 +56,6 @@ async def test_profile_inputs_validate_deterministically_and_then_begin_goal_int
     profile_database: async_sessionmaker[AsyncSession],
 ) -> None:
     identity = _identity()
-    extractor = NeverGoalExtractor()
     async with profile_database.begin() as session:
         user, _ = await UserRepository(session).get_or_create(
             telegram_user_id=identity.telegram_user_id,
@@ -99,7 +71,6 @@ async def test_profile_inputs_validate_deterministically_and_then_begin_goal_int
 
     service = OnboardingService(
         session_factory=profile_database,
-        goal_extractor=extractor,
         settings=Settings(llm_mode="mock"),
     )
 
@@ -141,7 +112,6 @@ async def test_profile_inputs_validate_deterministically_and_then_begin_goal_int
     assert goal_intake.current_step is OnboardingStep.GOAL_INTAKE
     assert goal_intake.user_status is UserStatus.ONBOARDING_IN_PROGRESS
     assert goal_intake.onboarding_status is OnboardingStatus.ACTIVE
-    assert extractor.calls == 0
 
     async with profile_database() as session:
         profile = await ProfileRepository(session).get_athlete_profile(user_id=user_id)
@@ -172,7 +142,6 @@ async def test_development_steps_seed_only_the_requesting_users_onboarding_state
     )
     service = OnboardingService(
         session_factory=profile_database,
-        goal_extractor=NeverGoalExtractor(),
         settings=Settings(environment="development", llm_mode="mock"),
     )
 
@@ -235,7 +204,6 @@ async def test_development_goal_equipment_reset_preserves_profile_and_history(
     identity = _identity()
     service = OnboardingService(
         session_factory=profile_database,
-        goal_extractor=NeverGoalExtractor(),
         settings=Settings(environment="development", llm_mode="mock"),
     )
     seeded = await service.seed_development_step(identity, "history")
@@ -275,7 +243,6 @@ async def test_history_skip_is_rejected_while_an_import_is_active(
     identity = _identity()
     service = OnboardingService(
         session_factory=profile_database,
-        goal_extractor=NeverGoalExtractor(),
         settings=Settings(environment="development", llm_mode="mock"),
     )
     history = await service.seed_development_step(identity, "history")
@@ -325,7 +292,6 @@ async def test_context_text_outside_length_bounds_is_rejected_without_a_model_ca
     )
     service = OnboardingService(
         session_factory=profile_database,
-        goal_extractor=NeverGoalExtractor(),
         settings=Settings(environment="development", llm_mode="mock"),
     )
     await service.seed_development_step(identity, "availability")

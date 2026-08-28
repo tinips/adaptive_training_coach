@@ -69,7 +69,7 @@ class ProfileRepository:
         )
         await self._session.flush()
 
-    async def upsert_conversational_training_goal(
+    async def upsert_training_goal(
         self,
         *,
         user_id: uuid.UUID,

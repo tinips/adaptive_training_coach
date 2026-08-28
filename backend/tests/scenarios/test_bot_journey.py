@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
-from uuid import UUID
 
 import pytest
 import pytest_asyncio
 from catalog_seed import seed_training_catalog
 from langchain_core.messages import HumanMessage
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.bot import messages
@@ -17,83 +16,16 @@ from app.bot.rendering import TelegramResponse
 from app.bot.service import CoachBotApplicationService
 from app.config import Settings
 from app.db.base import Base
+from app.db.models import TrainingGoal
 from app.domain.enums import AthleteGender, OnboardingStatus, OnboardingStep, UserStatus
-from app.integrations.llm.models import (
-    GoalExtractionAction,
-    GoalExtractionOutput,
-    GoalExtractionPatch,
-    GoalTemplateSummary,
-)
 from app.repositories.athlete_capabilities import AthleteCapabilityRepository
 from app.repositories.onboarding import OnboardingRepository
 from app.repositories.profiles import ProfileRepository
 from app.repositories.users import UserRepository
 from app.schemas.common import TelegramIdentity
-from app.schemas.onboarding_goal import GoalExtractionWorkflowResult
 from app.services.accounts import AccountQueryService, AccountService
 from app.services.onboarding import OnboardingService
 from app.services.profiles import ProfileService
-
-
-@dataclass
-class QueueGoalExtractor:
-    results: list[GoalExtractionWorkflowResult]
-
-    async def extract(
-        self,
-        *,
-        user_id: UUID,
-        action: GoalExtractionAction,
-        user_text: str,
-        existing_draft: GoalExtractionOutput | None,
-        goal_catalog: tuple[GoalTemplateSummary, ...],
-        current_date: str,
-    ) -> GoalExtractionWorkflowResult:
-        del user_id, action, user_text, existing_draft, goal_catalog, current_date
-        return self.results.pop(0)
-
-
-def _extracted(
-    *,
-    main_goal: str | None,
-    target_outcome: str | None,
-    secondary_priority: str | None = None,
-    supporting_code: str = "STRENGTH_MAINTENANCE",
-) -> GoalExtractionWorkflowResult:
-    primary_template = (
-        {
-            "decision": "USE_EXISTING",
-            "code": "MARATHON",
-            "display_name": None,
-            "description": None,
-        }
-        if main_goal is not None
-        else None
-    )
-    supporting_template = (
-        {
-            "decision": "USE_EXISTING",
-            "code": supporting_code,
-            "display_name": None,
-            "description": None,
-        }
-        if secondary_priority is not None
-        else None
-    )
-    return GoalExtractionWorkflowResult(
-        outcome="extracted",
-        goal_patch=GoalExtractionPatch(
-            main_goal=main_goal,
-            event_date=None,
-            target_outcome=target_outcome,
-            secondary_priority=secondary_priority,
-            primary_template=primary_template,
-            supporting_template=supporting_template,
-            missing_fields=[],
-            ambiguous_fields=[],
-            message_status="COMPLETE",
-        ),
-    )
 
 
 @pytest_asyncio.fixture
@@ -109,32 +41,8 @@ async def journey() -> AsyncIterator[
     factory = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
     async with factory.begin() as session:
         await seed_training_catalog(session)
-    extractor = QueueGoalExtractor(
-        [
-            _extracted(
-                main_goal="Complete a marathon",
-                target_outcome="Finish safely",
-            ),
-            _extracted(
-                main_goal=None,
-                target_outcome=None,
-                secondary_priority="Maintain strength",
-            ),
-            _extracted(
-                main_goal="Complete a marathon",
-                target_outcome=None,
-            ),
-            _extracted(
-                main_goal=None,
-                target_outcome=None,
-                secondary_priority="Maintain muscle",
-                supporting_code="MUSCLE_RETENTION",
-            ),
-        ]
-    )
     onboarding = OnboardingService(
         session_factory=factory,
-        goal_extractor=extractor,
         settings=Settings(
             environment="test",
             database_url="sqlite+aiosqlite:///:memory:",
@@ -201,12 +109,13 @@ async def test_journey_collects_profile_goal_and_required_context_before_complet
     )
     height = await bot.handle_text(athlete, "62.5")
     intake = await bot.handle_text(athlete, "168")
-    confirmation = await bot.handle_text(
-        athlete,
-        "I want to complete a marathon and finish safely.",
+    sport_choice = await bot.handle_callback(athlete, "ob:v1:goal:sport:TRIATHLON")
+    template_choice = await bot.handle_callback(
+        athlete, "ob:v1:goal:template:TRIATHLON_HALF_DISTANCE"
     )
-    updated = await bot.handle_text(athlete, "I also want to maintain strength.")
-    availability = await bot.handle_callback(athlete, "ob:v1:goal:confirm")
+    availability = await bot.handle_callback(
+        athlete, "ob:v1:support:STRENGTH_MAINTENANCE"
+    )
     equipment = await bot.handle_text(
         athlete,
         "Tuesday and Thursday evenings, plus a longer Saturday run.",
@@ -225,9 +134,19 @@ async def test_journey_collects_profile_goal_and_required_context_before_complet
     assert consent.text == messages.SETUP_INTRODUCTION
     assert setup.text == messages.SETUP_INTRODUCTION
     assert intake.text == messages.GOAL_INTAKE
+    assert ("Triathlon", "ob:v1:goal:sport:TRIATHLON") in _buttons(intake)
     assert ("Cancel", "ob:v1:cancel") in _buttons(intake)
-    assert confirmation.text.startswith("Here\u2019s what I understood:")
-    assert "Maintain strength" in updated.text
+    assert sport_choice.text == messages.GOAL_TEMPLATE_PROMPT
+    assert (
+        "Half-distance triathlon",
+        "ob:v1:goal:template:TRIATHLON_HALF_DISTANCE",
+    ) in _buttons(sport_choice)
+    assert ("Back", "ob:v1:goal:back") in _buttons(sport_choice)
+    assert template_choice.text == messages.GOAL_SUPPORT_PROMPT
+    assert ("Maintain strength", "ob:v1:support:STRENGTH_MAINTENANCE") in _buttons(
+        template_choice
+    )
+    assert ("No supporting goal", "ob:v1:support:none") in _buttons(template_choice)
     assert birth_year.text == messages.PROFILE_BIRTH_YEAR_INTAKE
     assert gender.text == messages.PROFILE_GENDER_INTAKE
     assert ("Female", "ob:v1:profile:gender:FEMALE") in _buttons(gender)
@@ -243,12 +162,11 @@ async def test_journey_collects_profile_goal_and_required_context_before_complet
     assert "Running shoes" in displayed_profile.text
     assert "<pre>" in displayed_profile.text
     assert "<b>Training goal</b>" in displayed_profile.text
-    assert "Main goal: Complete a marathon" in displayed_profile.text
-    assert "Target outcome: Finish safely" in displayed_profile.text
+    assert "Main goal: Half-distance triathlon" in displayed_profile.text
+    assert "Target outcome: Half-distance triathlon" in displayed_profile.text
     assert "Secondary priority: Maintain strength" in displayed_profile.text
     assert "Event date: Not set" in displayed_profile.text
     assert "Status: Confirmed" in displayed_profile.text
-    assert "Original description" not in displayed_profile.text
     assert "Running shoes" in profile_button.text
     assert _reply_buttons(profile_button) == [
         ["Profile", "Change profile"],
@@ -267,9 +185,11 @@ async def test_journey_collects_profile_goal_and_required_context_before_complet
         assert state.current_step is OnboardingStep.TRAINING_HISTORY_IMPORT
         goal = await ProfileRepository(session).get_training_goal(user_id=user.id)
         assert goal is not None
-        assert goal.main_goal == "Complete a marathon"
-        assert goal.target_outcome == "Finish safely"
+        assert goal.main_goal == "Half-distance triathlon"
+        assert goal.target_outcome == "Half-distance triathlon"
         assert goal.secondary_priority == "Maintain strength"
+        assert goal.goal_template_id is not None
+        assert goal.supporting_goal_template_id is not None
         original_description = goal.original_description
         profile = await ProfileRepository(session).get_athlete_profile(user_id=user.id)
         assert profile is not None
@@ -294,27 +214,13 @@ async def test_journey_collects_profile_goal_and_required_context_before_complet
 
     goal_menu = await bot.handle_callback(athlete, "ps:v1:section:goal")
     assert goal_menu.text == messages.PROFILE_GOAL_MENU
-    assert {label for label, _ in _buttons(goal_menu)} >= {
-        "Main goal",
+    # Main goal and secondary priority are chosen from the deterministic menu
+    # during onboarding and are no longer editable as free text here.
+    assert {label for label, _ in _buttons(goal_menu)} == {
         "Target outcome",
         "Event date",
-        "Secondary priority",
+        "Back",
     }
-    goal = await bot.handle_callback(athlete, "ps:v1:goal:main")
-    assert "Complete a marathon" in goal.text
-    main_confirmation = await _agent_input(bot, "Complete a marathon")
-    assert "Understood as" in main_confirmation.text
-    main_saved = await bot.handle_callback(athlete, "ps:v1:goal:classification:confirm")
-    assert "Saved: Main goal." in main_saved.text
-
-    await bot.handle_callback(athlete, "ps:v1:section:goal")
-    secondary = await bot.handle_callback(athlete, "ps:v1:goal:secondary")
-    assert "Maintain strength" in secondary.text
-    secondary_confirmation = await _agent_input(bot, "Maintain muscle")
-    assert "Understood as" in secondary_confirmation.text
-    goal_saved = await bot.handle_callback(athlete, "ps:v1:goal:classification:confirm")
-    assert "Saved: Secondary priority." in goal_saved.text
-    await bot.handle_callback(athlete, "ps:v1:back")
 
     availability_current = await bot.handle_callback(
         athlete, "ps:v1:section:availability"
@@ -362,8 +268,47 @@ async def test_journey_collects_profile_goal_and_required_context_before_complet
         assert profile.height_cm == 170.0
         goal = await ProfileRepository(session).get_training_goal(user_id=user.id)
         assert goal is not None
-        assert goal.secondary_priority == "Maintain muscle"
+        # Unchanged: there is no free-text goal edit any more.
+        assert goal.secondary_priority == "Maintain strength"
         assert goal.original_description == original_description
+
+
+@pytest.mark.asyncio
+async def test_a_single_sport_athlete_can_skip_the_supporting_goal(
+    journey: tuple[
+        CoachBotApplicationService,
+        async_sessionmaker[AsyncSession],
+    ],
+) -> None:
+    """Spec section 1.1: a single-sport athlete (here, running) is first-class."""
+
+    bot, factory = journey
+    athlete = _athlete()
+
+    await bot.start(athlete)
+    await bot.handle_callback(athlete, "nav:v1:consent")
+    await bot.handle_callback(athlete, "ob:v1:consent")
+    await bot.handle_callback(athlete, "ob:v1:profile")
+    await bot.handle_text(athlete, "1988")
+    await bot.handle_callback(athlete, "ob:v1:profile:gender:MALE")
+    await bot.handle_text(athlete, "78")
+    await bot.handle_text(athlete, "180")
+    template_choice = await bot.handle_callback(athlete, "ob:v1:goal:sport:RUNNING")
+    support_choice = await bot.handle_callback(athlete, "ob:v1:goal:template:MARATHON")
+    skipped = await bot.handle_callback(athlete, "ob:v1:support:none")
+
+    assert ("Marathon", "ob:v1:goal:template:MARATHON") in _buttons(template_choice)
+    assert support_choice.text == messages.GOAL_SUPPORT_PROMPT
+    assert skipped.text == messages.AVAILABILITY_INTAKE
+
+    async with factory() as session:
+        goal = await session.scalar(select(TrainingGoal))
+        assert goal is not None
+        assert goal.main_goal == "Marathon"
+        assert goal.target_outcome == "Marathon"
+        assert goal.secondary_priority is None
+        assert goal.goal_template_id is not None
+        assert goal.supporting_goal_template_id is None
 
 
 async def _agent_input(
@@ -382,7 +327,7 @@ async def _agent_input(
 
 
 @pytest.mark.asyncio
-async def test_recreated_account_routes_goal_text_to_goal_workflow(
+async def test_recreated_account_reaches_the_deterministic_goal_menu(
     journey: tuple[
         CoachBotApplicationService,
         async_sessionmaker[AsyncSession],
@@ -412,7 +357,8 @@ async def test_recreated_account_routes_goal_text_to_goal_workflow(
     intake = await _agent_input(bot, "168")
     goal = await _agent_input(
         bot,
-        "I want to complete an Ironman 70.3 next July",
+        "ob:v1:goal:sport:TRIATHLON",
+        event_type="callback",
     )
 
     assert deletion_prompt.text == messages.DELETE_CONFIRM
@@ -424,7 +370,7 @@ async def test_recreated_account_routes_goal_text_to_goal_workflow(
     assert _reply_buttons(resumed) == [["Resume"], ["Delete"]]
     assert birth_year.text == messages.PROFILE_BIRTH_YEAR_INTAKE
     assert intake.text == messages.GOAL_INTAKE
-    assert goal.text.startswith("Here\u2019s what I understood:")
+    assert goal.text == messages.GOAL_TEMPLATE_PROMPT
 
 
 def test_the_bot_service_takes_no_agent_workspace() -> None:

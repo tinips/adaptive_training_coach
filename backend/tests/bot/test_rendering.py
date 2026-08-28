@@ -40,17 +40,9 @@ def test_onboarding_keyboards_expose_only_supported_actions() -> None:
         ("How can this coach help me?", "nav:v1:help"),
         ("Privacy & safety", "nav:v1:privacy"),
     ]
-    assert _button_pairs(keyboards.goal_confirmation_keyboard()) == [
-        ("Continue", "ob:v1:goal:confirm"),
-        ("Cancel", "ob:v1:cancel"),
-    ]
     assert _button_pairs(keyboards.profile_gender_keyboard()) == [
         ("Male", "ob:v1:profile:gender:MALE"),
         ("Female", "ob:v1:profile:gender:FEMALE"),
-        ("Cancel", "ob:v1:cancel"),
-    ]
-    assert _button_pairs(keyboards.goal_date_clarification_keyboard()) == [
-        ("Not yet", "ob:v1:goal:choice:NOT_YET"),
         ("Cancel", "ob:v1:cancel"),
     ]
     assert _button_pairs(keyboards.add_workout_keyboard()) == [
@@ -61,14 +53,46 @@ def test_onboarding_keyboards_expose_only_supported_actions() -> None:
     ]
 
 
+def test_goal_menu_keyboards_expose_only_supported_actions() -> None:
+    assert _button_pairs(keyboards.goal_sport_keyboard(["RUNNING", "TRIATHLON"])) == [
+        ("Running", "ob:v1:goal:sport:RUNNING"),
+        ("Triathlon", "ob:v1:goal:sport:TRIATHLON"),
+        ("Cancel", "ob:v1:cancel"),
+    ]
+    assert _button_pairs(
+        keyboards.goal_template_keyboard(
+            [("MARATHON", "Marathon"), ("HALF_MARATHON", "Half marathon")]
+        )
+    ) == [
+        ("Marathon", "ob:v1:goal:template:MARATHON"),
+        ("Half marathon", "ob:v1:goal:template:HALF_MARATHON"),
+        ("Back", "ob:v1:goal:back"),
+        ("Cancel", "ob:v1:cancel"),
+    ]
+    assert _button_pairs(
+        keyboards.supporting_goal_keyboard(
+            [("STRENGTH_MAINTENANCE", "Maintain strength")]
+        )
+    ) == [
+        ("Maintain strength", "ob:v1:support:STRENGTH_MAINTENANCE"),
+        ("No supporting goal", "ob:v1:support:none"),
+        ("Cancel", "ob:v1:cancel"),
+    ]
+
+
 def test_callback_values_fit_telegram_limit() -> None:
     samples = [
         keyboards.welcome_keyboard(),
         keyboards.information_keyboard(),
         keyboards.consent_keyboard(),
         keyboards.setup_introduction_keyboard(),
-        keyboards.goal_input_keyboard(),
-        keyboards.goal_confirmation_keyboard(),
+        keyboards.goal_sport_keyboard(["RUNNING", "CYCLING", "SWIMMING", "TRIATHLON"]),
+        keyboards.goal_template_keyboard(
+            [("TRIATHLON_FULL_DISTANCE", "Full-distance triathlon")]
+        ),
+        keyboards.supporting_goal_keyboard(
+            [("STRENGTH_MAINTENANCE", "Maintain strength")]
+        ),
         keyboards.profile_gender_keyboard(),
         keyboards.equipment_intake_keyboard(),
         keyboards.health_limitations_keyboard(),
@@ -239,25 +263,11 @@ def test_profile_equipment_table_and_long_context_fit_telegram() -> None:
     assert len(profile) <= messages.TELEGRAM_MESSAGE_LIMIT
 
 
-def test_secondary_goal_edit_prompt_shows_current_value() -> None:
-    secondary = messages.profile_setting_prompt(
-        ProfileSettingsStep.GOAL_SECONDARY,
-        None,
-        messages.PROFILE_GOAL_SECONDARY,
-    )
-    assert "Current secondary priority" in secondary
-    assert "Not set" in secondary
-    assert _button_pairs(keyboards.profile_goal_secondary_keyboard()) == [
-        ("None", "ps:v1:goal:no-secondary"),
-        ("Back", "ps:v1:goal:back"),
-    ]
-
-
 def test_goal_settings_menu_exposes_every_editable_goal_field() -> None:
+    # Main goal and secondary priority are chosen from the deterministic menu
+    # during onboarding; they are not free-text fields here any more.
     assert _button_pairs(keyboards.profile_goal_keyboard()) == [
-        ("Main goal", "ps:v1:goal:main"),
         ("Target outcome", "ps:v1:goal:outcome"),
         ("Event date", "ps:v1:goal:date"),
-        ("Secondary priority", "ps:v1:goal:secondary"),
         ("Back", "ps:v1:goal:back"),
     ]

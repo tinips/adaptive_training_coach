@@ -21,6 +21,8 @@ from app.db.models import (
 )
 from app.domain.enums import (
     CatalogItemStatus,
+    Discipline,
+    GoalContextRole,
     GoalTemplateKind,
 )
 
@@ -67,6 +69,45 @@ class TrainingCatalogRepository:
                     GoalTemplate.status == CatalogItemStatus.ACTIVE,
                 )
             ),
+        )
+
+    async def active_primary_goal_target_disciplines(
+        self,
+    ) -> tuple[tuple[str, str, frozenset[Discipline]], ...]:
+        """Active primary goals as (code, display_name, target disciplines).
+
+        Used to build the deterministic sport/goal selection menu; the caller
+        turns these plain rows into `GoalOption` before grouping them, since
+        repositories in this codebase do not import from `app.services`.
+        """
+
+        rows = await self._session.execute(
+            select(
+                GoalTemplate.code,
+                GoalTemplate.display_name,
+                TrainingContext.discipline,
+            )
+            .join(
+                GoalTemplateContext,
+                GoalTemplateContext.goal_template_id == GoalTemplate.id,
+            )
+            .join(
+                TrainingContext,
+                TrainingContext.id == GoalTemplateContext.training_context_id,
+            )
+            .where(
+                GoalTemplate.kind == GoalTemplateKind.PRIMARY,
+                GoalTemplate.status == CatalogItemStatus.ACTIVE,
+                GoalTemplateContext.role == GoalContextRole.TARGET,
+            )
+        )
+        by_code: dict[str, tuple[str, set[Discipline]]] = {}
+        for code, display_name, discipline in rows:
+            entry = by_code.setdefault(code, (display_name, set()))
+            entry[1].add(discipline)
+        return tuple(
+            (code, display_name, frozenset(disciplines))
+            for code, (display_name, disciplines) in sorted(by_code.items())
         )
 
     async def active_contexts(self) -> tuple[TrainingContext, ...]:

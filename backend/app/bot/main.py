@@ -25,7 +25,6 @@ from app.services.onboarding import OnboardingService
 from app.services.profiles import ProfileService
 from app.services.training_import import TrainingFileImportService
 from app.services.weekly_planning import WeeklyPlanningService
-from app.workflows.onboarding_goal.graph import create_goal_extractor
 
 TelegramApplication = Application[Any, Any, Any, Any, Any, Any]
 logger = logging.getLogger(__name__)
@@ -61,7 +60,6 @@ def build_runtime(
     runtime_settings = settings or get_settings()
     runtime_engine = engine or create_engine(runtime_settings)
     session_factory = create_session_factory(runtime_engine)
-    goal_extractor = create_goal_extractor(runtime_settings)
     apple_health = TrainingFileImportService(
         session_factory=session_factory,
         settings=runtime_settings,
@@ -73,7 +71,6 @@ def build_runtime(
     service = CoachBotApplicationService(
         onboarding=OnboardingService(
             session_factory=session_factory,
-            goal_extractor=goal_extractor,
             settings=runtime_settings,
         ),
         profiles=ProfileService(session_factory),
