@@ -18,7 +18,7 @@
 - **Do not delete `DeterministicFakeOnboardingModel`.** The weekly planner still needs a fake provider in tests.
 - Keep Telegram handlers thin. Centralise messages in `app/bot/messages.py` and keyboard labels in `app/bot/keyboards.py`.
 - Deterministic Telegram callbacks must not invoke a model. After this plan, nothing in the bot may.
-- **Conflict warning.** Task 6 edits `app/services/weekly_planning/service.py`, which Tasks 4, 6 and 7 of `2026-08-28-planner-produces-a-valid-plan.md` also edit. Finish that plan first, or expect to merge by hand.
+- **Ordering resolved.** `2026-08-28-planner-produces-a-valid-plan.md` was executed on 2026-08-28 (commits `c9905c6` through `bac9c60`). Its changes are on `main`, so Task 6 here no longer conflicts with anything. Do not re-apply that plan.
 
 ---
 
@@ -1515,8 +1515,8 @@ supporting discipline one or two short sessions and never let it displace target
 training.
 ```
 
-If you are running this plan before the planner plan, the version here is 2 rather
-than 3. Check the current value first and increment it.
+The planner plan already moved this to 2, so 3 is correct. Check the current value
+before editing and increment whatever you find.
 
 - [ ] **Step 6: Run everything**
 
