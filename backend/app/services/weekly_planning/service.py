@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -51,6 +53,8 @@ from app.workflows.prompts.weekly_planning import (
 )
 
 _PLANNER_FEATURE = "WEEKLY_PLAN"
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,13 +152,40 @@ class WeeklyPlanningService:
                 messages=build_weekly_planner_messages(prepared.prompt_context),
                 config={"run_name": "weekly_training_plan"},
             )
-            plan = WeeklyPlan.model_validate(response.output)
-        except Exception:  # Provider adapters may surface vendor-specific errors.
+        except Exception as exc:  # Provider adapters surface vendor-specific errors.
+            logger.error(
+                "weekly_plan_provider_error",
+                extra={
+                    "athlete_id": str(prepared.athlete_id),
+                    "error_type": type(exc).__name__,
+                },
+            )
             await self._record_usage(
                 athlete_id=prepared.athlete_id,
                 status=LLMUsageStatus.PROVIDER_ERROR,
                 prompt_tokens=None,
                 completion_tokens=None,
+            )
+            return WeeklyPlanningResult(kind="unavailable")
+
+        try:
+            plan = WeeklyPlan.model_validate(response.output)
+        except ValidationError as error:
+            # The reply arrived and was unusable. This is a prompt or schema
+            # defect, not an outage, and must not be reported as one.
+            logger.error(
+                "weekly_plan_response_invalid",
+                extra={
+                    "athlete_id": str(prepared.athlete_id),
+                    "error_count": len(error.errors()),
+                    "malformed": response.malformed,
+                },
+            )
+            await self._record_usage(
+                athlete_id=prepared.athlete_id,
+                status=LLMUsageStatus.PROVIDER_ERROR,
+                prompt_tokens=response.prompt_tokens,
+                completion_tokens=response.completion_tokens,
             )
             return WeeklyPlanningResult(kind="unavailable")
 

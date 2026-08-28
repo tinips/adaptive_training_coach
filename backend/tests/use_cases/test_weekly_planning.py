@@ -361,3 +361,58 @@ def test_next_week_start_is_strict_and_uses_timezone_fallback() -> None:
     # the same target week. Invalid stored zones safely fall back to UTC.
     assert next_week_start(monday, "Europe/Madrid") == date(2026, 8, 24)
     assert next_week_start(monday, "not/a-timezone") == date(2026, 8, 24)
+
+
+async def _seed_ready_runner(session: AsyncSession) -> uuid.UUID:
+    """A single-sport athlete clearing the floor: 3 sessions on 3 days."""
+
+    athlete_id = await _seed_target_goal(session)
+    for days_ago in (1, 3, 5):
+        await _add_running(
+            session, athlete_id=athlete_id, started_at=NOW - timedelta(days=days_ago)
+        )
+    return athlete_id
+
+
+@pytest.mark.asyncio
+async def test_an_unusable_reply_is_logged_differently_from_an_outage(
+    database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A reply with the wrong shape must not look like the provider being down."""
+
+    _, factory = database
+    monkeypatch.setattr("app.services.weekly_planning.service.utc_now", lambda: NOW)
+    async with factory.begin() as session:
+        await _seed_ready_runner(session)
+
+    with caplog.at_level("ERROR"):
+        result = await _service(
+            factory, scenario=FakeLLMScenario.MALFORMED
+        ).generate_next_week(_identity())
+
+    assert result.kind == "unavailable"
+    assert "weekly_plan_response_invalid" in caplog.text
+    assert "weekly_plan_provider_error" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_an_outage_is_logged_as_a_provider_error(
+    database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _, factory = database
+    monkeypatch.setattr("app.services.weekly_planning.service.utc_now", lambda: NOW)
+    async with factory.begin() as session:
+        await _seed_ready_runner(session)
+
+    with caplog.at_level("ERROR"):
+        result = await _service(
+            factory, scenario=FakeLLMScenario.PROVIDER_FAILURE
+        ).generate_next_week(_identity())
+
+    assert result.kind == "unavailable"
+    assert "weekly_plan_provider_error" in caplog.text
+    assert "weekly_plan_response_invalid" not in caplog.text
