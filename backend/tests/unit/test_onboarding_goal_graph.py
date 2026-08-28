@@ -215,16 +215,6 @@ def test_future_event_date_policy_preserves_each_legacy_consumer_wording() -> No
 
 def test_explicit_onboarding_change_policy_preserves_legacy_tool_wording() -> None:
     assert explicit_onboarding_change_tool_policy(
-        "telegram_orchestrator",
-        tool_name="update_onboarding_data",
-        supported_fields="goal, weight, age, height, event_date",
-    ) == (
-        "1. DATA CORRECTIONS: If the user explicitly wants to change, update, "
-        "correct, or replace an athlete field (goal, weight, age, height, "
-        "event_date), you MUST call 'update_onboarding_data'. This rule overrides "
-        "any active question.\n"
-    )
-    assert explicit_onboarding_change_tool_policy(
         "onboarding_modification",
         tool_name="update_onboarding_data",
         supported_fields=(

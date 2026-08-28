@@ -75,7 +75,6 @@ def _facade(
     planning: object | None = None,
     mobile_sync: object | None = None,
     mobile_sync_enabled: bool = False,
-    agent_workspace: object | None = None,
 ) -> CoachBotApplicationService:
     default_queries = SimpleNamespace(
         lifecycle=AsyncMock(
@@ -93,7 +92,6 @@ def _facade(
         planning=cast(object, planning),
         mobile_sync=cast(object, mobile_sync),
         mobile_sync_enabled=mobile_sync_enabled,
-        agent_workspace=cast(object, agent_workspace),
     )
 
 
@@ -274,17 +272,13 @@ async def test_connect_iphone_uses_deterministic_route_without_agent() -> None:
         ),
         revoke_device=AsyncMock(),
     )
-    workspace = SimpleNamespace(invoke=AsyncMock())
-
     response = await _facade(
         SimpleNamespace(),
         mobile_sync=mobile_sync,
         mobile_sync_enabled=True,
-        agent_workspace=workspace,
     ).handle_agent_input(identity, HumanMessage(content="/connect_iphone"))
 
     mobile_sync.issue_pairing_code.assert_awaited_once_with(identity)
-    workspace.invoke.assert_not_awaited()
     assert "<code>ABCD2345</code>" in response.text
     assert "10:30 UTC" in response.text
 
@@ -409,13 +403,11 @@ async def test_development_step_bypasses_global_agent_for_completed_accounts() -
             )
         )
     )
-    workspace = SimpleNamespace(invoke=AsyncMock())
-    response = await _facade(onboarding, agent_workspace=workspace).handle_agent_input(
+    response = await _facade(onboarding).handle_agent_input(
         identity, HumanMessage(content="/dev_step availability")
     )
 
     onboarding.seed_development_step.assert_awaited_once_with(identity, "availability")
-    workspace.invoke.assert_not_awaited()
     assert response.text == messages.AVAILABILITY_INTAKE
 
 
@@ -429,14 +421,11 @@ async def test_development_import_history_shortcut_bypasses_global_agent() -> No
             )
         )
     )
-    workspace = SimpleNamespace(invoke=AsyncMock())
-
-    response = await _facade(onboarding, agent_workspace=workspace).handle_agent_input(
+    response = await _facade(onboarding).handle_agent_input(
         identity, HumanMessage(content="/dev_import_history")
     )
 
     onboarding.seed_development_step.assert_awaited_once_with(identity, "history")
-    workspace.invoke.assert_not_awaited()
     assert response.text == messages.TRAINING_HISTORY_IMPORT
     assert response.keyboard == keyboards.training_history_import_keyboard()
 
@@ -449,14 +438,11 @@ async def test_development_goal_equipment_reset_bypasses_global_agent() -> None:
             return_value=_result("goal_intake", OnboardingStep.GOAL_INTAKE)
         )
     )
-    workspace = SimpleNamespace(invoke=AsyncMock())
-
-    response = await _facade(onboarding, agent_workspace=workspace).handle_agent_input(
+    response = await _facade(onboarding).handle_agent_input(
         identity, HumanMessage(content="/dev_reset_goal_equipment")
     )
 
     onboarding.reset_development_goal_and_equipment.assert_awaited_once_with(identity)
-    workspace.invoke.assert_not_awaited()
     assert response.text == messages.GOAL_INTAKE
     assert response.keyboard == keyboards.goal_input_keyboard()
 
@@ -575,14 +561,9 @@ async def test_active_onboarding_raw_context_bypasses_global_agent_checkpoint() 
             }
         )
     )
-    workspace = SimpleNamespace(
-        invoke=AsyncMock(),
-        delete_thread=AsyncMock(),
-    )
     facade = _facade(
         onboarding,
         account_queries=account_queries,
-        agent_workspace=workspace,
     )
     raw_limitation = "Private limitation: avoid hard downhill running."
 
@@ -595,6 +576,4 @@ async def test_active_onboarding_raw_context_bypasses_global_agent_checkpoint() 
     )
 
     onboarding.handle_text.assert_awaited_once_with(identity, raw_limitation)
-    workspace.invoke.assert_not_awaited()
-    workspace.delete_thread.assert_not_awaited()
     assert response.text == messages.AVAILABILITY_INTAKE

@@ -10,7 +10,6 @@ import pytest
 import pytest_asyncio
 from catalog_seed import seed_training_catalog
 from langchain_core.messages import HumanMessage
-from langchain_core.runnables import RunnableLambda
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.bot import messages
@@ -19,7 +18,6 @@ from app.bot.service import CoachBotApplicationService
 from app.config import Settings
 from app.db.base import Base
 from app.domain.enums import AthleteGender, OnboardingStatus, OnboardingStep, UserStatus
-from app.integrations.llm.mock import DeterministicFakeOnboardingModel
 from app.integrations.llm.models import (
     GoalExtractionAction,
     GoalExtractionOutput,
@@ -35,7 +33,6 @@ from app.schemas.onboarding_goal import GoalExtractionWorkflowResult
 from app.services.accounts import AccountQueryService, AccountService
 from app.services.onboarding import OnboardingService
 from app.services.profiles import ProfileService
-from app.workflows.telegram_orchestrator.workspace import TelegramAgentWorkspace
 
 
 @dataclass
@@ -54,23 +51,6 @@ class QueueGoalExtractor:
     ) -> GoalExtractionWorkflowResult:
         del user_id, action, user_text, existing_draft, goal_catalog, current_date
         return self.results.pop(0)
-
-
-class TrackingGlobalAgentModel(DeterministicFakeOnboardingModel):
-    """Fail the scenario if active onboarding reaches the global model."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.invocations = 0
-
-    def bind_tools(self, tools):  # type: ignore[no-untyped-def]
-        runnable = super().bind_tools(tools)
-
-        async def respond(messages, config):  # type: ignore[no-untyped-def]
-            self.invocations += 1
-            return await runnable.ainvoke(messages, config=config)
-
-        return RunnableLambda(respond)
 
 
 def _extracted(
@@ -121,7 +101,6 @@ async def journey() -> AsyncIterator[
     tuple[
         CoachBotApplicationService,
         async_sessionmaker[AsyncSession],
-        TrackingGlobalAgentModel,
     ]
 ]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -162,8 +141,6 @@ async def journey() -> AsyncIterator[
             llm_mode="mock",
         ),
     )
-    global_model = TrackingGlobalAgentModel()
-    workspace = TelegramAgentWorkspace(model=global_model)
     yield (
         CoachBotApplicationService(
             onboarding=onboarding,
@@ -171,12 +148,9 @@ async def journey() -> AsyncIterator[
             account_queries=AccountQueryService(factory),
             accounts=AccountService(factory),
             apple_health=None,
-            agent_workspace=workspace,
         ),
         factory,
-        global_model,
     )
-    await workspace.aclose()
     await engine.dispose()
 
 
@@ -211,10 +185,9 @@ async def test_journey_collects_profile_goal_and_required_context_before_complet
     journey: tuple[
         CoachBotApplicationService,
         async_sessionmaker[AsyncSession],
-        TrackingGlobalAgentModel,
     ],
 ) -> None:
-    bot, factory, global_model = journey
+    bot, factory = journey
     athlete = _athlete()
 
     welcome = await bot.start(athlete)
@@ -378,7 +351,6 @@ async def test_journey_collects_profile_goal_and_required_context_before_complet
     assert "168.0 cm" in height_current.text
     correction = await _agent_input(bot, "170")
     assert "height" in correction.text.casefold()
-    assert global_model.invocations == 0
 
     async with factory() as session:
         user = await UserRepository(session).get_by_telegram_id(
@@ -414,10 +386,9 @@ async def test_recreated_account_routes_goal_text_to_goal_workflow(
     journey: tuple[
         CoachBotApplicationService,
         async_sessionmaker[AsyncSession],
-        TrackingGlobalAgentModel,
     ],
 ) -> None:
-    bot, _, global_model = journey
+    bot, _ = journey
 
     await _agent_input(bot, "Start")
     deletion_prompt = await _agent_input(bot, "Delete")
@@ -454,4 +425,16 @@ async def test_recreated_account_routes_goal_text_to_goal_workflow(
     assert birth_year.text == messages.PROFILE_BIRTH_YEAR_INTAKE
     assert intake.text == messages.GOAL_INTAKE
     assert goal.text.startswith("Here\u2019s what I understood:")
-    assert global_model.invocations == 0
+
+
+def test_the_bot_service_takes_no_agent_workspace() -> None:
+    """After this task nothing in the bot may call a model."""
+
+    import inspect
+
+    from app.bot.service import CoachBotApplicationService
+
+    assert (
+        "agent_workspace"
+        not in inspect.signature(CoachBotApplicationService.__init__).parameters
+    )

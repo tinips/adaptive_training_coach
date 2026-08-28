@@ -6,7 +6,6 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine
 from telegram import Update
 from telegram.constants import ParseMode
@@ -28,7 +27,6 @@ from app.services.training_import import TrainingFileImportService
 from app.services.weekly_planning import WeeklyPlanningService
 from app.workflows.onboarding_context import create_context_onboarding_workflow
 from app.workflows.onboarding_goal.graph import create_goal_extractor
-from app.workflows.telegram_orchestrator import TelegramAgentWorkspace
 
 TelegramApplication = Application[Any, Any, Any, Any, Any, Any]
 logger = logging.getLogger(__name__)
@@ -41,22 +39,17 @@ class BotRuntime:
     settings: Settings
     engine: AsyncEngine
     apple_health: TrainingFileImportService
-    agent_workspace: TelegramAgentWorkspace
     service: CoachBotApplicationService
 
     async def recover(self) -> None:
         """Reconcile durable background work before accepting updates."""
 
         await self.apple_health.recover_stale_work()
-        await self.agent_workspace.start()
 
     async def aclose(self) -> None:
         """Close provider and database connection pools exactly once."""
 
-        try:
-            await self.agent_workspace.aclose()
-        finally:
-            await self.engine.dispose()
+        await self.engine.dispose()
 
 
 def build_runtime(
@@ -71,10 +64,6 @@ def build_runtime(
     session_factory = create_session_factory(runtime_engine)
     goal_extractor = create_goal_extractor(runtime_settings)
     context_workflow = create_context_onboarding_workflow(runtime_settings)
-    agent_workspace = TelegramAgentWorkspace(
-        model=create_goal_extraction_model(runtime_settings),
-        postgres_dsn=_checkpoint_dsn(runtime_settings.database_url),
-    )
     apple_health = TrainingFileImportService(
         session_factory=session_factory,
         settings=runtime_settings,
@@ -103,24 +92,13 @@ def build_runtime(
             settings=runtime_settings,
             model=create_goal_extraction_model(runtime_settings),
         ),
-        agent_workspace=agent_workspace,
     )
     return BotRuntime(
         settings=runtime_settings,
         engine=runtime_engine,
         apple_health=apple_health,
-        agent_workspace=agent_workspace,
         service=service,
     )
-
-
-def _checkpoint_dsn(database_url: str) -> str | None:
-    """Convert the SQLAlchemy async URL for psycopg, or use memory in tests."""
-
-    parsed = make_url(database_url)
-    if parsed.get_backend_name() != "postgresql":
-        return None
-    return parsed.set(drivername="postgresql").render_as_string(hide_password=False)
 
 
 def create_application(

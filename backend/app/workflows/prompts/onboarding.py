@@ -14,10 +14,7 @@ type FutureEventDatePolicyConsumer = Literal[
     "onboarding_modification",
     "schema_description",
 ]
-type ExplicitOnboardingChangeToolPolicyConsumer = Literal[
-    "telegram_orchestrator",
-    "onboarding_modification",
-]
+type ExplicitOnboardingChangeToolPolicyConsumer = Literal["onboarding_modification"]
 
 _FUTURE_EVENT_DATE_POLICY_TEMPLATE: Final = (
     "{calendar_date_rule}{future_event_rule}{yearless_date_rule}"
@@ -86,11 +83,6 @@ def future_event_date_policy(consumer: FutureEventDatePolicyConsumer) -> str:
 _EXPLICIT_ONBOARDING_CHANGE_TOOL_POLICY: Final[
     dict[ExplicitOnboardingChangeToolPolicyConsumer, str]
 ] = {
-    "telegram_orchestrator": (
-        "1. DATA CORRECTIONS: If the user explicitly wants to change, update, "
-        "correct, or replace an athlete field ({supported_fields}), you MUST call "
-        "'{tool_name}'. This rule overrides any active question.\n"
-    ),
     "onboarding_modification": (
         "You manage modifications to an athlete's completed onboarding "
         "data. The supported fields are {supported_fields}. Call "

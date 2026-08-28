@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Literal, Protocol
 from uuid import UUID
 
 from langchain_core.messages import HumanMessage
@@ -36,11 +36,8 @@ from app.services.training_import import TrainingFileImportOutcome
 from app.services.weekly_planning.service import (
     WeeklyPlanningResult,
 )
-from app.workflows.telegram_orchestrator.workspace import (
-    TelegramAgentContext,
-    TelegramAgentWorkspace,
-    TelegramEventType,
-)
+
+TelegramEventType = Literal["text", "callback"]
 
 
 class TrainingImportBotPort(Protocol):
@@ -95,7 +92,6 @@ class CoachBotApplicationService:
         planning: WeeklyPlanningBotPort | None = None,
         mobile_sync: MobileHealthSyncBotPort | None = None,
         mobile_sync_enabled: bool = False,
-        agent_workspace: TelegramAgentWorkspace | None = None,
     ) -> None:
         self._onboarding = onboarding
         self._profiles = profiles
@@ -107,13 +103,12 @@ class CoachBotApplicationService:
         self._planning = planning
         self._mobile_sync = mobile_sync
         self._mobile_sync_enabled = mobile_sync_enabled
-        self._agent_workspace = agent_workspace
 
     async def handle_agent_input(
         self, identity: TelegramIdentity, message: HumanMessage
     ) -> TelegramResponse:
         before = await self._account_queries.lifecycle(identity)
-        response = await self._handle_agent_input(identity, message)
+        response = await self._handle_input(identity, message)
         after = await self._account_queries.lifecycle(identity)
         lifecycle_keyboard = await self._keyboard_for_lifecycle(identity, after)
         first_label = lifecycle_keyboard.keyboard[0][0].text
@@ -134,7 +129,7 @@ class CoachBotApplicationService:
             ),
         )
 
-    async def _handle_agent_input(
+    async def _handle_input(
         self, identity: TelegramIdentity, message: HumanMessage
     ) -> TelegramResponse:
         event_type: TelegramEventType = (
@@ -202,20 +197,7 @@ class CoachBotApplicationService:
                     user_keyboard=keyboards.completed_onboarding_keyboard(),
                 )
             )
-        if self._agent_workspace is None:
-            return await self._dispatch(identity, event_type, content)
-        return await self._agent_workspace.invoke(
-            thread_id=f"telegram:{identity.telegram_user_id}",
-            message=message,
-            context=TelegramAgentContext(
-                user_id=cast(UUID, lifecycle["user_id"]),
-                dispatcher=lambda kind, content: self._dispatch(
-                    identity, kind, content
-                ),
-                onboarding_updater=None,
-                onboarding_active=False,
-            ),
-        )
+        return await self._dispatch(identity, event_type, content)
 
     async def _dispatch(
         self, identity: TelegramIdentity, event_type: TelegramEventType, content: str
