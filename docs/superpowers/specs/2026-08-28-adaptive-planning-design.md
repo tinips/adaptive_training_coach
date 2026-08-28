@@ -671,14 +671,107 @@ is the safe failure.
 
 ---
 
-## 8. Not yet designed
+## 8. The interface
 
-**The plan versus actual tracker.** Where it lives is unresolved and materially
-changes the work. Telegram can only really show text. The iPhone app already has a
-list screen and a bearer token, but it only ever sends data and has no GET call to
-the backend, so it would need its first one. A web view is the third option.
+### 8.1 The split
 
-**The new UI more generally.** Raised and not yet discussed.
+Most of what this design decides is conversational, and Telegram already does it
+well. Inline keyboards are established in `app/bot/keyboards.py` and need no new
+surface:
+
+- The effort question after each session, one to ten as buttons (section 6).
+- Drift proposals, accept or refuse (section 7.4).
+- The reason for missed training: ill, injured, travel, other (section 7.5).
+- Skip, easier and move on a single session (section 7.2).
+
+What Telegram cannot do is anything that has to be looked at and compared: the week
+at a glance, planned against actual, or whether pace at a given heart rate is
+improving over months.
+
+### 8.2 Decided: a Telegram mini app for the visual half
+
+Rejected alternatives, and why:
+
+**A screen in the iPhone app.** Login and a list screen already exist, but every
+change costs an Xcode build and install, which is too slow while the design is still
+moving, and it only ever works on that one phone.
+
+**Images rendered into the chat.** Cheapest by far and genuinely useful, but the
+ceiling is low: you can look and not explore. Nothing exists for image generation
+today, so it is not free either.
+
+**A mini app** is designed for exactly this case and the stack already supports it.
+
+### 8.3 Why it is cheaper than a normal web app
+
+`python-telegram-bot` 22.8 is installed and takes a `web_app` parameter on
+`InlineKeyboardButton` directly. Opening the app is one button, not an integration.
+
+Telegram hands the page a block of identity data signed with the bot token. The
+backend recomputes the signature and knows who the user is with no password, no
+OAuth, no session and no login screen. `Settings.telegram_bot_token` is already
+available to the API process, since the API and bot containers share one environment
+file.
+
+It also works in desktop Telegram, which the iPhone option does not. Reviewing a
+training week on a phone screen is cramped.
+
+### 8.4 What has to be built
+
+- A web page. Nothing exists today: no templates, no static files, no frontend. This
+  is the single largest new piece of work in this design.
+- Signed identity validation on the backend.
+- Read routes. The API has four routes in total and two are health checks. There is
+  no way to read a plan over HTTP at all.
+- A button in the bot that opens it.
+
+### 8.5 Per-message buttons, never a fixed menu button
+
+The backend is reachable only through ngrok, and a free ngrok address changes on
+restart. A URL configured once in BotFather breaks every time it rotates. A button
+built into each message carries the current address, so it always works.
+
+The deeper problem remains: the mini app only works while the Mac is awake with
+Docker and ngrok running. A failed sync retries quietly. A button opening a dead page
+is far more visible and more irritating. Worth handling deliberately rather than
+discovering.
+
+### 8.6 Build it in three stages
+
+The greenfield risk is real, and a half-finished screen is worse than the text
+message it replaced. So, smallest first:
+
+1. **One read-only screen** showing the week, planned against actual. One button, one
+   signature check, one read route, one page. This proves the whole path end to end
+   and is immediately better than the current wall of text.
+2. **Make it interactive.** Tap a session, change it, accept a proposal.
+3. **Progress charts**, once there are enough weeks of data for a chart to say
+   anything. Realistically a couple of months out.
+
+### 8.7 The Telegram plan view still needs work now
+
+Stage 1 does not remove the need for a readable plan in the chat itself. Two concrete
+constraints:
+
+**Message length.** Telegram caps a message at 4096 characters and the renderer
+already asserts against it (`app/bot/messages.py`, `_assert_telegram_length`). A
+triathlon week with ten or twelve sessions, each with an objective and a structure,
+may not fit.
+
+**Buttons attach to messages, not to lines.** A button cannot sit beside Thursday's
+second session inside one long message. Either one message per day, which means seven
+messages every time the plan is viewed, or a two-step menu: pick a day, pick a
+session, choose what to do.
+
+**Decided:** the plan message stays read-only with a single "change something" button
+beneath it, opening the two-step menu.
+
+### 8.8 A product shift worth naming
+
+If the mini app becomes where plans are read, the bot stops being the interface and
+becomes the notification channel. That is probably the right shape, but it is a
+change in what the product is and should be chosen deliberately rather than drifted
+into.
 
 ---
 
@@ -695,11 +788,9 @@ the backend, so it would need its first one. A web view is the third option.
 3. **What counts as a significant miss** (section 7.5). A starting suggestion is less
    than 60 percent of planned hours completed by midweek, measured on proportion of
    time rather than session count. Not confirmed.
-4. **Where the tracker lives, and what the new UI is** (section 8). Not discussed.
-
 Settled during the session and no longer open: the volume decision (4.6), the
 missed-training model (7.5), the 15 percent drift threshold and quiet-by-default
-(7.4).
+(7.4), and the interface (section 8).
 
 ---
 
