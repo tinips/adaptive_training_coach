@@ -295,3 +295,42 @@ async def test_history_skip_is_rejected_while_an_import_is_active(
 
     with pytest.raises(OnboardingApplicationError, match="import_already_active"):
         await service.skip_training_history(identity)
+
+
+@pytest.mark.asyncio
+async def test_availability_text_is_stored_verbatim_with_no_model_call() -> None:
+    """The athlete's exact words are kept; only length is checked."""
+
+    import inspect
+
+    from app.services.onboarding.service import OnboardingService
+
+    assert (
+        "context_workflow"
+        not in inspect.signature(OnboardingService.__init__).parameters
+    )
+
+
+@pytest.mark.asyncio
+async def test_context_text_outside_length_bounds_is_rejected_without_a_model_call(
+    profile_database: async_sessionmaker[AsyncSession],
+) -> None:
+    """Availability/health answers are gated by length alone, not by a model."""
+
+    identity = TelegramIdentity(
+        telegram_user_id=6303,
+        telegram_username="length_athlete",
+        first_name="Length Athlete",
+        language_code="en",
+    )
+    service = OnboardingService(
+        session_factory=profile_database,
+        goal_extractor=NeverGoalExtractor(),
+        settings=Settings(environment="development", llm_mode="mock"),
+    )
+    await service.seed_development_step(identity, "availability")
+
+    with pytest.raises(OnboardingApplicationError, match="invalid_action"):
+        await service.handle_text(identity, "  ok  ")
+    with pytest.raises(OnboardingApplicationError, match="invalid_action"):
+        await service.handle_text(identity, "x" * 2001)

@@ -44,10 +44,6 @@ from app.repositories.training_catalog import TrainingCatalogRepository
 from app.repositories.users import UserRepository
 from app.schemas.capabilities import CapabilityReview, GoalExecutionAssessment
 from app.schemas.common import TelegramIdentity
-from app.schemas.onboarding_context import (
-    ContextOnboardingWorkflow,
-    FreeTextValidationWorkflowResult,
-)
 from app.schemas.onboarding_goal import (
     GoalExtractionWorkflowResult,
     GoalExtractor,
@@ -56,7 +52,6 @@ from app.schemas.onboarding_goal import (
 from app.schemas.onboarding_service import OnboardingResultKind, OnboardingServiceResult
 from app.schemas.profile_settings import ProfileSettingsResult
 from app.services.capabilities import CapabilityAssessmentService
-from app.workflows.onboarding_context.graph import create_context_onboarding_workflow
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +93,12 @@ _FREE_TEXT_CONTEXT_STEPS = frozenset(
         OnboardingStep.HEALTH_LIMITATIONS_INTAKE,
     }
 )
+# Availability and health text is stored exactly as the athlete typed it, so the
+# only check is that it is neither empty nor absurd. A model was previously asked
+# whether the answer was sensible; it judged nothing that mattered and changed
+# nothing that was stored.
+_CONTEXT_TEXT_MIN_LENGTH = 3
+_CONTEXT_TEXT_MAX_LENGTH = 2000
 
 
 class OnboardingApplicationError(RuntimeError):
@@ -117,17 +118,10 @@ class OnboardingService:
         session_factory: async_sessionmaker[AsyncSession],
         goal_extractor: GoalExtractor,
         settings: Settings,
-        context_workflow: ContextOnboardingWorkflow | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._goal_extractor = goal_extractor
         self._settings = settings
-        # Production composition injects this explicitly.  Keeping a compiled
-        # default preserves the service boundary for focused callers and ensures
-        # every raw-context path still uses LangGraph structured output.
-        self._context_workflow = context_workflow or create_context_onboarding_workflow(
-            settings,
-        )
 
     async def start(self, identity: TelegramIdentity) -> OnboardingServiceResult:
         """Create or resume one user and one durable onboarding session."""
@@ -2144,38 +2138,17 @@ class OnboardingService:
         text: str,
         step: OnboardingStep,
     ) -> OnboardingServiceResult:
-        """Validate raw context with LangGraph while retaining the literal input."""
+        """Check the text's length while retaining the athlete's literal input."""
 
         async with self._session_factory.begin() as session:
             user, onboarding = await self._locked_state(session, identity)
             self._require_active(onboarding)
             if user.id != user_id or onboarding.current_step is not step:
                 raise OnboardingApplicationError("stale_action")
-        try:
-            validation = await self._context_workflow.validate_free_text(
-                step=step,
-                user_text=text,
-            )
-        except Exception:
-            validation = FreeTextValidationWorkflowResult(
-                outcome="provider_error",
-                error_code="workflow_failure",
-            )
 
-        if validation.outcome != "accepted":
-            async with self._session_factory.begin() as session:
-                user, onboarding = await self._locked_state(session, identity)
-                self._require_active(onboarding)
-                if onboarding.current_step is not step:
-                    raise OnboardingApplicationError("stale_action")
-                # Keep the message itself out of answers, errors, usage records,
-                # and observability metadata.  The athlete can simply retry.
-                return self._result(
-                    user,
-                    onboarding,
-                    kind="context_validation_error",
-                    error_code=validation.error_code,
-                )
+        cleaned = text.strip()
+        if not (_CONTEXT_TEXT_MIN_LENGTH <= len(cleaned) <= _CONTEXT_TEXT_MAX_LENGTH):
+            raise OnboardingApplicationError("invalid_action")
 
         async with self._session_factory.begin() as session:
             user, onboarding = await self._locked_state(session, identity)

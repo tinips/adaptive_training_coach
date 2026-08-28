@@ -39,7 +39,6 @@ from app.repositories.onboarding import OnboardingRepository
 from app.repositories.profiles import ProfileRepository
 from app.repositories.users import UserRepository
 from app.schemas.common import TelegramIdentity
-from app.schemas.onboarding_context import FreeTextValidationWorkflowResult
 from app.schemas.onboarding_goal import (
     GoalExtractionWorkflowResult,
     OnboardingModificationWorkflowResult,
@@ -101,36 +100,6 @@ class QueueGoalExtractor:
             outcome="onboarding_modified",
             confirmation=f"Updated: {', '.join(saved.updated_fields)}.",
             updated_fields=tuple(saved.updated_fields),
-        )
-
-
-@dataclass
-class QueueContextWorkflow:
-    """Deterministic LangGraph boundary substitute for service-flow tests."""
-
-    validations: list[FreeTextValidationWorkflowResult] = field(default_factory=list)
-    validation_calls: list[tuple[OnboardingStep, str]] = field(default_factory=list)
-
-    async def validate_free_text(
-        self,
-        *,
-        step: OnboardingStep,
-        user_text: str,
-    ) -> FreeTextValidationWorkflowResult:
-        self.validation_calls.append((step, user_text))
-        if self.validations:
-            return self.validations.pop(0)
-        return FreeTextValidationWorkflowResult(outcome="accepted")
-
-    async def validate_text(
-        self,
-        *,
-        step: OnboardingStep,
-        user_text: str,
-    ) -> FreeTextValidationWorkflowResult:
-        return await self.validate_free_text(
-            step=step,
-            user_text=user_text,
         )
 
 
@@ -227,13 +196,11 @@ def extracted(
 def service(
     factory: async_sessionmaker[AsyncSession],
     extractor: QueueGoalExtractor,
-    context_workflow: QueueContextWorkflow | None = None,
 ) -> OnboardingService:
     return OnboardingService(
         session_factory=factory,
         goal_extractor=extractor,
         settings=settings(),
-        context_workflow=context_workflow or QueueContextWorkflow(),
     )
 
 
@@ -550,8 +517,7 @@ async def test_confirmation_persists_goal_then_requires_context_before_completio
             )
         ]
     )
-    context = QueueContextWorkflow()
-    onboarding = service(factory, extractor, context)
+    onboarding = service(factory, extractor)
     athlete = identity(6206)
     await start_goal(onboarding, athlete)
     raw = "I want to run a sub-24-minute 5 km on October 4, 2026."
@@ -744,8 +710,7 @@ async def test_completed_athlete_requires_explicit_profile_settings_flow(
             }
         ],
     )
-    context = QueueContextWorkflow()
-    onboarding = service(factory, extractor, context)
+    onboarding = service(factory, extractor)
     athlete = identity(6210)
     await start_goal(onboarding, athlete)
     await onboarding.handle_text(
@@ -776,8 +741,7 @@ async def test_other_equipment_and_described_limitations_retain_literal_text(
             )
         ]
     )
-    context = QueueContextWorkflow()
-    onboarding = service(factory, extractor, context)
+    onboarding = service(factory, extractor)
     athlete = identity(6211)
     await start_goal(onboarding, athlete)
     await onboarding.handle_text(
@@ -788,7 +752,6 @@ async def test_other_equipment_and_described_limitations_retain_literal_text(
     confirmed = await onboarding.confirm_goal(athlete)
     availability_text = "  Tuesday evenings; Saturday 2 hours; Sunday recovery.  "
     equipment = await onboarding.handle_text(athlete, availability_text)
-    validation_count_before_callbacks = len(context.validation_calls)
     health = await onboarding.choose_equipment(athlete, "done")
     health_text = "  Recovering from a previous ankle sprain; avoid steep descents.  "
     history = await onboarding.handle_text(athlete, health_text)
@@ -799,9 +762,6 @@ async def test_other_equipment_and_described_limitations_retain_literal_text(
     assert health.kind == "health_limitations_intake"
     assert history.kind == "training_history_import"
     assert completed.kind == "onboarding_completed"
-    # Deterministic callbacks did not call either LangGraph method.
-    assert validation_count_before_callbacks == 1
-    assert len(context.validation_calls) == 2
 
     async with factory() as session:
         profile_context = await ProfileRepository(session).get_athlete_profile_context(
@@ -825,8 +785,7 @@ async def test_equipment_review_is_deterministic_and_resumes_without_provider(
             )
         ]
     )
-    context = QueueContextWorkflow()
-    onboarding = service(factory, extractor, context)
+    onboarding = service(factory, extractor)
     athlete = identity(6212)
     await start_goal(onboarding, athlete)
     await onboarding.handle_text(
@@ -844,7 +803,6 @@ async def test_equipment_review_is_deterministic_and_resumes_without_provider(
     assert resumed.kind == "equipment_intake"
     assert resumed.current_step is OnboardingStep.EQUIPMENT_INTAKE
     assert resumed.capability_review is not None
-    assert len(context.validation_calls) == 1
 
     async with factory() as session:
         profile_context = await ProfileRepository(session).get_athlete_profile_context(
@@ -871,8 +829,7 @@ async def test_context_accepts_literal_nonempty_text_without_detail_requirements
         "I usually have full availability for around one hour on weekdays and "
         "more time at weekends."
     )
-    context = QueueContextWorkflow()
-    onboarding = service(factory, extractor, context)
+    onboarding = service(factory, extractor)
     athlete = identity(6214)
     await start_goal(onboarding, athlete)
     await onboarding.handle_text(
@@ -906,8 +863,7 @@ async def test_stale_context_callbacks_cannot_skip_the_required_free_text_step(
             )
         ]
     )
-    context = QueueContextWorkflow()
-    onboarding = service(factory, extractor, context)
+    onboarding = service(factory, extractor)
     athlete = identity(6215)
     await start_goal(onboarding, athlete)
     await onboarding.handle_text(
@@ -922,7 +878,6 @@ async def test_stale_context_callbacks_cannot_skip_the_required_free_text_step(
         await onboarding.choose_health_limitations(athlete, "none")
 
     assert confirmed.current_step is OnboardingStep.AVAILABILITY_INTAKE
-    assert context.validation_calls == []
 
 
 @pytest.mark.asyncio
@@ -938,8 +893,7 @@ async def test_completed_chat_edit_requires_explicit_profile_settings_flow(
             )
         ],
     )
-    context = QueueContextWorkflow()
-    onboarding = service(factory, extractor, context)
+    onboarding = service(factory, extractor)
     athlete = identity(6213)
     await start_goal(onboarding, athlete)
     await onboarding.handle_text(
