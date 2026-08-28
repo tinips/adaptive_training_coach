@@ -350,8 +350,9 @@ Both new stages are code. No extra model calls in the normal path.
 ### 4.1 Steps
 
 1. **Trigger.** The athlete asks for next week's plan.
-2. **Gather.** As today, plus two new reads: the previous week's plan, and the
-   previous week's actual workouts.
+2. **Gather.** As today, plus the previous week's plan and its stated intent, the
+   previous week's actual workouts, and the effort scores and discomfort reported
+   against them.
 3. **Gate.** Section 3.1. If below the floor, stop and report exactly what is
    missing.
 4. **Build the briefing.** Section 4.2. Pure computation, independently testable.
@@ -370,8 +371,11 @@ One compact object computed entirely from database rows, with no model involved.
 - Physical profile: age, sex, weight. Currently never sent.
 - Per sport: last week's actuals, the four week average, the trend, and the evidence
   state from 3.1.
-- The load range for next week. Section 4.6.
-- A summary of what was prescribed last week.
+- A summary of what was prescribed last week, **including the intent the previous
+  plan stated for itself** (section 4.7).
+- Reported effort scores for last week's sessions, and any reported discomfort.
+- How much of last week was actually completed, as planned hours against actual
+  hours.
 - Availability, limitations, equipment.
 - Everything in coaching units. "6:09 per km" and "1h32m", not `368.6` and `5526`.
 
@@ -404,41 +408,94 @@ A rule the schema enforces cannot be ignored, argued with, or forgotten.
 
 Things a schema cannot express, because they are relationships rather than shapes.
 
-- Total load falls inside the range from 4.6.
+- The volume safety net from 4.6. Not a target range, only the dangerous extremes.
 - No `THIN` or `NONE` sport received a `HARD` session.
 - The week fits the athlete's stated availability.
 - The `malformed` flag from the provider adapter, which today is set and never read.
 
-### 4.6 The load range
+### 4.6 Volume: the model decides, code catches danger
 
-**Decided:** code computes a range for next week's total load. The model distributes
-it. The schema and the checks keep it inside.
+**Decided:** the model decides how much training next week holds. Code does not
+compute a target range.
 
-**What "load" means here.** Until heart rate arrives, load is total training
-duration, in minutes, summed across all target sports for the week. That is a crude
-proxy: an hour easy and an hour hard count the same. It is the only honest measure
-available from the data we currently ingest. Once heart rate is flowing, this
-definition should be revisited as part of the fitness model work, and the range
-recomputed against something intensity-aware.
+This reverses an earlier decision in the same session and the reversal was
+deliberate. The first design had code computing a range that the model distributed.
+That sat awkwardly against the rest of section 4, where the model decides and code
+checks afterwards. It also failed on its own terms: told that a fixed percentage rule
+was too mechanical, the natural next move was a more complicated rule with week roles
+and sequences, and that would have been brittle in the same way. Periodisation is
+judgement, not arithmetic.
 
-Five inputs move the range:
+Concretely, a low week means opposite things depending on why it was low. Three hours
+because a recovery week was planned is not three hours because of illness. Holding
+volume flat for two weeks so the third can step up is a deliberate choice that no
+volume-history rule can express. The model can reason about all of that, given the
+context. A rule cannot, without becoming a coaching engine in its own right.
 
-| Input | Effect |
-|---|---|
-| Phase | base builds gradually, taper cuts hard |
-| Trend | three consecutive weekly increases in load force an easier week |
-| Reported effort | higher than usual for the same work means hold or drop |
-| Compliance | six hours prescribed and three done means do not increase |
-| Pain | overrides everything, see below |
+**What "load" means here.** Until heart rate arrives, load is total training duration
+in minutes, summed across all target sports for the week. That is a crude proxy: an
+easy hour and a hard hour count the same. It is the only honest measure available
+from the data we currently ingest. Revisit it with the fitness model work.
+
+**The safety net.** A net, not a leash. It fires only when something has clearly gone
+wrong, and everything between the bounds belongs to the model.
+
+- Reject an increase beyond roughly half again on the previous week's actual load.
+- Reject any increase at all when moderate or severe discomfort was reported.
+
+**Pain is not a dial, it is a switch.** Reported moderate or severe discomfort cuts
+the load and pulls back the affected sport, as a hard rule in code applied before the
+model is ever called. A model asked to be encouraging will find a reason to keep the
+long run.
 
 **Compliance is available now, roughly.** Prescribed hours against actual hours for
 the week needs nothing new. Knowing precisely which sessions were skipped needs
 session identity (section 7).
 
-**Pain is not a dial, it is a switch.** Reported moderate or severe discomfort cuts
-the load and pulls back the affected sport, as a hard rule in code applied before the
-model is called. A model asked to be encouraging will find a reason to keep the long
-run.
+### 4.7 The plan states its own intent
+
+Every plan records, in one sentence, what its week was for. "Holding volume so the
+step up lands next week." "First week back after illness, deliberately light."
+
+The model writes it as part of the plan. Code does not compute it.
+
+Three reasons this matters:
+
+1. Without it, next week's call sees two identical weeks and no reason for them, so
+   it cannot reason across weeks and starts fresh every Monday.
+2. It gives the athlete something readable when a plan looks strange.
+3. It documents the model's own reasoning, which makes a bad plan diagnosable.
+
+The stated intent goes into the following week's briefing (section 4.2).
+
+### 4.8 Turn reasoning on, for this call only
+
+DeepSeek is currently called with thinking explicitly disabled
+(`app/integrations/llm/live.py:66`).
+
+That was reasonable when the model was distributing a number handed to it. It is the
+wrong setting now that the model owns the periodisation judgement.
+
+The cost argument does not apply here. The constraint was not paying for a full
+re-plan on every nudge, and that still holds, because nudges are code (section 7.2).
+This is one call per athlete per week.
+
+**Decided:** enable reasoning for the weekly planner call. Leave it disabled
+everywhere else, including onboarding.
+
+### 4.9 Why phase stays in code while volume does not
+
+These look inconsistent and are not.
+
+Phase is close to pure arithmetic: count the weeks to the race, read off the block.
+Keeping it in code makes it stable, so the plan cannot drift between blocks for no
+reason, and it is a fact the athlete can check.
+
+Volume is judgement about the specific athlete in the specific week. That is what the
+model is for.
+
+The coaching opinion inside the phase calculation is only where the boundaries sit,
+which is a small, readable, arguable set of numbers. See open questions.
 
 ---
 
@@ -493,6 +550,9 @@ athlete reports discomfort, following the existing `WorkoutFlowStep` sequence.
 Rationale: effort only means something next to the specific session it belongs to. A
 weekly summary loses that, which is most of what makes the signal useful.
 
+**One message, not two.** When the same sync also triggers a drift proposal (section
+7.4), the effort question and the proposal share a single message.
+
 **Known risk.** Five prompts a week may become annoying, and if the athlete stops
 answering the signal degrades silently. Worth a way to notice that.
 
@@ -541,12 +601,73 @@ The change list is literally the minimal diff the context doc asked for, it answ
 throughout this codebase. Reading the current plan means replaying the changes, so
 the result will likely be cached.
 
-### 7.4 A coaching opinion, stated rather than hidden
+### 7.4 Watching the week
 
-A missed session is gone. The rest of the week does not get harder to compensate.
-Cramming a missed session into the remaining days is how people get injured.
+**The governing rule: propose, never impose.** The system never changes a plan on its
+own. It notices, it says something, it suggests, and the athlete accepts or refuses.
 
-*Not confirmed by the athlete. Flag for review.*
+This is not only a courtesy. It is what makes the whole loop safe. The system cannot
+walk an athlete's training downhill on its own, because it cannot change anything
+without a tap.
+
+**What gets compared.** Every workout that syncs is compared against what was
+planned. Two levels:
+
+| Level | Needs | Purpose |
+|---|---|---|
+| The week is drifting | nothing new, two sums | triggers a proposal |
+| This session went differently | session identity (7.1) | makes the message specific |
+
+The trigger is the week, not the session. Forty-five minutes instead of an hour is
+noise. The week tracking a third below plan by Thursday is a signal.
+
+**The threshold.** Projected weekly hours more than **15 percent** away from planned.
+Inside that, silence and no change. Outside it, propose. Fifteen is a starting number
+to be tuned once it has been seen in practice, not a law.
+
+**Quiet by default.** No message when a session lands on plan. Encouraging for a
+week, irritating by the third. The comparison is visible when the athlete goes and
+looks at the plan, rather than pushed at them.
+
+**When it runs.** On workout sync, which already happens on app launch and
+foreground, so it costs nothing extra. It shares one message with the effort question
+from section 6 rather than sending two.
+
+**Accepting a proposal** is a change like any other and is recorded in the change log
+(7.3) with its reason.
+
+### 7.5 When training is missed
+
+An earlier draft said a missed session is simply gone and the week does not
+compensate. That was rejected, correctly. It treats missing as normal and does
+nothing with the information.
+
+**Decided:** a significant miss means the plan no longer matches reality. The right
+response is to find out why, and rebuild from where the athlete actually is, rather
+than patching a hole.
+
+**The reason is load-bearing, not politeness.** Current fitness is recomputed from
+workouts in a rolling window, so a lost week drops it by roughly a quarter of a 30
+day window. Real detraining over one week off is far smaller. Without a reason, a
+naive recompute punishes illness: the athlete looks unfit, gets an easy week, does
+less, and looks less fit again. The plan walks downhill and nobody notices.
+
+The reason decides whether the fitness estimate is trusted or held:
+
+| Reason | Response |
+|---|---|
+| Illness | hold the previous fitness estimate, ease back in, do not mark down |
+| Injury | pull that sport back and keep it back until the athlete says otherwise |
+| Travel or work | fitness unchanged, resume |
+| Motivation | fitness intact, but the plan was probably unrealistic; different conversation |
+
+**Silence is not invisibility.** The watch keeps reporting whether the athlete talks
+to the bot or not, so a silent week still shows two hours done of six planned. What
+silence costs is the reason and the subjective feedback, not the objective data.
+
+The honest response to unexplained is to propose rather than assume, which is exactly
+the rule in 7.4. An athlete who never answers ends up with an unchanged plan, which
+is the safe failure.
 
 ---
 
@@ -563,11 +684,22 @@ the backend, so it would need its first one. A web view is the third option.
 
 ## 9. Open questions
 
-1. How large a weekly increase in load is allowed before the check objects.
-2. Where the phase boundaries sit. More than 16 weeks out as base is a guess.
-3. Whether a missed session is simply gone (section 7.4).
-4. Whether 30 second heart rate readings are the right granularity (section 3.6).
-5. Where the tracker lives, and what the new UI is.
+1. **Where the phase boundaries sit.** Proposed, counting back from race day: race
+   week is the last week, taper the two before it, peak the four before that, build
+   the twelve before that, base everything earlier. At 45 weeks out that puts the
+   current athlete deep in base. This is the common structure, not a coached opinion,
+   and a 45 week runway is long enough that a coach would likely split base in two
+   and place a smaller race mid-season. Not confirmed.
+2. **Whether 30 second heart rate readings are the right granularity** (section 3.6).
+   Recommended on mechanical grounds. Not confirmed.
+3. **What counts as a significant miss** (section 7.5). A starting suggestion is less
+   than 60 percent of planned hours completed by midweek, measured on proportion of
+   time rather than session count. Not confirmed.
+4. **Where the tracker lives, and what the new UI is** (section 8). Not discussed.
+
+Settled during the session and no longer open: the volume decision (4.6), the
+missed-training model (7.5), the 15 percent drift threshold and quiet-by-default
+(7.4).
 
 ---
 
@@ -579,6 +711,10 @@ the backend, so it would need its first one. A web view is the third option.
   without it.
 - Merging the gate window and the baseline window. Section 3.4 explains why.
 - Reworking the confidence score beyond the ceiling in section 3.5.
+- Computing a target volume range in code. Considered and rejected in 4.6. Only the
+  safety net remains.
+- Encoding week roles (build, hold, recover) as a code-side rule reading the sequence
+  of previous weeks. Superseded by the model stating its own intent (4.7).
 
 ---
 
