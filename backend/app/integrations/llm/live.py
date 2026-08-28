@@ -87,9 +87,14 @@ class OpenAICompatibleOnboardingModel:
     ) -> StructuredModelResponse:
         del step
         model = self._get_chat_model()
+        # json_mode binds only response_format={"type": "json_object"} and never
+        # sends the schema, so the model must guess every field name. Measured
+        # against live DeepSeek on 2026-08-28, guessing produced 21 validation
+        # errors on the weekly plan. function_calling sends the schema as a tool
+        # definition and returned a valid plan.
         runnable = model.with_structured_output(
             schema,
-            method="json_mode",
+            method="function_calling",
             include_raw=True,
         )
         result = await runnable.ainvoke(messages, config=config)
