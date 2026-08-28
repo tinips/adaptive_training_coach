@@ -298,6 +298,10 @@ class WeeklyPlanningService:
                 ],
                 "recent_evidence": evidence_snapshot["recent_evidence"],
                 "baselines": evidence_snapshot["baselines"],
+                "evidence_state": {
+                    row.discipline.value: row.state.value
+                    for row in readiness.disciplines
+                },
             }
             return _PlanningInput(
                 athlete_id=user.id,

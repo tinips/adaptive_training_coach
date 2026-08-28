@@ -8,7 +8,7 @@ from typing import Final
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
-WEEKLY_PLANNER_PROMPT_VERSION: Final = 1
+WEEKLY_PLANNER_PROMPT_VERSION: Final = 2
 
 _WEEKLY_PLANNER_SYSTEM_PROMPT: Final = """You are an endurance coach creating one
 safe, concise weekly plan.
@@ -17,7 +17,18 @@ Use the athlete's target disciplines, recent aggregated evidence, immutable base
 availability, available equipment/access, and stated training limitations. Do not make
 medical claims. Every day must be present. Rest days have no sessions and a brief rest
 note. Training sessions must have an existing discipline, clear objective, duration,
-intensity, and a concise structure. Do not invent measurements not in the context."""
+intensity, and a concise structure. Do not invent measurements not in the context.
+
+evidence_state tells you how much recent history exists for each target discipline.
+Respect it:
+WELL_EVIDENCED: enough recent history to plan normally for this discipline.
+THIN: very little recent history. Give it one short, easy, clearly introductory
+session. Do not prescribe HARD intensity for it.
+NONE: no recent history at all. The athlete's goal still requires this discipline, so
+include one short, easy, introductory session. Do not prescribe HARD intensity for it.
+
+Plan only the disciplines present in evidence_state. An athlete may have one target
+discipline or several."""
 
 
 def build_weekly_planner_messages(

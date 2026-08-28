@@ -254,19 +254,17 @@ TRAINING_HISTORY_SKIP_SUGGESTION = (
 def weekly_plan_readiness(readiness: PlanReadiness) -> str:
     """Explain the deterministic evidence gate without exposing workout details."""
 
-    missing = [item for item in readiness.disciplines if not item.ready]
-    rows = "\n".join(
-        "• "
-        f"{item.discipline.value.title()}: {item.session_count}/3 sessions, "
-        f"{item.active_day_count}/2 active days"
-        for item in missing
-    )
     return (
         "I need a little more recent training history before I can create a "
-        "personalized plan for next week. In the last 30 days, each target "
-        "discipline needs at least 3 sessions across 2 active days.\n\n"
-        f"{rows}\n\n"
-        "Import an Apple Health export or TCX workout file, then try again."
+        "personalized plan for next week.\n\n"
+        "Across all your sports together I need at least 3 sessions on at "
+        "least 2 different days in the last 30 days. Right now I have "
+        f"{readiness.total_session_count} "
+        f"session{'' if readiness.total_session_count == 1 else 's'} on "
+        f"{readiness.total_active_day_count} "
+        f"day{'' if readiness.total_active_day_count == 1 else 's'}.\n\n"
+        "Sync your iPhone, or import an Apple Health export or TCX file, then "
+        "try again."
     )
 
 
