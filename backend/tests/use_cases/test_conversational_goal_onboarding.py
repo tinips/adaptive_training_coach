@@ -25,6 +25,7 @@ from app.db.models import Capability, GoalTemplate, TrainingContext
 from app.domain.enums import (
     OnboardingStatus,
     OnboardingStep,
+    ProfileSettingsStep,
     TrainingGoalStatus,
     UserStatus,
 )
@@ -956,6 +957,124 @@ async def test_completed_chat_edit_requires_explicit_profile_settings_flow(
             athlete,
             "Update my availability and training limitations.",
         )
+
+
+def _unresolved_primary_result(
+    *, code: str = "CUSTOM_ENDURANCE_GOAL"
+) -> GoalExtractionWorkflowResult:
+    """A classification whose code is not in the canonical catalog.
+
+    There is no catalog expansion any more: whatever decision the extractor
+    attaches, a code that does not resolve to an existing, active template is
+    a not-found error rather than a candidate for creation.
+    """
+
+    return GoalExtractionWorkflowResult(
+        outcome="extracted",
+        goal_patch=GoalExtractionPatch.model_validate(
+            {
+                "main_goal": "Prepare for an indoor rowing event",
+                "event_date": None,
+                "target_outcome": "Finish comfortably",
+                "secondary_priority": None,
+                "primary_template": {
+                    "decision": "CREATE",
+                    "code": code,
+                    "display_name": "Custom endurance goal",
+                    "description": ("General preparation for a custom endurance goal."),
+                },
+                "supporting_template": {
+                    "decision": "NONE",
+                    "code": None,
+                    "display_name": None,
+                    "description": None,
+                },
+                "missing_fields": [],
+                "ambiguous_fields": [],
+                "message_status": "COMPLETE",
+            }
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_confirm_goal_rejects_a_classification_not_in_the_catalog(
+    goal_database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
+) -> None:
+    """Without expansion, an unresolved template code is a hard error."""
+
+    _, factory = goal_database
+    extractor = QueueGoalExtractor([_unresolved_primary_result()])
+    onboarding = service(factory, extractor)
+    athlete = identity(6270)
+    await start_goal(onboarding, athlete)
+    drafted = await onboarding.handle_text(
+        athlete,
+        "I want to prepare for an indoor rowing event and finish comfortably.",
+    )
+
+    with pytest.raises(OnboardingApplicationError) as exc_info:
+        await onboarding.confirm_goal(athlete)
+
+    assert exc_info.value.code == "goal_template_not_found"
+    async with factory() as session:
+        assert (
+            await ProfileRepository(session).get_training_goal(user_id=drafted.user_id)
+            is None
+        )
+
+
+@pytest.mark.asyncio
+async def test_profile_goal_classification_confirm_rejects_an_unresolved_template(
+    goal_database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
+) -> None:
+    """The post-onboarding goal-edit flow has no expansion fallback either."""
+
+    _, factory = goal_database
+    extractor = QueueGoalExtractor(
+        [
+            extracted(
+                main_goal="Complete a marathon",
+                target_outcome="Finish safely",
+            ),
+            _unresolved_primary_result(),
+        ],
+    )
+    onboarding = service(factory, extractor)
+    athlete = identity(6271)
+    await start_goal(onboarding, athlete)
+    await onboarding.handle_text(
+        athlete,
+        "I want to complete a marathon and finish safely.",
+    )
+    await onboarding.confirm_goal(athlete)
+    await onboarding.handle_text(athlete, "Tuesday, Thursday, and Saturday.")
+    await onboarding.choose_equipment(athlete, "done")
+    await onboarding.choose_health_limitations(athlete, "none")
+    await onboarding.skip_training_history(athlete)
+
+    await onboarding.open_profile_settings(athlete)
+    await onboarding.choose_profile_settings(athlete, "section:goal")
+    await onboarding.choose_profile_settings(athlete, "goal:main")
+    classification = await onboarding.submit_profile_settings_text(
+        athlete, "Prepare for an indoor rowing event"
+    )
+
+    assert classification is not None
+    assert classification.step is ProfileSettingsStep.GOAL_CLASSIFICATION_CONFIRM
+
+    with pytest.raises(OnboardingApplicationError) as exc_info:
+        await onboarding.choose_profile_settings(athlete, "goal:classification:confirm")
+
+    assert exc_info.value.code == "goal_template_not_found"
+    async with factory() as session:
+        user = await UserRepository(session).get_by_telegram_id(
+            athlete.telegram_user_id
+        )
+        assert user is not None
+        goal = await ProfileRepository(session).get_training_goal(user_id=user.id)
+        assert goal is not None
+        assert goal.main_goal == "Complete a marathon"
 
 
 @pytest.mark.asyncio
