@@ -547,7 +547,7 @@ every plan saves the evidence snapshot it was built from. Those are immutable re
 attached to a plan, not a live value anyone updates. Nothing has ever read them back,
 and they are the natural source for a progress chart.
 
-### 5.3 Gaps in training, and how fitness survives them
+### 5.2 Gaps in training, and how fitness survives them
 
 Section 7.5 says illness should not mark an athlete down. Taken naively that
 contradicts 5.1, because a value recomputed from scratch every time cannot be "held".
@@ -581,7 +581,7 @@ of history a coach wants and the system currently cannot record at all.
 a reason. Silence means the gap counts, which is the conservative direction: it
 lowers the estimate rather than flattering it.
 
-### 5.2 Measuring progress
+### 5.3 Measuring progress
 
 Volume says what was done, not whether the athlete improved. Someone can train more
 and get slower.
@@ -710,7 +710,7 @@ day window. Real detraining over one week off is far smaller. Without a reason, 
 naive recompute punishes illness: the athlete looks unfit, gets an easy week, does
 less, and looks less fit again. The plan walks downhill and nobody notices.
 
-The reason decides whether the gap is excluded from the fitness window (section 5.3)
+The reason decides whether the gap is excluded from the fitness window (section 5.2)
 and what happens to the plan:
 
 | Reason | Response |
@@ -721,7 +721,7 @@ and what happens to the plan:
 | Motivation | do **not** exclude. Fitness is intact but the plan was unrealistic, which is a different conversation and should not be hidden by adjusting the window |
 
 Mechanically, "do not mark down" means the period is recorded as excluded and the
-fitness window extends past it, per 5.3. Nothing is held, overridden, or frozen.
+fitness window extends past it, per 5.2. Nothing is held, overridden, or frozen.
 
 ### 7.6 How the two thresholds relate
 
