@@ -58,7 +58,7 @@ async def _athlete(session: AsyncSession, telegram_id: int) -> uuid.UUID:
 
 
 @pytest.mark.asyncio
-async def test_seed_integrity_covers_triathlon_complete_hyrox_and_obstacle_race(
+async def test_seed_integrity_covers_triathlon_and_supporting_goals(
     catalog_database: async_sessionmaker[AsyncSession],
 ) -> None:
     goal_codes = {row[0] for row in GOAL_TEMPLATES}
@@ -91,8 +91,6 @@ async def test_seed_integrity_covers_triathlon_complete_hyrox_and_obstacle_race(
         }
         assert {
             "TRIATHLON_HALF_DISTANCE",
-            "HYROX",
-            "OBSTACLE_RACE",
             "MUSCLE_RETENTION",
         }.issubset(goals)
         rows = await session.execute(
@@ -103,12 +101,16 @@ async def test_seed_integrity_covers_triathlon_complete_hyrox_and_obstacle_race(
                 GoalTemplateContext,
                 GoalTemplateContext.goal_template_id == GoalTemplate.id,
             )
-            .where(GoalTemplate.code.in_(("HYROX", "OBSTACLE_RACE")))
+            .where(
+                GoalTemplate.code.in_(
+                    ("TRIATHLON_HALF_DISTANCE", "TRIATHLON_FULL_DISTANCE")
+                )
+            )
             .group_by(GoalTemplate.code)
         )
         counts = {code: count for code, count in rows}
-        assert counts == {"HYROX": 8, "OBSTACLE_RACE": 4}
-        hyrox_contexts = {
+        assert counts == {"TRIATHLON_HALF_DISTANCE": 4, "TRIATHLON_FULL_DISTANCE": 4}
+        triathlon_contexts = {
             context.code
             for context in await session.scalars(
                 select(TrainingContext)
@@ -120,20 +122,44 @@ async def test_seed_integrity_covers_triathlon_complete_hyrox_and_obstacle_race(
                     GoalTemplate,
                     GoalTemplate.id == GoalTemplateContext.goal_template_id,
                 )
-                .where(GoalTemplate.code == "HYROX")
+                .where(GoalTemplate.code == "TRIATHLON_HALF_DISTANCE")
             )
         }
-        assert "functional_fitness" not in hyrox_contexts
         assert {
             "running_road",
-            "hyrox_ski_erg",
-            "hyrox_sled_push_pull",
-            "hyrox_burpee_broad_jump",
-            "hyrox_row",
-            "hyrox_farmer_carry",
-            "hyrox_sandbag_lunge",
-            "hyrox_wall_balls",
-        } == hyrox_contexts
+            "cycling_road",
+            "swimming_open_water",
+            "swimming_pool",
+        } == triathlon_contexts
+
+        supporting_contexts = await session.execute(
+            select(
+                GoalTemplate.code, func.count(GoalTemplateContext.training_context_id)
+            )
+            .join(
+                GoalTemplateContext,
+                GoalTemplateContext.goal_template_id == GoalTemplate.id,
+            )
+            .where(
+                GoalTemplate.code.in_(
+                    (
+                        "MUSCLE_RETENTION",
+                        "STRENGTH_MAINTENANCE",
+                        "IMPROVE_RUNNING",
+                        "IMPROVE_CYCLING",
+                        "IMPROVE_SWIMMING",
+                    )
+                )
+            )
+            .group_by(GoalTemplate.code)
+        )
+        assert {code: count for code, count in supporting_contexts} == {
+            "MUSCLE_RETENTION": 1,
+            "STRENGTH_MAINTENANCE": 1,
+            "IMPROVE_RUNNING": 1,
+            "IMPROVE_CYCLING": 1,
+            "IMPROVE_SWIMMING": 1,
+        }
 
 
 @pytest.mark.asyncio
