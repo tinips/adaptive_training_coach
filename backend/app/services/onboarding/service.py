@@ -6,7 +6,6 @@ import logging
 import re
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import cast
@@ -44,18 +43,6 @@ from app.repositories.profiles import ProfileRepository
 from app.repositories.training_catalog import TrainingCatalogRepository
 from app.repositories.users import UserRepository
 from app.schemas.capabilities import CapabilityReview, GoalExecutionAssessment
-from app.schemas.catalog_expansion import (
-    CapabilityRequirementSummary,
-    CapabilitySummary,
-    CatalogExpansionWorkflow,
-    CatalogExpansionWorkflowResult,
-    ContextCapabilityOutput,
-    ExecutionOptionSummary,
-    GoalContextMappingOutput,
-    GoalContextProposal,
-    GoalTemplateDraft,
-    TrainingContextSummary,
-)
 from app.schemas.common import TelegramIdentity
 from app.schemas.onboarding_context import (
     ContextOnboardingWorkflow,
@@ -69,18 +56,12 @@ from app.schemas.onboarding_goal import (
 from app.schemas.onboarding_service import OnboardingResultKind, OnboardingServiceResult
 from app.schemas.profile_settings import ProfileSettingsResult
 from app.services.capabilities import CapabilityAssessmentService
-from app.services.training_catalog import (
-    CatalogExpansionError,
-    TrainingCatalogPublicationService,
-)
-from app.workflows.catalog_expansion import create_catalog_expansion_workflow
 from app.workflows.onboarding_context.graph import create_context_onboarding_workflow
 
 logger = logging.getLogger(__name__)
 
 _PARSE_IN_FLIGHT_KEY = "_parse_in_flight"
 _PARSE_IN_FLIGHT_TTL = timedelta(minutes=10)
-_CATALOG_EXPANSION_IN_FLIGHT_KEY = "_catalog_expansion_in_flight"
 _GOAL_PHASE_KEY = "_goal_intake_phase"
 _GOAL_PHASE_COLLECTING = "COLLECTING"
 _GOAL_PHASE_CLARIFYING = "CLARIFYING"
@@ -127,25 +108,6 @@ class OnboardingApplicationError(RuntimeError):
         super().__init__(code)
 
 
-@dataclass(frozen=True, slots=True)
-class _CatalogExpansionPayload:
-    """Validated expansion results before the caller finalizes publication."""
-
-    mapping: GoalContextMappingOutput
-    capability_definition: ContextCapabilityOutput | None
-    capability_result: CatalogExpansionWorkflowResult | None
-    capability_usage_id: uuid.UUID | None
-
-
-class _CatalogExpansionFailure(Exception):
-    """One recorded expansion failure; the durable marker is already cleared."""
-
-    def __init__(self, code: str, kind: OnboardingResultKind) -> None:
-        self.code = code
-        self.kind = kind
-        super().__init__(code)
-
-
 class OnboardingService:
     """Own the only supported onboarding flow and its durable checkpoints."""
 
@@ -156,7 +118,6 @@ class OnboardingService:
         goal_extractor: GoalExtractor,
         settings: Settings,
         context_workflow: ContextOnboardingWorkflow | None = None,
-        catalog_expansion_workflow: CatalogExpansionWorkflow | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._goal_extractor = goal_extractor
@@ -166,9 +127,6 @@ class OnboardingService:
         # every raw-context path still uses LangGraph structured output.
         self._context_workflow = context_workflow or create_context_onboarding_workflow(
             settings,
-        )
-        self._catalog_expansion_workflow = (
-            catalog_expansion_workflow or create_catalog_expansion_workflow(settings)
         )
 
     async def start(self, identity: TelegramIdentity) -> OnboardingServiceResult:
@@ -389,16 +347,13 @@ class OnboardingService:
         self,
         identity: TelegramIdentity,
     ) -> OnboardingServiceResult:
-        """Reuse canonical catalog knowledge, expand only what is missing."""
+        """Persist the goal using only canonical catalog templates."""
 
-        run_id = str(uuid.uuid4())
         async with self._session_factory.begin() as session:
             user, onboarding = await self._locked_state(session, identity)
             self._require_active(onboarding)
             answers = self._answers(onboarding)
             self._require_goal_phase(onboarding, answers, {_GOAL_PHASE_CONFIRMING})
-            if self._catalog_expansion_is_in_flight(onboarding):
-                raise OnboardingApplicationError("catalog_expansion_in_progress")
             draft = cast(
                 GoalExtractionOutput,
                 self._goal_draft_from_answers(answers, required=True),
@@ -411,550 +366,26 @@ class OnboardingService:
                 raise OnboardingApplicationError("goal_draft_incomplete")
 
             catalog = TrainingCatalogRepository(session)
-            (
-                primary_id,
-                supporting_id,
-                new_templates,
-            ) = await self._resolve_goal_template_candidates(
+            primary_id, supporting_id = await self._resolve_goal_template_candidates(
                 catalog=catalog,
                 draft=draft,
             )
             logger.info(
                 "goal_confirmation_resolved user_id=%s primary_code=%s "
-                "supporting_code=%s new_templates=%s",
+                "supporting_code=%s",
                 user.id,
                 draft.primary_template.code if draft.primary_template else None,
                 draft.supporting_template.code if draft.supporting_template else None,
-                ",".join(item.code for item in new_templates) or "none",
             )
-            if not new_templates:
-                # Every confirmed goal template already exists as a complete
-                # canonical goal. Reuse it directly without any catalog
-                # expansion or LLM call.
-                return await self._persist_confirmed_goal(
-                    session=session,
-                    user=user,
-                    onboarding=onboarding,
-                    answers=answers,
-                    draft=draft,
-                    original=original,
-                    goal_template_id=primary_id,
-                    supporting_goal_template_id=supporting_id,
-                )
-
-            # Exit this transaction before the LLM expansion.  The expansion
-            # opens its own sessions and must be able to lock the onboarding
-            # row while recording its in-flight marker.
-            user_id = user.id
-
-        try:
-            payload = await self._run_catalog_expansion(
-                user_id=user_id,
-                run_id=run_id,
-                drafts=new_templates,
-                marker_step=OnboardingStep.GOAL_INTAKE,
-            )
-        except _CatalogExpansionFailure as exc:
-            async with self._session_factory() as session:
-                user, onboarding = await self._locked_state(session, identity)
-            return self._result(
-                user,
-                onboarding,
-                kind=exc.kind,
-                error_code=exc.code,
-            )
-        return await self._finalize_catalog_goal(
-            identity=identity,
-            run_id=run_id,
-            draft=draft,
-            original=original,
-            new_templates=new_templates,
-            mapping=payload.mapping,
-            capability_definition=payload.capability_definition,
-            capability_usage_id=payload.capability_usage_id,
-            capability_outcome=payload.capability_result,
-        )
-
-    @staticmethod
-    async def _execution_option_summaries(
-        catalog: TrainingCatalogRepository,
-        context_ids: tuple[uuid.UUID, ...],
-    ) -> tuple[ExecutionOptionSummary, ...]:
-        entries = await catalog.execution_option_catalog(context_ids=context_ids)
-        return tuple(
-            ExecutionOptionSummary(
-                target_context_code=entry.target_context.code,
-                code=entry.option.code,
-                display_name=entry.option.display_name,
-                execution_context_code=entry.execution_context.code,
-                role=entry.option.role,
-                priority=entry.option.priority,
-                limitations=tuple(entry.option.limitations),
-                requirements=tuple(
-                    CapabilityRequirementSummary(
-                        capability_code=capability.code,
-                        importance=requirement.importance,
-                    )
-                    for requirement, capability in sorted(
-                        entry.requirements,
-                        key=lambda item: item[1].code,
-                    )
-                ),
-            )
-            for entry in entries
-        )
-
-    async def _run_catalog_expansion(
-        self,
-        *,
-        user_id: uuid.UUID,
-        run_id: str,
-        drafts: tuple[GoalTemplateDraft, ...],
-        marker_step: OnboardingStep,
-    ) -> _CatalogExpansionPayload:
-        """Propose contexts, then goal-aware capabilities, for only new goals."""
-
-        logger.info(
-            "catalog_expansion_started user_id=%s run_id=%s templates=%s",
-            user_id,
-            run_id,
-            ",".join(item.code for item in drafts),
-        )
-
-        async with self._session_factory.begin() as session:
-            await UserRepository(session).require_by_id(user_id)
-            onboarding = await OnboardingRepository(session).lock_for_user(
-                user_id=user_id
-            )
-            if self._catalog_expansion_is_in_flight(onboarding):
-                raise OnboardingApplicationError("catalog_expansion_in_progress")
-            if await self._llm_rate_limited(session=session, user_id=user_id):
-                logger.warning(
-                    "catalog_expansion_rate_limited user_id=%s run_id=%s",
-                    user_id,
-                    run_id,
-                )
-                raise _CatalogExpansionFailure("llm_rate_limited", "rate_limited")
-            catalog = TrainingCatalogRepository(session)
-            active_goals = tuple(
-                GoalTemplateSummary(
-                    code=item.code,
-                    kind=item.kind.value,
-                    display_name=item.display_name,
-                    description=item.description,
-                )
-                for item in await catalog.active_goal_templates()
-            )
-            active_context_rows = await catalog.active_contexts()
-            active_contexts = tuple(
-                TrainingContextSummary(
-                    code=item.code,
-                    display_name=item.display_name,
-                    description=item.description,
-                    discipline=item.discipline,
-                )
-                for item in active_context_rows
-            )
-            answers = self._answers(onboarding)
-            answers[_CATALOG_EXPANSION_IN_FLIGHT_KEY] = cast(
-                JsonValue,
-                {"run_id": run_id, "started_at": utc_now().isoformat()},
-            )
-            await OnboardingRepository(session).save_progress(
-                user_id=user_id,
-                current_step=marker_step,
-                answers=cast(dict[str, object], answers),
-            )
-            usage = await LLMUsageRepository(session).record(
-                user_id=user_id,
-                onboarding_step=OnboardingStep.GOAL_CONFIRMED,
-                provider_mode=self._settings.llm_mode,
-                model=self._settings.llm_model,
-                status=LLMUsageStatus.PROVIDER_ERROR,
-            )
-            map_usage_id = usage.id
-
-        mapping_result = await self._catalog_expansion_workflow.map_goal_contexts(
-            user_id=user_id,
-            templates=drafts,
-            active_goals=active_goals,
-            active_contexts=active_contexts,
-        )
-        logger.info(
-            "catalog_context_expansion_finished user_id=%s run_id=%s outcome=%s "
-            "error_code=%s mapped_contexts=%s",
-            user_id,
-            run_id,
-            mapping_result.outcome,
-            mapping_result.error_code,
-            ",".join(
-                sorted(
-                    {
-                        context.code
-                        for context_set in (
-                            mapping_result.context_mapping.templates
-                            if mapping_result.context_mapping is not None
-                            else ()
-                        )
-                        for context in context_set.contexts
-                    }
-                )
-            )
-            or "none",
-        )
-
-        mapping: GoalContextMappingOutput | None = None
-        required_contexts: tuple[GoalContextProposal, ...] = ()
-        active_capabilities: tuple[CapabilitySummary, ...] = ()
-        active_execution_options: tuple[ExecutionOptionSummary, ...] = ()
-        capability_usage_id: uuid.UUID | None = None
-        async with self._session_factory.begin() as session:
-            onboarding = await OnboardingRepository(session).lock_for_user(
-                user_id=user_id
-            )
-            if not self._owns_catalog_expansion_run(onboarding, run_id):
-                raise OnboardingApplicationError("stale_action")
-            answers = self._answers(onboarding)
-            usage_repository = LLMUsageRepository(session)
-            if (
-                mapping_result.outcome != "succeeded"
-                or mapping_result.context_mapping is None
-            ):
-                await usage_repository.update_outcome(
-                    user_id=user_id,
-                    usage_id=map_usage_id,
-                    status=(
-                        LLMUsageStatus.FALLBACK
-                        if mapping_result.outcome == "fallback_required"
-                        else LLMUsageStatus.PROVIDER_ERROR
-                    ),
-                    prompt_tokens=mapping_result.prompt_tokens,
-                    completion_tokens=mapping_result.completion_tokens,
-                )
-                answers.pop(_CATALOG_EXPANSION_IN_FLIGHT_KEY, None)
-                await OnboardingRepository(session).save_progress(
-                    user_id=user_id,
-                    current_step=marker_step,
-                    answers=cast(dict[str, object], answers),
-                )
-                raise _CatalogExpansionFailure(
-                    mapping_result.error_code or "catalog_expansion_failed",
-                    "goal_confirmation",
-                )
-            mapping = mapping_result.context_mapping
-            try:
-                TrainingCatalogPublicationService.validate_context_mapping(
-                    templates=drafts,
-                    context_mapping=mapping,
-                    active_contexts={
-                        item.code: item.discipline for item in active_contexts
-                    },
-                )
-            except CatalogExpansionError:
-                await usage_repository.update_outcome(
-                    user_id=user_id,
-                    usage_id=map_usage_id,
-                    status=LLMUsageStatus.FALLBACK,
-                    prompt_tokens=mapping_result.prompt_tokens,
-                    completion_tokens=mapping_result.completion_tokens,
-                )
-                answers.pop(_CATALOG_EXPANSION_IN_FLIGHT_KEY, None)
-                await OnboardingRepository(session).save_progress(
-                    user_id=user_id,
-                    current_step=marker_step,
-                    answers=cast(dict[str, object], answers),
-                )
-                raise _CatalogExpansionFailure(
-                    "invalid_catalog_expansion",
-                    "goal_confirmation",
-                ) from None
-            await usage_repository.update_outcome(
-                user_id=user_id,
-                usage_id=map_usage_id,
-                status=LLMUsageStatus.SUCCEEDED,
-                prompt_tokens=mapping_result.prompt_tokens,
-                completion_tokens=mapping_result.completion_tokens,
-            )
-            catalog = TrainingCatalogRepository(session)
-            current_contexts = {
-                item.code: item for item in await catalog.active_contexts()
-            }
-            active_context_rows = tuple(current_contexts.values())
-            active_contexts = tuple(
-                TrainingContextSummary(
-                    code=item.code,
-                    display_name=item.display_name,
-                    description=item.description,
-                    discipline=item.discipline,
-                )
-                for item in active_context_rows
-            )
-            active_execution_options = await self._execution_option_summaries(
-                catalog,
-                tuple(item.id for item in active_context_rows),
-            )
-            adjusted_templates = []
-            for mapped_template in mapping.templates:
-                adjusted_contexts = []
-                for proposal in mapped_template.contexts:
-                    existing = current_contexts.get(proposal.code)
-                    if proposal.decision == "CREATE" and existing is not None:
-                        if existing.discipline is proposal.discipline:
-                            proposal = proposal.model_copy(
-                                update={"decision": "USE_EXISTING"}
-                            )
-                    adjusted_contexts.append(proposal)
-                adjusted_templates.append(
-                    mapped_template.model_copy(update={"contexts": adjusted_contexts})
-                )
-            mapping = mapping.model_copy(update={"templates": adjusted_templates})
-            required_contexts = tuple(
-                {
-                    item.code: item
-                    for context_set in mapping.templates
-                    for item in context_set.contexts
-                }.values()
-            )
-            if required_contexts:
-                if await self._llm_rate_limited(session=session, user_id=user_id):
-                    answers.pop(_CATALOG_EXPANSION_IN_FLIGHT_KEY, None)
-                    await OnboardingRepository(session).save_progress(
-                        user_id=user_id,
-                        current_step=marker_step,
-                        answers=cast(dict[str, object], answers),
-                    )
-                    raise _CatalogExpansionFailure(
-                        "llm_rate_limited",
-                        "goal_confirmation",
-                    )
-                active_capabilities = tuple(
-                    CapabilitySummary(
-                        code=item.code,
-                        display_name=item.display_name,
-                        description=item.description,
-                        kind=item.kind,
-                    )
-                    for item in await catalog.active_capabilities()
-                )
-                usage = await usage_repository.record(
-                    user_id=user_id,
-                    onboarding_step=OnboardingStep.GOAL_CONFIRMED,
-                    provider_mode=self._settings.llm_mode,
-                    model=self._settings.llm_model,
-                    status=LLMUsageStatus.PROVIDER_ERROR,
-                )
-                capability_usage_id = usage.id
-
-        if not required_contexts:
-            return _CatalogExpansionPayload(
-                mapping=mapping,
-                capability_definition=None,
-                capability_result=None,
-                capability_usage_id=None,
-            )
-
-        capability_result = (
-            await self._catalog_expansion_workflow.define_context_capabilities(
-                user_id=user_id,
-                goals=drafts,
-                new_contexts=required_contexts,
-                active_contexts=active_contexts,
-                active_capabilities=active_capabilities,
-                active_execution_options=active_execution_options,
-            )
-        )
-        logger.info(
-            "catalog_capability_expansion_finished user_id=%s run_id=%s "
-            "outcome=%s error_code=%s defined_contexts=%s capabilities=%s "
-            "options=%s",
-            user_id,
-            run_id,
-            capability_result.outcome,
-            capability_result.error_code,
-            ",".join(
-                sorted(
-                    item.target_context_code
-                    for item in (
-                        capability_result.capability_definition.contexts
-                        if capability_result.capability_definition is not None
-                        else ()
-                    )
-                )
-            )
-            or "none",
-            ",".join(
-                sorted(
-                    item.code
-                    for item in (
-                        capability_result.capability_definition.capabilities
-                        if capability_result.capability_definition is not None
-                        else ()
-                    )
-                )
-            )
-            or "none",
-            ",".join(
-                sorted(
-                    f"{context.target_context_code}:{option.code}:{option.decision}"
-                    for context in (
-                        capability_result.capability_definition.contexts
-                        if capability_result.capability_definition is not None
-                        else ()
-                    )
-                    for option in context.options
-                )
-            )
-            or "none",
-        )
-        return _CatalogExpansionPayload(
-            mapping=mapping,
-            capability_definition=capability_result.capability_definition,
-            capability_result=capability_result,
-            capability_usage_id=capability_usage_id,
-        )
-
-    async def _finalize_catalog_goal(
-        self,
-        *,
-        identity: TelegramIdentity,
-        run_id: str,
-        draft: GoalExtractionOutput,
-        original: str,
-        new_templates: tuple[GoalTemplateDraft, ...],
-        mapping: GoalContextMappingOutput,
-        capability_definition: ContextCapabilityOutput | None,
-        capability_usage_id: uuid.UUID | None,
-        capability_outcome: CatalogExpansionWorkflowResult | None,
-    ) -> OnboardingServiceResult:
-        """Finalize usage and publish the catalog and athlete goal together."""
-
-        logger.info(
-            "catalog_publication_started user_id=%s run_id=%s templates=%s",
-            identity.telegram_user_id,
-            run_id,
-            ",".join(item.code for item in new_templates),
-        )
-
-        try:
-            async with self._session_factory.begin() as session:
-                user, onboarding = await self._locked_state(session, identity)
-                if not self._owns_catalog_expansion_run(onboarding, run_id):
-                    raise OnboardingApplicationError("stale_action")
-                answers = self._answers(onboarding)
-                if capability_usage_id is not None:
-                    if capability_outcome is None:
-                        raise OnboardingApplicationError(
-                            "catalog_expansion_provider_error"
-                        )
-                    successful = (
-                        capability_outcome.outcome == "succeeded"
-                        and capability_definition is not None
-                    )
-                    await LLMUsageRepository(session).update_outcome(
-                        user_id=user.id,
-                        usage_id=capability_usage_id,
-                        status=(
-                            LLMUsageStatus.SUCCEEDED
-                            if successful
-                            else (
-                                LLMUsageStatus.FALLBACK
-                                if capability_outcome.outcome == "fallback_required"
-                                else LLMUsageStatus.PROVIDER_ERROR
-                            )
-                        ),
-                        prompt_tokens=capability_outcome.prompt_tokens,
-                        completion_tokens=capability_outcome.completion_tokens,
-                    )
-                    if not successful:
-                        answers.pop(_CATALOG_EXPANSION_IN_FLIGHT_KEY, None)
-                        onboarding = await OnboardingRepository(session).save_progress(
-                            user_id=user.id,
-                            current_step=OnboardingStep.GOAL_INTAKE,
-                            answers=cast(dict[str, object], answers),
-                        )
-                        return self._result(
-                            user,
-                            onboarding,
-                            kind="goal_confirmation",
-                            error_code=capability_outcome.error_code
-                            or "catalog_expansion_failed",
-                        )
-
-                publication = await TrainingCatalogPublicationService().publish(
-                    session=session,
-                    templates=new_templates,
-                    context_mapping=mapping,
-                    capability_definition=capability_definition,
-                )
-                primary_id, supporting_id = await self._confirmed_template_ids(
-                    catalog=TrainingCatalogRepository(session),
-                    draft=draft,
-                    publication_ids=publication.template_ids,
-                )
-                result = await self._persist_confirmed_goal(
-                    session=session,
-                    user=user,
-                    onboarding=onboarding,
-                    answers=answers,
-                    draft=draft,
-                    original=original,
-                    goal_template_id=primary_id,
-                    supporting_goal_template_id=supporting_id,
-                )
-                logger.info(
-                    "catalog_publication_finished user_id=%s run_id=%s",
-                    identity.telegram_user_id,
-                    run_id,
-                )
-                return result
-        except CatalogExpansionError as exc:
-            logger.warning(
-                "catalog_publication_failed user_id=%s run_id=%s error_code=%s",
-                identity.telegram_user_id,
-                run_id,
-                exc.code,
-            )
-            return await self._recover_catalog_expansion(
-                identity=identity,
-                run_id=run_id,
-                error_code=exc.code,
-                capability_usage_id=capability_usage_id,
-                capability_outcome=capability_outcome,
-            )
-
-    async def _recover_catalog_expansion(
-        self,
-        *,
-        identity: TelegramIdentity,
-        run_id: str,
-        error_code: str,
-        capability_usage_id: uuid.UUID | None,
-        capability_outcome: CatalogExpansionWorkflowResult | None,
-    ) -> OnboardingServiceResult:
-        async with self._session_factory.begin() as session:
-            user, onboarding = await self._locked_state(session, identity)
-            if not self._owns_catalog_expansion_run(onboarding, run_id):
-                raise OnboardingApplicationError("stale_action")
-            if capability_usage_id is not None and capability_outcome is not None:
-                await LLMUsageRepository(session).update_outcome(
-                    user_id=user.id,
-                    usage_id=capability_usage_id,
-                    status=LLMUsageStatus.FALLBACK,
-                    prompt_tokens=capability_outcome.prompt_tokens,
-                    completion_tokens=capability_outcome.completion_tokens,
-                )
-            answers = self._answers(onboarding)
-            answers.pop(_CATALOG_EXPANSION_IN_FLIGHT_KEY, None)
-            onboarding = await OnboardingRepository(session).save_progress(
-                user_id=user.id,
-                current_step=OnboardingStep.GOAL_INTAKE,
-                answers=cast(dict[str, object], answers),
-            )
-            return self._result(
-                user,
-                onboarding,
-                kind="goal_confirmation",
-                error_code=error_code,
+            return await self._persist_confirmed_goal(
+                session=session,
+                user=user,
+                onboarding=onboarding,
+                answers=answers,
+                draft=draft,
+                original=original,
+                goal_template_id=primary_id,
+                supporting_goal_template_id=supporting_id,
             )
 
     async def _resolve_goal_template_candidates(
@@ -962,30 +393,24 @@ class OnboardingService:
         *,
         catalog: TrainingCatalogRepository,
         draft: GoalExtractionOutput,
-    ) -> tuple[uuid.UUID | None, uuid.UUID | None, tuple[GoalTemplateDraft, ...]]:
+    ) -> tuple[uuid.UUID | None, uuid.UUID | None]:
+        """Resolve confirmed templates against the canonical catalog only.
+
+        There is no catalog expansion any more: a classification that does
+        not resolve to an existing, active template (whatever decision the
+        extractor attached to it) is a not-found error, not a candidate for
+        creation.
+        """
+
         primary = draft.primary_template
         if primary is None:
             raise OnboardingApplicationError("invalid_goal_classification")
         primary_row = await catalog.active_goal_by_code(code=primary.code)
-        new_templates: list[GoalTemplateDraft] = []
-        if primary_row is not None:
-            if primary_row.kind is not GoalTemplateKind.PRIMARY:
-                raise OnboardingApplicationError("goal_template_code_collision")
-            primary_id: uuid.UUID | None = primary_row.id
-        elif primary.decision == "USE_EXISTING":
+        if primary_row is None:
             raise OnboardingApplicationError("goal_template_not_found")
-        else:
-            if primary.display_name is None or primary.description is None:
-                raise OnboardingApplicationError("invalid_goal_classification")
-            new_templates.append(
-                GoalTemplateDraft(
-                    code=primary.code,
-                    kind=GoalTemplateKind.PRIMARY,
-                    display_name=primary.display_name,
-                    description=primary.description,
-                )
-            )
-            primary_id = None
+        if primary_row.kind is not GoalTemplateKind.PRIMARY:
+            raise OnboardingApplicationError("goal_template_code_collision")
+        primary_id: uuid.UUID | None = primary_row.id
 
         supporting_id: uuid.UUID | None = None
         supporting = draft.supporting_template
@@ -996,61 +421,11 @@ class OnboardingService:
             if supporting.code is None:
                 raise OnboardingApplicationError("invalid_goal_classification")
             supporting_row = await catalog.active_goal_by_code(code=supporting.code)
-            if supporting_row is not None:
-                if supporting_row.kind is not GoalTemplateKind.SUPPORTING:
-                    raise OnboardingApplicationError("goal_template_code_collision")
-                supporting_id = supporting_row.id
-            elif supporting.decision == "USE_EXISTING":
+            if supporting_row is None:
                 raise OnboardingApplicationError("goal_template_not_found")
-            else:
-                if supporting.display_name is None or supporting.description is None:
-                    raise OnboardingApplicationError("invalid_goal_classification")
-                new_templates.append(
-                    GoalTemplateDraft(
-                        code=supporting.code,
-                        kind=GoalTemplateKind.SUPPORTING,
-                        display_name=supporting.display_name,
-                        description=supporting.description,
-                    )
-                )
-        return primary_id, supporting_id, tuple(new_templates)
-
-    @staticmethod
-    async def _confirmed_template_ids(
-        *,
-        catalog: TrainingCatalogRepository,
-        draft: GoalExtractionOutput,
-        publication_ids: dict[str, uuid.UUID],
-    ) -> tuple[uuid.UUID, uuid.UUID | None]:
-        primary = draft.primary_template
-        if primary is None:
-            raise CatalogExpansionError("invalid_goal_classification")
-        primary_id = publication_ids.get(primary.code)
-        if primary_id is None:
-            row = await catalog.active_goal_by_code(
-                code=primary.code,
-                kind=GoalTemplateKind.PRIMARY,
-            )
-            if row is None:
-                raise CatalogExpansionError("goal_template_not_found")
-            primary_id = row.id
-        supporting_id: uuid.UUID | None = None
-        supporting = draft.supporting_template
-        if supporting is not None and supporting.decision in {
-            "USE_EXISTING",
-            "CREATE",
-        }:
-            if supporting.code is None:
-                raise CatalogExpansionError("invalid_goal_classification")
-            supporting_id = publication_ids.get(supporting.code)
-            if supporting_id is None:
-                row = await catalog.active_goal_by_code(
-                    code=supporting.code,
-                    kind=GoalTemplateKind.SUPPORTING,
-                )
-                if row is None:
-                    raise CatalogExpansionError("goal_template_not_found")
-                supporting_id = row.id
+            if supporting_row.kind is not GoalTemplateKind.SUPPORTING:
+                raise OnboardingApplicationError("goal_template_code_collision")
+            supporting_id = supporting_row.id
         return primary_id, supporting_id
 
     async def _persist_confirmed_goal(
@@ -1084,7 +459,6 @@ class OnboardingService:
             _GOAL_CLARIFICATION_FIELD_KEY,
             _GOAL_CLARIFICATION_HINT_KEY,
             _PARSE_IN_FLIGHT_KEY,
-            _CATALOG_EXPANSION_IN_FLIGHT_KEY,
         ):
             answers.pop(key, None)
         capability_review: CapabilityReview | None = None
@@ -1532,7 +906,6 @@ class OnboardingService:
             if action == "goal:classification:confirm":
                 if step is not ProfileSettingsStep.GOAL_CLASSIFICATION_CONFIRM:
                     raise OnboardingApplicationError("stale_action")
-                # Expansion performs provider calls outside this transaction.
             elif action == "goal:classification:cancel":
                 if step is not ProfileSettingsStep.GOAL_CLASSIFICATION_CONFIRM:
                     raise OnboardingApplicationError("stale_action")
@@ -1830,9 +1203,12 @@ class OnboardingService:
         self,
         identity: TelegramIdentity,
     ) -> ProfileSettingsResult:
-        """Expand a confirmed profile candidate and update template FKs atomically."""
+        """Update template FKs for a confirmed, already-classified candidate.
 
-        run_id = str(uuid.uuid4())
+        There is no catalog expansion any more: a candidate that does not
+        resolve to an existing, active template is a not-found error.
+        """
+
         async with self._session_factory.begin() as session:
             user, onboarding = await self._locked_state(session, identity)
             if onboarding.status is not OnboardingStatus.COMPLETED:
@@ -1875,244 +1251,15 @@ class OnboardingService:
                 if candidate.code is not None
                 else None
             )
-            if existing_template is not None:
-                return await self._save_profile_classification(
-                    session=session,
-                    user_id=user.id,
-                    repo=repo,
-                    field=field,
-                    proposed_text=proposed_text,
-                    template_id=existing_template.id,
-                )
-            if candidate.decision != "CREATE" or candidate.code is None:
+            if existing_template is None:
                 raise OnboardingApplicationError("goal_template_not_found")
-            if candidate.display_name is None or candidate.description is None:
-                raise OnboardingApplicationError("invalid_goal_classification")
-            new_template = GoalTemplateDraft(
-                code=candidate.code,
-                kind=expected_kind,
-                display_name=candidate.display_name,
-                description=candidate.description,
-            )
-            active_goal_rows = await catalog.active_goal_templates()
-            active_context_rows = await catalog.active_contexts()
-            if await self._llm_rate_limited(session=session, user_id=user.id):
-                raise OnboardingApplicationError("llm_rate_limited")
-            pending["catalog_expansion_run"] = {
-                "run_id": run_id,
-                "started_at": utc_now().isoformat(),
-            }
-            await repo.save(
+            return await self._save_profile_classification(
+                session=session,
                 user_id=user.id,
-                step=ProfileSettingsStep.GOAL_CLASSIFICATION_CONFIRM,
-                pending=pending,
-            )
-            usage = await LLMUsageRepository(session).record(
-                user_id=user.id,
-                onboarding_step=OnboardingStep.GOAL_CONFIRMED,
-                provider_mode=self._settings.llm_mode,
-                model=self._settings.llm_model,
-                status=LLMUsageStatus.PROVIDER_ERROR,
-            )
-            map_usage_id = usage.id
-            active_goals = tuple(
-                GoalTemplateSummary(
-                    code=item.code,
-                    kind=item.kind.value,
-                    display_name=item.display_name,
-                    description=item.description,
-                )
-                for item in active_goal_rows
-            )
-            active_contexts = tuple(
-                TrainingContextSummary(
-                    code=item.code,
-                    display_name=item.display_name,
-                    description=item.description,
-                    discipline=item.discipline,
-                )
-                for item in active_context_rows
-            )
-            active_execution_options = await self._execution_option_summaries(
-                catalog,
-                tuple(item.id for item in active_context_rows),
-            )
-
-        map_result = await self._catalog_expansion_workflow.map_goal_contexts(
-            user_id=user.id,
-            templates=(new_template,),
-            active_goals=active_goals,
-            active_contexts=active_contexts,
-        )
-        if map_result.outcome != "succeeded" or map_result.context_mapping is None:
-            return await self._profile_expansion_failed(
-                identity=identity,
-                run_id=run_id,
-                usage_id=map_usage_id,
-                workflow=map_result,
-            )
-        mapping = map_result.context_mapping
-        try:
-            proposals = TrainingCatalogPublicationService.validate_context_mapping(
-                templates=(new_template,),
-                context_mapping=mapping,
-                active_contexts={
-                    item.code: item.discipline for item in active_contexts
-                },
-            )
-        except CatalogExpansionError:
-            return await self._profile_expansion_failed(
-                identity=identity,
-                run_id=run_id,
-                usage_id=map_usage_id,
-                workflow=map_result,
-            )
-
-        new_contexts = tuple(item for item in proposals if item.decision == "CREATE")
-        capability_result: CatalogExpansionWorkflowResult | None = None
-        capability_usage_id: uuid.UUID | None = None
-        active_capabilities: tuple[CapabilitySummary, ...] = ()
-        async with self._session_factory.begin() as session:
-            user = await self._require_user(session, identity)
-            await LLMUsageRepository(session).update_outcome(
-                user_id=user.id,
-                usage_id=map_usage_id,
-                status=LLMUsageStatus.SUCCEEDED,
-                prompt_tokens=map_result.prompt_tokens,
-                completion_tokens=map_result.completion_tokens,
-            )
-            if new_contexts:
-                if await self._llm_rate_limited(session=session, user_id=user.id):
-                    repo = ProfileSettingsRepository(session)
-                    state = await repo.get_or_create(user_id=user.id)
-                    pending = dict(state.pending_answers)
-                    pending.pop("catalog_expansion_run", None)
-                    saved = await repo.save(
-                        user_id=user.id,
-                        step=ProfileSettingsStep.GOAL_CLASSIFICATION_CONFIRM,
-                        pending=pending,
-                    )
-                    return ProfileSettingsResult(
-                        step=saved.current_step,
-                        pending=cast(dict[str, JsonValue], pending),
-                        saved_field="__classification_failed__",
-                    )
-                capability_rows = await TrainingCatalogRepository(
-                    session
-                ).active_capabilities()
-                active_capabilities = tuple(
-                    CapabilitySummary(
-                        code=item.code,
-                        display_name=item.display_name,
-                        description=item.description,
-                        kind=item.kind,
-                    )
-                    for item in capability_rows
-                )
-                usage = await LLMUsageRepository(session).record(
-                    user_id=user.id,
-                    onboarding_step=OnboardingStep.GOAL_CONFIRMED,
-                    provider_mode=self._settings.llm_mode,
-                    model=self._settings.llm_model,
-                    status=LLMUsageStatus.PROVIDER_ERROR,
-                )
-                capability_usage_id = usage.id
-        if new_contexts:
-            capability_result = (
-                await self._catalog_expansion_workflow.define_context_capabilities(
-                    user_id=user.id,
-                    goals=(new_template,),
-                    new_contexts=new_contexts,
-                    active_contexts=active_contexts,
-                    active_capabilities=active_capabilities,
-                    active_execution_options=active_execution_options,
-                )
-            )
-            if (
-                capability_result.outcome != "succeeded"
-                or capability_result.capability_definition is None
-            ):
-                return await self._profile_expansion_failed(
-                    identity=identity,
-                    run_id=run_id,
-                    usage_id=cast(uuid.UUID, capability_usage_id),
-                    workflow=capability_result,
-                )
-
-        try:
-            async with self._session_factory.begin() as session:
-                user = await self._require_user(session, identity)
-                repo = ProfileSettingsRepository(session)
-                state = await repo.get_or_create(user_id=user.id)
-                marker = dict(state.pending_answers).get("catalog_expansion_run")
-                if not isinstance(marker, dict) or marker.get("run_id") != run_id:
-                    raise OnboardingApplicationError("stale_action")
-                if capability_usage_id is not None and capability_result is not None:
-                    await LLMUsageRepository(session).update_outcome(
-                        user_id=user.id,
-                        usage_id=capability_usage_id,
-                        status=LLMUsageStatus.SUCCEEDED,
-                        prompt_tokens=capability_result.prompt_tokens,
-                        completion_tokens=capability_result.completion_tokens,
-                    )
-                publication = await TrainingCatalogPublicationService().publish(
-                    session=session,
-                    templates=(new_template,),
-                    context_mapping=mapping,
-                    capability_definition=(
-                        capability_result.capability_definition
-                        if capability_result is not None
-                        else None
-                    ),
-                )
-                return await self._save_profile_classification(
-                    session=session,
-                    user_id=user.id,
-                    repo=repo,
-                    field=field,
-                    proposed_text=proposed_text,
-                    template_id=publication.template_ids[new_template.code],
-                )
-        except CatalogExpansionError as exc:
-            raise OnboardingApplicationError(exc.code) from exc
-
-    async def _profile_expansion_failed(
-        self,
-        *,
-        identity: TelegramIdentity,
-        run_id: str,
-        usage_id: uuid.UUID,
-        workflow: CatalogExpansionWorkflowResult,
-    ) -> ProfileSettingsResult:
-        async with self._session_factory.begin() as session:
-            user = await self._require_user(session, identity)
-            repo = ProfileSettingsRepository(session)
-            state = await repo.get_or_create(user_id=user.id)
-            pending = dict(state.pending_answers)
-            marker = pending.get("catalog_expansion_run")
-            if not isinstance(marker, dict) or marker.get("run_id") != run_id:
-                raise OnboardingApplicationError("stale_action")
-            await LLMUsageRepository(session).update_outcome(
-                user_id=user.id,
-                usage_id=usage_id,
-                status=(
-                    LLMUsageStatus.FALLBACK
-                    if workflow.outcome == "fallback_required"
-                    else LLMUsageStatus.PROVIDER_ERROR
-                ),
-                prompt_tokens=workflow.prompt_tokens,
-                completion_tokens=workflow.completion_tokens,
-            )
-            pending.pop("catalog_expansion_run", None)
-            saved = await repo.save(
-                user_id=user.id,
-                step=ProfileSettingsStep.GOAL_CLASSIFICATION_CONFIRM,
-                pending=pending,
-            )
-            return ProfileSettingsResult(
-                step=saved.current_step,
-                pending=cast(dict[str, JsonValue], pending),
-                saved_field="__classification_failed__",
+                repo=repo,
+                field=field,
+                proposed_text=proposed_text,
+                template_id=existing_template.id,
             )
 
     async def _save_profile_classification(
@@ -3545,14 +2692,6 @@ class OnboardingService:
         return OnboardingService._marker_is_in_flight(marker)
 
     @staticmethod
-    def _catalog_expansion_is_in_flight(onboarding: OnboardingSession) -> bool:
-        marker = cast(
-            JsonValue | None,
-            dict(onboarding.answers).get(_CATALOG_EXPANSION_IN_FLIGHT_KEY),
-        )
-        return OnboardingService._marker_is_in_flight(marker)
-
-    @staticmethod
     def _marker_is_in_flight(marker: JsonValue | None) -> bool:
         if not isinstance(marker, dict):
             return False
@@ -3569,14 +2708,6 @@ class OnboardingService:
     def _owns_parse_run(onboarding: OnboardingSession, parse_run_id: str) -> bool:
         marker = dict(onboarding.answers).get(_PARSE_IN_FLIGHT_KEY)
         return isinstance(marker, dict) and marker.get("run_id") == parse_run_id
-
-    @staticmethod
-    def _owns_catalog_expansion_run(
-        onboarding: OnboardingSession,
-        run_id: str,
-    ) -> bool:
-        marker = dict(onboarding.answers).get(_CATALOG_EXPANSION_IN_FLIGHT_KEY)
-        return isinstance(marker, dict) and marker.get("run_id") == run_id
 
     @staticmethod
     def _answers(onboarding: OnboardingSession) -> dict[str, JsonValue]:
