@@ -10,6 +10,11 @@ This document records the whole discussion. Only sections 3 and 4 are specified 
 enough detail to build from. Sections 5 to 8 are decided direction, to be specified
 properly when we reach them.
 
+**This is the design, not the implementation plan.** It says what should be true and
+why. The ordered, task-by-task plan for building it is a separate artifact and does
+not exist yet. Section 11 should be settled before that plan is written, because its
+outcome changes sections 4.3, 4.4 and 4.5.
+
 ---
 
 ## 1. Why this exists
@@ -448,6 +453,9 @@ the load and pulls back the affected sport, as a hard rule in code applied befor
 model is ever called. A model asked to be encouraging will find a reason to keep the
 long run.
 
+This applies to **generating next week only.** What pain may and may not do to a plan
+already running is section 7.7, and the answer there is different.
+
 **Compliance is available now, roughly.** Prescribed hours against actual hours for
 the week needs nothing new. Knowing precisely which sessions were skipped needs
 session identity (section 7).
@@ -482,6 +490,22 @@ This is one call per athlete per week.
 
 **Decided:** enable reasoning for the weekly planner call. Leave it disabled
 everywhere else, including onboarding.
+
+**This is not a settings change. The adapter cannot currently express it.**
+
+`OpenAICompatibleOnboardingModel` builds one `ChatOpenAI` and caches it on
+`self._chat_model`, with `thinking: {"type": "disabled"}` baked into the DeepSeek
+branch at construction time. One cached instance cannot serve reasoning-on for the
+planner and reasoning-off for onboarding.
+
+Worse, there is no channel to tell it which kind of call this is.
+`ainvoke_structured` takes `step: OnboardingStep` and then immediately does
+`del step`.
+
+So this requires a real adapter change: either cache two instances and select
+between them, or pass an explicit per-call flag through `ainvoke_structured`. The
+implementation plan must budget for it rather than treating it as a one-line config
+edit.
 
 ### 4.9 Why phase stays in code while volume does not
 
@@ -522,6 +546,40 @@ Historical snapshots are a separate thing and already accumulate as a side effec
 every plan saves the evidence snapshot it was built from. Those are immutable records
 attached to a plan, not a live value anyone updates. Nothing has ever read them back,
 and they are the natural source for a progress chart.
+
+### 5.3 Gaps in training, and how fitness survives them
+
+Section 7.5 says illness should not mark an athlete down. Taken naively that
+contradicts 5.1, because a value recomputed from scratch every time cannot be "held".
+This section resolves it.
+
+**Decided: excluded periods, not a held value.**
+
+A declared gap is recorded as a period with a reason: ill from 10 to 17 March,
+injured from 2 April, and so on. The calculator stays pure and stays a function of
+the workouts inside a window. What changes is the window the caller asks for.
+
+When computing current fitness, the planner skips excluded periods and **extends the
+window backwards by the same length** to compensate. A 30 day window containing a
+7 day illness becomes a 37 calendar day window covering 30 days of actual training
+opportunity.
+
+This is chosen over the two alternatives on purpose:
+
+- *Storing an override value* reintroduces exactly the mutable fitness row that 5.1
+  exists to avoid.
+- *Reading the previous plan's saved snapshot instead of recomputing* leaves the
+  planner with two possible sources of truth and needs a rule for choosing between
+  them, and the snapshot may be weeks stale.
+
+**What this costs.** One new stored concept: periods of declared unavailability with
+a reason and a date range. That is the only new storage in this design, and it earns
+its place independently, because "I was ill for a week in March" is exactly the kind
+of history a coach wants and the system currently cannot record at all.
+
+**Undeclared gaps are not excluded.** A period is only skipped when the athlete gives
+a reason. Silence means the gap counts, which is the conservative direction: it
+lowers the estimate rather than flattering it.
 
 ### 5.2 Measuring progress
 
@@ -652,14 +710,53 @@ day window. Real detraining over one week off is far smaller. Without a reason, 
 naive recompute punishes illness: the athlete looks unfit, gets an easy week, does
 less, and looks less fit again. The plan walks downhill and nobody notices.
 
-The reason decides whether the fitness estimate is trusted or held:
+The reason decides whether the gap is excluded from the fitness window (section 5.3)
+and what happens to the plan:
 
 | Reason | Response |
 |---|---|
-| Illness | hold the previous fitness estimate, ease back in, do not mark down |
-| Injury | pull that sport back and keep it back until the athlete says otherwise |
-| Travel or work | fitness unchanged, resume |
-| Motivation | fitness intact, but the plan was probably unrealistic; different conversation |
+| Illness | exclude the period from the fitness window, ease back in, do not mark down |
+| Injury | exclude the period, and pull that sport back until the athlete says otherwise |
+| Travel or work | exclude the period, fitness unchanged, resume |
+| Motivation | do **not** exclude. Fitness is intact but the plan was unrealistic, which is a different conversation and should not be hidden by adjusting the window |
+
+Mechanically, "do not mark down" means the period is recorded as excluded and the
+fitness window extends past it, per 5.3. Nothing is held, overridden, or frozen.
+
+### 7.6 How the two thresholds relate
+
+Sections 7.4 and 7.5 both fire on training not happening. They are **one escalating
+mechanism, not two independent ones.**
+
+| Situation | Response |
+|---|---|
+| Projected week more than 15% off plan | propose an adjustment to the rest of the week |
+| Too little done for the week to be salvageable, suggested at under 60% of planned hours by midweek | do not propose an adjustment. Ask why, and offer to replan from current fitness |
+
+The second supersedes the first. At 40 percent off, the athlete gets the ask-why
+conversation, not a tinkering proposal followed by a second message.
+
+### 7.7 Pain: what it may and may not do on its own
+
+Section 4.6 says pain is a hard rule applied in code. Section 7.4 says the system
+never changes a plan on its own. Both hold, because they govern different things.
+
+**Generating next week.** Code applies the pain constraint before the model is
+called. This is not imposing on anything, it is constraining a plan that does not
+exist yet. No conflict.
+
+**The plan already running.** Pain reported on Tuesday does not delete Thursday's
+long run. The governing rule stands: nothing changes without a tap.
+
+But it is not treated as ordinary drift either. A pain report:
+
+- sends its proposal immediately, ignoring the 15 percent threshold entirely
+- marks the affected sessions as **not recommended, with the reason shown**, if the
+  proposal goes unanswered
+
+So an unanswered pain report leaves the plan unchanged but visibly flagged, rather
+than silently intact. That respects the athlete's control without the system
+pretending everything is fine.
 
 **Silence is not invisibility.** The watch keeps reporting whether the athlete talks
 to the bot or not, so a silent week still shows two hours done of six planned. What
@@ -809,9 +906,27 @@ missed-training model (7.5), the 15 percent drift threshold and quiet-by-default
 
 ---
 
-## 11. A cheap experiment worth running first
+## 11. Settle this before writing the implementation plan
 
-The planner has never been called. Before building repair logic for failures nobody
-has seen, make two real calls with synthetic evidence: one with the prompt as it is
-today, one with the schema included. That shows how badly the model guesses the shape,
-and how much of section 4.5 is actually needed.
+The planner has never been called. Not once, against any model.
+
+So sections 4.3, 4.4 and 4.5 are designed against behaviour nobody has observed.
+Writing repair logic for failures that have never been seen is guesswork, and if
+DeepSeek turns out to handle `function_calling` badly, or to conform fine without
+help, those three sections change and the tasks written from them get rewritten.
+
+**The experiment.** Two real calls with synthetic evidence. One with the prompt
+exactly as it is today. One with the schema sent. Compare what comes back.
+
+**What each outcome changes:**
+
+| Result | Consequence |
+|---|---|
+| Guesses the shape badly today, conforms with the schema sent | 4.3 and 4.4 confirmed as written; 4.5 can be lighter |
+| Conforms fine either way | 4.4's per-request schema is still worth it for the sport restriction, but the urgency drops |
+| Struggles even with the schema sent | `function_calling` may not suit DeepSeek; reconsider 4.3, and 4.5 becomes load-bearing rather than a safety net |
+
+This is roughly twenty minutes and two API calls. It should happen before the
+implementation plan is written, not after.
+
+*Not yet run. Awaiting a decision.*
