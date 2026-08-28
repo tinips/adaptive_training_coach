@@ -24,6 +24,12 @@ _RELIABLE_HR_QUALITIES = {
     HeartRateTemporalQuality.SHORT_INTERVAL,
 }
 _DUPLICATE_SOURCES = {ActivitySource.APPLE_HEALTH, ActivitySource.TCX}
+_DISTANCE_MEANINGFUL = {
+    Discipline.RUNNING,
+    Discipline.CYCLING,
+    Discipline.HIKING,
+    Discipline.SWIMMING,
+}
 
 
 def calculate_baseline_window(
@@ -46,7 +52,7 @@ def calculate_baseline_window(
     calculated_at = _as_utc(calculated_at)
     in_window = tuple(
         workout
-        for workout in workouts
+        for workout in _normalise_unmeasured_distance(workouts)
         if workout.discipline is discipline
         and window_started_at <= _as_utc(workout.started_at) <= window_ended_at
     )
@@ -147,6 +153,25 @@ def calculate_baseline_window(
         ),
         input_digest=digest,
         calculation_version=CALCULATION_VERSION,
+    )
+
+
+def _normalise_unmeasured_distance(
+    workouts: Sequence[FitnessWorkoutEvidence],
+) -> tuple[FitnessWorkoutEvidence, ...]:
+    """Treat a zero distance as absent where distance is meaningful.
+
+    An indoor trainer ride reports zero metres because distance does not
+    apply, not because the athlete travelled nowhere. Zero is not None, so
+    without this the session counts as distance evidence and drags every
+    derived pace and speed to zero.
+    """
+
+    return tuple(
+        workout.model_copy(update={"distance_meters": None})
+        if workout.discipline in _DISTANCE_MEANINGFUL and workout.distance_meters == 0
+        else workout
+        for workout in workouts
     )
 
 
