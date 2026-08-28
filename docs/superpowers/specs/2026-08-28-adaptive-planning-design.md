@@ -936,9 +936,11 @@ into.
 3. **What counts as a significant miss** (section 7.5). A starting suggestion is less
    than 60 percent of planned hours completed by midweek, measured on proportion of
    time rather than session count. Not confirmed.
+
 Settled during the session and no longer open: the volume decision (4.6), the
 missed-training model (7.5), the 15 percent drift threshold and quiet-by-default
-(7.4), and the interface (section 8).
+(7.4), the interface (section 8), and how the schema reaches the model (4.3,
+settled by the experiment in section 11).
 
 ---
 
