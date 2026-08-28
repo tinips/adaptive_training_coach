@@ -154,11 +154,9 @@ class WeeklyPlanningService:
             )
         except Exception as exc:  # Provider adapters surface vendor-specific errors.
             logger.error(
-                "weekly_plan_provider_error",
-                extra={
-                    "athlete_id": str(prepared.athlete_id),
-                    "error_type": type(exc).__name__,
-                },
+                "weekly_plan_provider_error athlete_id=%s error_type=%s",
+                str(prepared.athlete_id),
+                type(exc).__name__,
             )
             await self._record_usage(
                 athlete_id=prepared.athlete_id,
@@ -174,12 +172,11 @@ class WeeklyPlanningService:
             # The reply arrived and was unusable. This is a prompt or schema
             # defect, not an outage, and must not be reported as one.
             logger.error(
-                "weekly_plan_response_invalid",
-                extra={
-                    "athlete_id": str(prepared.athlete_id),
-                    "error_count": len(error.errors()),
-                    "malformed": response.malformed,
-                },
+                "weekly_plan_response_invalid athlete_id=%s error_count=%s"
+                " malformed=%s",
+                str(prepared.athlete_id),
+                len(error.errors()),
+                response.malformed,
             )
             await self._record_usage(
                 athlete_id=prepared.athlete_id,
