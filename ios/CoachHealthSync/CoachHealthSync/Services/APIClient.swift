@@ -58,7 +58,22 @@ struct APIClient {
             body: body,
             bearerToken: accessToken
         )
-        let data = try await execute(request)
+        let data: Data
+        do {
+            data = try await execute(request)
+        } catch APIClientError.invalidHTTPStatus(422) {
+            // A user can update the iPhone app before the API deployment has
+            // reached every server. Preserve basic workout sync in that window.
+            let legacyBody = HealthKitLegacyWorkoutSyncRequest(
+                workouts: [workout.legacySyncPayload]
+            )
+            let legacyRequest = try makeJSONRequest(
+                path: "v1/mobile/healthkit/workouts:sync",
+                body: legacyBody,
+                bearerToken: accessToken
+            )
+            data = try await execute(legacyRequest)
+        }
         let response = try decoder.decode(HealthKitWorkoutSyncResponse.self, from: data)
         guard let result = response.results.first(where: { $0.workoutUUID == workout.id }) else {
             throw APIClientError.invalidResponse

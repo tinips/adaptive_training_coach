@@ -46,6 +46,26 @@ struct HealthKitWorkout: Identifiable, Equatable, Sendable {
         )
     }
 
+    var legacySyncPayload: HealthKitLegacyWorkoutSyncPayload {
+        let normalizedDuration = Self.normalizedDurationSeconds(durationSeconds)
+        return HealthKitLegacyWorkoutSyncPayload(
+            workoutUUID: id,
+            activityType: activityType,
+            startedAt: startDate,
+            endedAt: endDate,
+            durationSeconds: normalizedDuration,
+            movingDurationSeconds: normalizedDuration,
+            distanceMeters: distanceMeters,
+            elevationGainMeters: elevationGainMeters,
+            elevationLossMeters: elevationLossMeters,
+            caloriesKcal: caloriesKcal,
+            averageHeartRate: averageHeartRate,
+            maxHeartRate: maxHeartRate,
+            averageCadence: averageCadence,
+            maxCadence: maxCadence
+        )
+    }
+
     private static func normalizedDurationSeconds(_ duration: TimeInterval) -> Int {
         let rounded = duration.rounded()
         guard rounded.isFinite else {
@@ -140,6 +160,47 @@ struct HealthKitWorkoutSyncPayload: Encodable, Equatable, Sendable {
 
 struct HealthKitWorkoutSyncRequest: Encodable, Sendable {
     let workouts: [HealthKitWorkoutSyncPayload]
+}
+
+/// The original payload remains available during a rolling backend update.
+/// Once all deployed API instances accept the richer payload, this fallback can
+/// be retired in a subsequent mobile release.
+struct HealthKitLegacyWorkoutSyncPayload: Encodable, Equatable, Sendable {
+    let workoutUUID: UUID
+    let activityType: String
+    let startedAt: Date
+    let endedAt: Date
+    let durationSeconds: Int
+    let movingDurationSeconds: Int? = nil
+    let distanceMeters: Double? = nil
+    let elevationGainMeters: Double? = nil
+    let elevationLossMeters: Double? = nil
+    let caloriesKcal: Double? = nil
+    let averageHeartRate: Double? = nil
+    let maxHeartRate: Double? = nil
+    let averageCadence: Double? = nil
+    let maxCadence: Double? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case workoutUUID = "workout_uuid"
+        case activityType = "activity_type"
+        case startedAt = "started_at"
+        case endedAt = "ended_at"
+        case durationSeconds = "duration_seconds"
+        case movingDurationSeconds = "moving_duration_seconds"
+        case distanceMeters = "distance_meters"
+        case elevationGainMeters = "elevation_gain_meters"
+        case elevationLossMeters = "elevation_loss_meters"
+        case caloriesKcal = "calories_kcal"
+        case averageHeartRate = "average_heart_rate"
+        case maxHeartRate = "max_heart_rate"
+        case averageCadence = "average_cadence"
+        case maxCadence = "max_cadence"
+    }
+}
+
+struct HealthKitLegacyWorkoutSyncRequest: Encodable, Sendable {
+    let workouts: [HealthKitLegacyWorkoutSyncPayload]
 }
 
 enum WorkoutSyncOutcome: String, Decodable, Sendable {

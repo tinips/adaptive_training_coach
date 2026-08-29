@@ -82,7 +82,7 @@ final class HealthKitService: HealthKitServicing {
             healthStore.execute(query)
         }
 
-        let rawQuantitySamples = try await fetchRawQuantitySamples(
+        let rawQuantitySamples = await fetchRawQuantitySamples(
             from: startDate,
             to: endDate
         )
@@ -186,22 +186,29 @@ final class HealthKitService: HealthKitServicing {
     private func fetchRawQuantitySamples(
         from startDate: Date,
         to endDate: Date
-    ) async throws -> [HKQuantitySample] {
+    ) async -> [HKQuantitySample] {
         let store = healthStore
-        try await withThrowingTaskGroup(of: [HKQuantitySample].self) { group in
+        return await withTaskGroup(of: [HKQuantitySample].self) { group in
             for quantityType in Self.workoutQuantityTypes {
                 group.addTask { [store] in
-                    try await Self.fetchQuantitySamples(
-                        from: store,
-                        quantityType: quantityType,
-                        startDate: startDate,
-                        endDate: endDate
-                    )
+                    do {
+                        return try await Self.fetchQuantitySamples(
+                            from: store,
+                            quantityType: quantityType,
+                            startDate: startDate,
+                            endDate: endDate
+                        )
+                    } catch {
+                        // A provider can deny or omit one metric while still
+                        // exposing a valid workout. Metrics are best-effort;
+                        // never hide the user's complete workout list.
+                        return []
+                    }
                 }
             }
 
             var samples: [HKQuantitySample] = []
-            for try await quantitySamples in group {
+            for await quantitySamples in group {
                 samples.append(contentsOf: quantitySamples)
             }
             return samples

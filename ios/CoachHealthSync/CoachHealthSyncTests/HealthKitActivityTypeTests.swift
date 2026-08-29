@@ -59,4 +59,24 @@ final class HealthKitActivityTypeTests: XCTestCase {
 
         XCTAssertEqual(workout.syncPayload.durationSeconds, 46)
     }
+
+    func testLegacyPayloadDoesNotIncludeRichMetricFields() throws {
+        let workout = HealthKitWorkout(
+            id: UUID(),
+            activityType: "running",
+            activityDisplayName: "Running",
+            startDate: Date(timeIntervalSince1970: 1_735_689_600),
+            endDate: Date(timeIntervalSince1970: 1_735_693_200),
+            durationSeconds: 3_600,
+            sourceName: "Mi Fitness"
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let encoded = try encoder.encode(workout.legacySyncPayload)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+
+        XCTAssertNil(object["all_statistics"])
+        XCTAssertNil(object["raw_quantity_samples"])
+        XCTAssertNil(object["source_name"])
+    }
 }
