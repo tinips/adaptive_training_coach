@@ -214,11 +214,14 @@ async def test_journey_collects_profile_goal_and_required_context_before_complet
 
     goal_menu = await bot.handle_callback(athlete, "ps:v1:section:goal")
     assert goal_menu.text == messages.PROFILE_GOAL_MENU
-    # Main goal and secondary priority are chosen from the deterministic menu
-    # during onboarding and are no longer editable as free text here.
+    # Main goal and secondary priority are edited through the same
+    # deterministic catalog menu as onboarding (ps:v1:goal:main /
+    # ps:v1:goal:secondary), not as free text; see the dedicated tests below.
     assert {label for label, _ in _buttons(goal_menu)} == {
+        "Main goal",
         "Target outcome",
         "Event date",
+        "Secondary priority",
         "Back",
     }
 
@@ -309,6 +312,156 @@ async def test_a_single_sport_athlete_can_skip_the_supporting_goal(
         assert goal.secondary_priority is None
         assert goal.goal_template_id is not None
         assert goal.supporting_goal_template_id is None
+
+
+async def _onboard_to_completed(
+    bot: CoachBotApplicationService, athlete: TelegramIdentity
+) -> None:
+    """Walk a fresh athlete to ONBOARDING_COMPLETED with MARATHON, no support."""
+
+    await bot.start(athlete)
+    await bot.handle_callback(athlete, "nav:v1:consent")
+    await bot.handle_callback(athlete, "ob:v1:consent")
+    await bot.handle_callback(athlete, "ob:v1:profile")
+    await bot.handle_text(athlete, "1990")
+    await bot.handle_callback(athlete, "ob:v1:profile:gender:FEMALE")
+    await bot.handle_text(athlete, "62.5")
+    await bot.handle_text(athlete, "168")
+    await bot.handle_callback(athlete, "ob:v1:goal:sport:RUNNING")
+    await bot.handle_callback(athlete, "ob:v1:goal:template:MARATHON")
+    await bot.handle_callback(athlete, "ob:v1:support:none")
+    equipment = await bot.handle_text(
+        athlete, "Weekday evenings and a longer Saturday run."
+    )
+    equipment_callback = next(
+        callback for label, callback in _buttons(equipment) if "Running shoes" in label
+    )
+    await bot.handle_callback(athlete, equipment_callback)
+    await bot.handle_callback(athlete, "ob:v1:equipment:done")
+    await bot.handle_callback(athlete, "ob:v1:health:none")
+    await bot.handle_callback(athlete, "ob:v1:history:skip")
+
+
+@pytest.mark.asyncio
+async def test_profile_settings_goal_main_walks_sport_then_template_then_offers_support(
+    journey: tuple[
+        CoachBotApplicationService,
+        async_sessionmaker[AsyncSession],
+    ],
+) -> None:
+    """Editing the main goal after onboarding uses the same deterministic menu."""
+
+    bot, factory = journey
+    athlete = _athlete()
+    await _onboard_to_completed(bot, athlete)
+
+    await bot.handle_callback(athlete, "ps:v1:section:goal")
+    main = await bot.handle_callback(athlete, "ps:v1:goal:main")
+    assert main.text == messages.PROFILE_GOAL_MAIN_SPORT
+    assert ("Triathlon", "ps:v1:goal:sport:TRIATHLON") in _buttons(main)
+
+    sport_choice = await bot.handle_callback(athlete, "ps:v1:goal:sport:TRIATHLON")
+    assert sport_choice.text == messages.PROFILE_GOAL_MAIN_TEMPLATE
+    assert (
+        "Half-distance triathlon",
+        "ps:v1:goal:template:TRIATHLON_HALF_DISTANCE",
+    ) in _buttons(sport_choice)
+
+    template_choice = await bot.handle_callback(
+        athlete, "ps:v1:goal:template:TRIATHLON_HALF_DISTANCE"
+    )
+    assert "Saved: Main goal." in template_choice.text
+    assert messages.PROFILE_GOAL_SECONDARY in template_choice.text
+    assert ("Maintain muscle", "ps:v1:goal:support:MUSCLE_RETENTION") in _buttons(
+        template_choice
+    )
+
+    support_choice = await bot.handle_callback(
+        athlete, "ps:v1:goal:support:MUSCLE_RETENTION"
+    )
+    assert "Saved: Secondary priority." in support_choice.text
+    assert messages.PROFILE_GOAL_MENU in support_choice.text
+
+    async with factory() as session:
+        goal = await session.scalar(select(TrainingGoal))
+        assert goal is not None
+        assert goal.main_goal == "Half-distance triathlon"
+        assert goal.target_outcome == "Half-distance triathlon"
+        assert goal.secondary_priority == "Maintain muscle"
+
+
+@pytest.mark.asyncio
+async def test_profile_settings_secondary_priority_is_a_direct_entry_point(
+    journey: tuple[
+        CoachBotApplicationService,
+        async_sessionmaker[AsyncSession],
+    ],
+) -> None:
+    """Editing just the support does not require re-choosing the primary goal."""
+
+    bot, factory = journey
+    athlete = _athlete()
+    await _onboard_to_completed(bot, athlete)
+
+    await bot.handle_callback(athlete, "ps:v1:section:goal")
+    secondary = await bot.handle_callback(athlete, "ps:v1:goal:secondary")
+    assert secondary.text == messages.PROFILE_GOAL_SECONDARY
+    assert ("No supporting goal", "ps:v1:goal:support:none") in _buttons(secondary)
+
+    added = await bot.handle_callback(
+        athlete, "ps:v1:goal:support:STRENGTH_MAINTENANCE"
+    )
+    assert "Saved: Secondary priority." in added.text
+    assert messages.PROFILE_GOAL_MENU in added.text
+
+    async with factory() as session:
+        goal = await session.scalar(select(TrainingGoal))
+        assert goal is not None
+        # Unchanged: this entry point never touches the primary goal.
+        assert goal.main_goal == "Marathon"
+        assert goal.secondary_priority == "Maintain strength"
+
+    await bot.handle_callback(athlete, "ps:v1:section:goal")
+    await bot.handle_callback(athlete, "ps:v1:goal:secondary")
+    removed = await bot.handle_callback(athlete, "ps:v1:goal:support:none")
+    assert messages.PROFILE_GOAL_MENU in removed.text
+
+    async with factory() as session:
+        goal = await session.scalar(select(TrainingGoal))
+        assert goal is not None
+        assert goal.secondary_priority is None
+        assert goal.supporting_goal_template_id is None
+
+
+@pytest.mark.asyncio
+async def test_profile_settings_goal_main_back_navigation_discards_the_pending_sport(
+    journey: tuple[
+        CoachBotApplicationService,
+        async_sessionmaker[AsyncSession],
+    ],
+) -> None:
+    bot, factory = journey
+    athlete = _athlete()
+    await _onboard_to_completed(bot, athlete)
+
+    await bot.handle_callback(athlete, "ps:v1:section:goal")
+    await bot.handle_callback(athlete, "ps:v1:goal:main")
+    await bot.handle_callback(athlete, "ps:v1:goal:sport:CYCLING")
+
+    # Step back from the template screen to the sport screen: still in the
+    # goal-main mini-flow, the pending sport is discarded.
+    reopened = await bot.handle_callback(athlete, "ps:v1:goal:main:back")
+    assert reopened.text == messages.PROFILE_GOAL_MAIN_SPORT
+
+    # The full escape hatch: back out to the goal menu entirely.
+    cancelled = await bot.handle_callback(athlete, "ps:v1:goal:back")
+    assert cancelled.text == messages.PROFILE_GOAL_MENU
+
+    async with factory() as session:
+        goal = await session.scalar(select(TrainingGoal))
+        assert goal is not None
+        # Nothing was ever confirmed, so the original goal survives untouched.
+        assert goal.main_goal == "Marathon"
 
 
 async def _agent_input(

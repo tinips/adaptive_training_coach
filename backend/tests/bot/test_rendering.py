@@ -80,6 +80,36 @@ def test_goal_menu_keyboards_expose_only_supported_actions() -> None:
     ]
 
 
+def test_profile_settings_goal_menu_keyboards_expose_only_supported_actions() -> None:
+    """Mirrors the onboarding goal menu, with its own ps:v1: callback prefix."""
+
+    assert _button_pairs(
+        keyboards.profile_goal_sport_keyboard(["RUNNING", "TRIATHLON"])
+    ) == [
+        ("Running", "ps:v1:goal:sport:RUNNING"),
+        ("Triathlon", "ps:v1:goal:sport:TRIATHLON"),
+        ("Back", "ps:v1:goal:back"),
+    ]
+    assert _button_pairs(
+        keyboards.profile_goal_template_keyboard(
+            [("MARATHON", "Marathon"), ("HALF_MARATHON", "Half marathon")]
+        )
+    ) == [
+        ("Marathon", "ps:v1:goal:template:MARATHON"),
+        ("Half marathon", "ps:v1:goal:template:HALF_MARATHON"),
+        ("Back", "ps:v1:goal:main:back"),
+    ]
+    assert _button_pairs(
+        keyboards.profile_supporting_goal_keyboard(
+            [("STRENGTH_MAINTENANCE", "Maintain strength")]
+        )
+    ) == [
+        ("Maintain strength", "ps:v1:goal:support:STRENGTH_MAINTENANCE"),
+        ("No supporting goal", "ps:v1:goal:support:none"),
+        ("Back", "ps:v1:goal:back"),
+    ]
+
+
 def test_callback_values_fit_telegram_limit() -> None:
     samples = [
         keyboards.welcome_keyboard(),
@@ -91,6 +121,15 @@ def test_callback_values_fit_telegram_limit() -> None:
             [("TRIATHLON_FULL_DISTANCE", "Full-distance triathlon")]
         ),
         keyboards.supporting_goal_keyboard(
+            [("STRENGTH_MAINTENANCE", "Maintain strength")]
+        ),
+        keyboards.profile_goal_sport_keyboard(
+            ["RUNNING", "CYCLING", "SWIMMING", "TRIATHLON"]
+        ),
+        keyboards.profile_goal_template_keyboard(
+            [("TRIATHLON_FULL_DISTANCE", "Full-distance triathlon")]
+        ),
+        keyboards.profile_supporting_goal_keyboard(
             [("STRENGTH_MAINTENANCE", "Maintain strength")]
         ),
         keyboards.profile_gender_keyboard(),
@@ -264,10 +303,13 @@ def test_profile_equipment_table_and_long_context_fit_telegram() -> None:
 
 
 def test_goal_settings_menu_exposes_every_editable_goal_field() -> None:
-    # Main goal and secondary priority are chosen from the deterministic menu
-    # during onboarding; they are not free-text fields here any more.
+    # Main goal and secondary priority are chosen from the same deterministic
+    # catalog menu as onboarding (ps:v1:goal:main / ps:v1:goal:secondary),
+    # not typed as free text.
     assert _button_pairs(keyboards.profile_goal_keyboard()) == [
+        ("Main goal", "ps:v1:goal:main"),
         ("Target outcome", "ps:v1:goal:outcome"),
         ("Event date", "ps:v1:goal:date"),
+        ("Secondary priority", "ps:v1:goal:secondary"),
         ("Back", "ps:v1:goal:back"),
     ]

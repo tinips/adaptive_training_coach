@@ -187,14 +187,14 @@ class CoachBotApplicationService:
             and not content.startswith("/")
         ):
             if content == keyboards.LABELS["change_profile"]:
-                return self._render_profile_settings(
+                return await self._render_profile_settings(
                     await self._onboarding.open_profile_settings(identity)
                 )
             result = await self._onboarding.submit_profile_settings_text(
                 identity, content
             )
             return (
-                self._render_profile_settings(result)
+                await self._render_profile_settings(result)
                 if result is not None
                 else TelegramResponse(
                     messages.PROFILE_SETTINGS_UNPROMPTED,
@@ -368,7 +368,7 @@ class CoachBotApplicationService:
                 state = await self._onboarding.profile_settings_snapshot(identity)
                 if state is None:
                     state = await self._onboarding.open_profile_settings(identity)
-                response = self._render_profile_settings(state)
+                response = await self._render_profile_settings(state)
             else:
                 raise
         return replace(response, edit_existing=True)
@@ -396,11 +396,11 @@ class CoachBotApplicationService:
         if callback_data == "acct:v1:delete:keep":
             return TelegramResponse(messages.ACCOUNT_KEPT)
         if callback_data == "ps:v1:open":
-            return self._render_profile_settings(
+            return await self._render_profile_settings(
                 await self._onboarding.open_profile_settings(identity)
             )
         if callback_data.startswith("ps:v1:"):
-            return self._render_profile_settings(
+            return await self._render_profile_settings(
                 await self._onboarding.choose_profile_settings(
                     identity, callback_data.removeprefix("ps:v1:")
                 )
@@ -549,8 +549,34 @@ class CoachBotApplicationService:
             messages.DELETE_CONFIRM, keyboards.deletion_confirmation_keyboard()
         )
 
-    @staticmethod
-    def _render_profile_settings(result: ProfileSettingsResult) -> TelegramResponse:
+    async def _render_profile_settings(
+        self, result: ProfileSettingsResult
+    ) -> TelegramResponse:
+        if result.step.value == "GOAL_MAIN":
+            sport = result.pending.get(_GOAL_SPORT_ANSWER_KEY)
+            if isinstance(sport, str) and sport:
+                templates = await self._onboarding.goal_template_options(sport)
+                return TelegramResponse(
+                    messages.PROFILE_GOAL_MAIN_TEMPLATE,
+                    keyboards.profile_goal_template_keyboard(templates),
+                )
+            sports = await self._onboarding.goal_sport_options()
+            return TelegramResponse(
+                messages.PROFILE_GOAL_MAIN_SPORT,
+                keyboards.profile_goal_sport_keyboard(sports),
+            )
+        if result.step.value == "GOAL_SECONDARY":
+            supporting_options = await self._onboarding.supporting_goal_options()
+            text = messages.PROFILE_GOAL_SECONDARY
+            if result.saved_field not in {None, "__closed__"}:
+                text = (
+                    f"{messages.PROFILE_SAVED.format(field=result.saved_field)}"
+                    f"\n\n{text}"
+                )
+            return TelegramResponse(
+                text,
+                keyboards.profile_supporting_goal_keyboard(supporting_options),
+            )
         if result.step.value == "EQUIPMENT" and result.capability_review is not None:
             review = result.capability_review
             text = messages.equipment_review(review)

@@ -755,11 +755,140 @@ class OnboardingService:
                         step=state.current_step,
                     ),
                 )
+            if action in {"goal:main", "goal:secondary"}:
+                # Both open the deterministic catalog menu fresh (no prefilled
+                # pending text, unlike goal:outcome/goal:date above): the
+                # primary and supporting goal are chosen from a fixed list,
+                # not typed.
+                if step is not ProfileSettingsStep.GOAL_MENU:
+                    raise OnboardingApplicationError("stale_action")
+                goal = await ProfileRepository(session).get_training_goal(
+                    user_id=user.id
+                )
+                if goal is None:
+                    raise OnboardingApplicationError("stale_action")
+                next_step = (
+                    ProfileSettingsStep.GOAL_MAIN
+                    if action == "goal:main"
+                    else ProfileSettingsStep.GOAL_SECONDARY
+                )
+                state = await settings_repo.save(
+                    user_id=user.id,
+                    step=next_step,
+                    pending={},
+                )
+                return ProfileSettingsResult(step=state.current_step)
+            if action.startswith("goal:sport:"):
+                if step is not ProfileSettingsStep.GOAL_MAIN:
+                    raise OnboardingApplicationError("stale_action")
+                try:
+                    sport = GoalSport(action.removeprefix("goal:sport:"))
+                except ValueError as exc:
+                    raise OnboardingApplicationError("invalid_action") from exc
+                pending[_GOAL_SPORT_KEY] = sport.value
+                state = await settings_repo.save(
+                    user_id=user.id,
+                    step=ProfileSettingsStep.GOAL_MAIN,
+                    pending=pending,
+                )
+                return ProfileSettingsResult(
+                    step=state.current_step,
+                    pending=cast(dict[str, JsonValue], pending),
+                )
+            if action == "goal:main:back":
+                # Steps from the template screen back to the sport screen,
+                # staying inside GOAL_MAIN. `goal:back` below remains the
+                # separate escape hatch out of the whole goal-editing flow.
+                if step is not ProfileSettingsStep.GOAL_MAIN:
+                    raise OnboardingApplicationError("stale_action")
+                pending.pop(_GOAL_SPORT_KEY, None)
+                state = await settings_repo.save(
+                    user_id=user.id,
+                    step=ProfileSettingsStep.GOAL_MAIN,
+                    pending=pending,
+                )
+                return ProfileSettingsResult(step=state.current_step)
+            if action.startswith("goal:template:"):
+                if step is not ProfileSettingsStep.GOAL_MAIN:
+                    raise OnboardingApplicationError("stale_action")
+                code = action.removeprefix("goal:template:")
+                template = await TrainingCatalogRepository(session).active_goal_by_code(
+                    code=code
+                )
+                # Callback data is not trustworthy, the same reason onboarding's
+                # choose_goal_template validates it.
+                if template is None or template.kind is not GoalTemplateKind.PRIMARY:
+                    raise OnboardingApplicationError("invalid_action")
+                goal = await ProfileRepository(session).get_training_goal(
+                    user_id=user.id
+                )
+                if goal is None:
+                    raise OnboardingApplicationError("stale_action")
+                await ProfileRepository(session).upsert_training_goal(
+                    user_id=user.id,
+                    main_goal=template.display_name,
+                    event_date=goal.event_date,
+                    target_outcome=template.display_name,
+                    secondary_priority=goal.secondary_priority,
+                    original_description=template.display_name,
+                    goal_template_id=template.id,
+                    supporting_goal_template_id=goal.supporting_goal_template_id,
+                )
+                state = await settings_repo.save(
+                    user_id=user.id,
+                    step=ProfileSettingsStep.GOAL_SECONDARY,
+                    pending={},
+                )
+                return ProfileSettingsResult(
+                    step=state.current_step, saved_field="Main goal"
+                )
+            if action.startswith("goal:support:"):
+                if step is not ProfileSettingsStep.GOAL_SECONDARY:
+                    raise OnboardingApplicationError("stale_action")
+                raw = action.removeprefix("goal:support:")
+                goal = await ProfileRepository(session).get_training_goal(
+                    user_id=user.id
+                )
+                if goal is None:
+                    raise OnboardingApplicationError("stale_action")
+                supporting_id: uuid.UUID | None = None
+                secondary_priority: str | None = None
+                if raw != "none":
+                    template = await TrainingCatalogRepository(
+                        session
+                    ).active_goal_by_code(code=raw)
+                    if (
+                        template is None
+                        or template.kind is not GoalTemplateKind.SUPPORTING
+                    ):
+                        raise OnboardingApplicationError("invalid_action")
+                    supporting_id = template.id
+                    secondary_priority = template.display_name
+                await ProfileRepository(session).upsert_training_goal(
+                    user_id=user.id,
+                    main_goal=goal.main_goal,
+                    event_date=goal.event_date,
+                    target_outcome=goal.target_outcome,
+                    secondary_priority=secondary_priority,
+                    original_description=goal.original_description,
+                    goal_template_id=goal.goal_template_id,
+                    supporting_goal_template_id=supporting_id,
+                )
+                state = await settings_repo.save(
+                    user_id=user.id,
+                    step=ProfileSettingsStep.GOAL_MENU,
+                    pending={},
+                )
+                return ProfileSettingsResult(
+                    step=state.current_step, saved_field="Secondary priority"
+                )
             if action == "goal:back":
                 if step not in {
                     ProfileSettingsStep.GOAL_MENU,
                     ProfileSettingsStep.GOAL_OUTCOME,
                     ProfileSettingsStep.GOAL_DATE,
+                    ProfileSettingsStep.GOAL_MAIN,
+                    ProfileSettingsStep.GOAL_SECONDARY,
                 }:
                     raise OnboardingApplicationError("stale_action")
                 next_step = (

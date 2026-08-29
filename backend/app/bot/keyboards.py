@@ -265,8 +265,10 @@ def profile_settings_keyboard() -> InlineKeyboardMarkup:
 def profile_goal_keyboard() -> InlineKeyboardMarkup:
     return _rows(
         [
+            [("Main goal", "ps:v1:goal:main")],
             [("Target outcome", "ps:v1:goal:outcome")],
             [("Event date", "ps:v1:goal:date")],
+            [("Secondary priority", "ps:v1:goal:secondary")],
             [("Back", "ps:v1:goal:back")],
         ]
     )
@@ -278,6 +280,54 @@ def profile_goal_text_keyboard() -> InlineKeyboardMarkup:
 
 def profile_goal_date_keyboard() -> InlineKeyboardMarkup:
     return _rows([[("Not yet", "ps:v1:goal:no-date")], [("Back", "ps:v1:goal:back")]])
+
+
+def profile_goal_sport_keyboard(sports: Sequence[str]) -> InlineKeyboardMarkup:
+    """Profile-settings mirror of `goal_sport_keyboard`, its own callback prefix.
+
+    Takes plain sport values, not a service-layer enum, for the same reason
+    `goal_sport_keyboard` does: this module keeps importing nothing but
+    telegram and app.bot.rendering.
+    """
+
+    label_by_sport = {
+        "RUNNING": LABELS["goal_sport_running"],
+        "CYCLING": LABELS["goal_sport_cycling"],
+        "SWIMMING": LABELS["goal_sport_swimming"],
+        "TRIATHLON": LABELS["goal_sport_triathlon"],
+    }
+    rows = [[(label_by_sport[sport], f"ps:v1:goal:sport:{sport}")] for sport in sports]
+    rows.append([("Back", "ps:v1:goal:back")])
+    return _rows(rows)
+
+
+def profile_goal_template_keyboard(
+    options: Sequence[tuple[str, str]],
+) -> InlineKeyboardMarkup:
+    """Profile-settings mirror of `goal_template_keyboard`.
+
+    "Back" here steps to the sport screen (`ps:v1:goal:main:back`), not out of
+    the goal-editing mini-flow entirely; `ps:v1:goal:back` remains the escape
+    hatch back to the goal menu, reachable from the sport screen.
+    """
+
+    rows = [
+        [(display_name, f"ps:v1:goal:template:{code}")]
+        for code, display_name in options
+    ]
+    rows.append([("Back", "ps:v1:goal:main:back")])
+    return _rows(rows)
+
+
+def profile_supporting_goal_keyboard(
+    options: Sequence[tuple[str, str]],
+) -> InlineKeyboardMarkup:
+    """Profile-settings mirror of `supporting_goal_keyboard`."""
+
+    rows = [[(name, f"ps:v1:goal:support:{code}")] for code, name in options]
+    rows.append([(LABELS["support_none"], "ps:v1:goal:support:none")])
+    rows.append([("Back", "ps:v1:goal:back")])
+    return _rows(rows)
 
 
 def profile_health_keyboard() -> InlineKeyboardMarkup:
