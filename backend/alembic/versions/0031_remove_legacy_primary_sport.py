@@ -35,13 +35,23 @@ PRIMARY_SPORT_VALUES = (
 
 def upgrade() -> None:
     """Drop the unusable legacy primary_sport column and its check constraint."""
-
-    with op.batch_alter_table("athlete_profiles") as batch:
-        batch.drop_constraint(
-            op.f("ck_athlete_profiles_primary_sport"),
-            type_="check",
-        )
-        batch.drop_column("primary_sport")
+    # Use conditional logic to handle cases where constraint/column may not exist
+    conn = op.get_bind()
+    
+    # Check if the column exists before dropping
+    inspector = sa.inspect(conn)
+    columns = [c["name"] for c in inspector.get_columns("athlete_profiles")]
+    
+    if "primary_sport" in columns:
+        with op.batch_alter_table("athlete_profiles") as batch:
+            # Try to drop constraint if it exists
+            constraints = [c["name"] for c in inspector.get_check_constraints("athlete_profiles")]
+            if "ck_athlete_profiles_primary_sport" in constraints:
+                batch.drop_constraint(
+                    "ck_athlete_profiles_primary_sport",
+                    type_="check",
+                )
+            batch.drop_column("primary_sport")
 
 
 def downgrade() -> None:
