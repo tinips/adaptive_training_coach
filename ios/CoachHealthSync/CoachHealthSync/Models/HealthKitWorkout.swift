@@ -23,7 +23,7 @@ struct HealthKitWorkout: Identifiable, Equatable, Sendable {
 
     var syncPayload: HealthKitWorkoutSyncPayload {
         let normalizedDuration = Self.normalizedDurationSeconds(durationSeconds)
-        HealthKitWorkoutSyncPayload(
+        return HealthKitWorkoutSyncPayload(
             workoutUUID: id,
             activityType: activityType,
             startedAt: startDate,
