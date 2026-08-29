@@ -52,8 +52,15 @@ class HealthKitWorkoutPayload(_StrictMobileSchema):
     started_at: datetime
     ended_at: datetime
     duration_seconds: int = Field(gt=0, le=7 * 24 * 60 * 60)
+    moving_duration_seconds: int | None = Field(default=None, ge=0)
     distance_meters: float | None = Field(default=None, ge=0)
+    elevation_gain_meters: float | None = Field(default=None, ge=0)
+    elevation_loss_meters: float | None = Field(default=None, ge=0)
     calories_kcal: float | None = Field(default=None, ge=0)
+    average_heart_rate: float | None = Field(default=None, ge=0)
+    max_heart_rate: float | None = Field(default=None, ge=0)
+    average_cadence: float | None = Field(default=None, ge=0)
+    max_cadence: float | None = Field(default=None, ge=0)
 
     @field_validator("started_at", "ended_at")
     @classmethod

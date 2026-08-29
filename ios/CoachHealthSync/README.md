@@ -2,7 +2,7 @@
 
 This is a deliberately small iPhone companion app for the Coach backend. It
 reads the last three months of **workout summaries only** from Apple Health and
-lets the athlete manually synchronize one selected workout.
+can synchronize one or all loaded workouts.
 
 It does not contain a Watch app, background sync, an offline queue, routes,
 GPS, workout notes, granular heart-rate data, or an App Store release flow.

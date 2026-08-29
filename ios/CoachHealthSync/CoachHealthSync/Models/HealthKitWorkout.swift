@@ -11,19 +11,33 @@ struct HealthKitWorkout: Identifiable, Equatable, Sendable {
     let startDate: Date
     let endDate: Date
     let durationSeconds: Double
-    let distanceMeters: Double?
-    let caloriesKcal: Double?
+    let distanceMeters: Double? = nil
+    let elevationGainMeters: Double? = nil
+    let elevationLossMeters: Double? = nil
+    let caloriesKcal: Double? = nil
+    let averageHeartRate: Double? = nil
+    let maxHeartRate: Double? = nil
+    let averageCadence: Double? = nil
+    let maxCadence: Double? = nil
     let sourceName: String
 
     var syncPayload: HealthKitWorkoutSyncPayload {
+        let normalizedDuration = Self.normalizedDurationSeconds(durationSeconds)
         HealthKitWorkoutSyncPayload(
             workoutUUID: id,
             activityType: activityType,
             startedAt: startDate,
             endedAt: endDate,
-            durationSeconds: Self.normalizedDurationSeconds(durationSeconds),
+            durationSeconds: normalizedDuration,
+            movingDurationSeconds: normalizedDuration,
             distanceMeters: distanceMeters,
-            caloriesKcal: caloriesKcal
+            elevationGainMeters: elevationGainMeters,
+            elevationLossMeters: elevationLossMeters,
+            caloriesKcal: caloriesKcal,
+            averageHeartRate: averageHeartRate,
+            maxHeartRate: maxHeartRate,
+            averageCadence: averageCadence,
+            maxCadence: maxCadence
         )
     }
 
@@ -51,8 +65,15 @@ struct HealthKitWorkoutSyncPayload: Encodable, Equatable, Sendable {
     let startedAt: Date
     let endedAt: Date
     let durationSeconds: Int
-    let distanceMeters: Double?
-    let caloriesKcal: Double?
+    let movingDurationSeconds: Int? = nil
+    let distanceMeters: Double? = nil
+    let elevationGainMeters: Double? = nil
+    let elevationLossMeters: Double? = nil
+    let caloriesKcal: Double? = nil
+    let averageHeartRate: Double? = nil
+    let maxHeartRate: Double? = nil
+    let averageCadence: Double? = nil
+    let maxCadence: Double? = nil
 
     enum CodingKeys: String, CodingKey {
         case workoutUUID = "workout_uuid"
@@ -60,8 +81,15 @@ struct HealthKitWorkoutSyncPayload: Encodable, Equatable, Sendable {
         case startedAt = "started_at"
         case endedAt = "ended_at"
         case durationSeconds = "duration_seconds"
+        case movingDurationSeconds = "moving_duration_seconds"
         case distanceMeters = "distance_meters"
+        case elevationGainMeters = "elevation_gain_meters"
+        case elevationLossMeters = "elevation_loss_meters"
         case caloriesKcal = "calories_kcal"
+        case averageHeartRate = "average_heart_rate"
+        case maxHeartRate = "max_heart_rate"
+        case averageCadence = "average_cadence"
+        case maxCadence = "max_cadence"
     }
 }
 

@@ -29,9 +29,18 @@ final class HealthKitService: HealthKitServicing {
 
     func requestWorkoutReadAuthorization() async throws {
         let workoutType = HKObjectType.workoutType()
+        let readTypes: Set<HKObjectType> = [
+            workoutType,
+            HKQuantityType.quantityType(forIdentifier: .activeEnergyBurned),
+            HKQuantityType.quantityType(forIdentifier: .heartRate),
+            HKQuantityType.quantityType(forIdentifier: .stepCount),
+            HKQuantityType.quantityType(forIdentifier: .cyclingCadence),
+            HKQuantityType.quantityType(forIdentifier: .elevationAscended),
+            HKQuantityType.quantityType(forIdentifier: .elevationDescended),
+        ].compactMap { $0 }
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            healthStore.requestAuthorization(toShare: [], read: [workoutType]) { success, error in
+            healthStore.requestAuthorization(toShare: [], read: readTypes) { success, error in
                 if let error {
                     continuation.resume(throwing: error)
                 } else if success {
@@ -101,6 +110,32 @@ final class HealthKitService: HealthKitServicing {
                 quantityType: HKQuantityType.quantityType(forIdentifier: .activeEnergyBurned),
                 unit: .kilocalorie()
             ),
+            elevationGainMeters: quantityValue(
+                for: workout,
+                quantityType: HKQuantityType.quantityType(forIdentifier: .elevationAscended),
+                unit: .meter()
+            ),
+            elevationLossMeters: quantityValue(
+                for: workout,
+                quantityType: HKQuantityType.quantityType(forIdentifier: .elevationDescended),
+                unit: .meter()
+            ),
+            averageHeartRate: averageQuantityValue(
+                for: workout,
+                quantityType: HKQuantityType.quantityType(forIdentifier: .heartRate),
+                unit: HKUnit.count().unitDivided(by: .minute())
+            ),
+            maxHeartRate: maximumQuantityValue(
+                for: workout,
+                quantityType: HKQuantityType.quantityType(forIdentifier: .heartRate),
+                unit: HKUnit.count().unitDivided(by: .minute())
+            ),
+            averageCadence: averageCadence(for: workout),
+            maxCadence: maximumQuantityValue(
+                for: workout,
+                quantityType: cadenceQuantityType(for: workout.workoutActivityType),
+                unit: HKUnit.count().unitDivided(by: .minute())
+            ),
             sourceName: workout.sourceRevision.source.name
         )
     }
@@ -130,5 +165,54 @@ final class HealthKitService: HealthKitServicing {
         }
 
         return quantity.doubleValue(for: unit)
+    }
+
+    private static func averageQuantityValue(
+        for workout: HKWorkout,
+        quantityType: HKQuantityType?,
+        unit: HKUnit
+    ) -> Double? {
+        guard let quantityType,
+              let quantity = workout.statistics(for: quantityType)?.averageQuantity()
+        else { return nil }
+        return quantity.doubleValue(for: unit)
+    }
+
+    private static func maximumQuantityValue(
+        for workout: HKWorkout,
+        quantityType: HKQuantityType?,
+        unit: HKUnit
+    ) -> Double? {
+        guard let quantityType,
+              let quantity = workout.statistics(for: quantityType)?.maximumQuantity()
+        else { return nil }
+        return quantity.doubleValue(for: unit)
+    }
+
+    private static func averageCadence(for workout: HKWorkout) -> Double? {
+        let cadenceUnit = HKUnit.count().unitDivided(by: .minute())
+        if let directCadence = averageQuantityValue(
+            for: workout,
+            quantityType: cadenceQuantityType(for: workout.workoutActivityType),
+            unit: cadenceUnit
+        ) {
+            return directCadence
+        }
+        guard workout.workoutActivityType == .running,
+              let steps = quantityValue(
+                  for: workout,
+                  quantityType: HKQuantityType.quantityType(forIdentifier: .stepCount),
+                  unit: .count()
+              )
+        else { return nil }
+        return steps / workout.duration * 60
+    }
+
+    private static func cadenceQuantityType(
+        for activityType: HKWorkoutActivityType
+    ) -> HKQuantityType? {
+        activityType == .cycling
+            ? HKQuantityType.quantityType(forIdentifier: .cyclingCadence)
+            : nil
     }
 }
