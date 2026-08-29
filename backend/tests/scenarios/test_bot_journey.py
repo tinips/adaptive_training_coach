@@ -418,6 +418,49 @@ async def test_an_unparseable_race_date_is_rejected_without_advancing(
 
 
 @pytest.mark.asyncio
+async def test_a_past_race_date_is_rejected_without_advancing(
+    journey: tuple[
+        CoachBotApplicationService,
+        async_sessionmaker[AsyncSession],
+    ],
+) -> None:
+    """A race that already happened is not a goal, same as unparseable text."""
+
+    bot, athlete, factory = await _onboard_to_goal_chosen(journey)
+    await bot.handle_callback(athlete, "ob:v1:goal:template:MARATHON")
+
+    await bot.handle_text(athlete, "2020-01-01")
+
+    async with factory() as session:
+        onboarding = await session.scalar(select(OnboardingSession))
+    assert onboarding is not None
+    assert onboarding.current_step is OnboardingStep.GOAL_EVENT_DATE
+
+
+@pytest.mark.asyncio
+async def test_a_race_date_in_ddmmyyyy_format_is_parsed_correctly(
+    journey: tuple[
+        CoachBotApplicationService,
+        async_sessionmaker[AsyncSession],
+    ],
+) -> None:
+    """11/07/2027 must become 11 July 2027, not day/month swapped."""
+
+    bot, athlete, factory = await _onboard_to_goal_chosen(journey)
+
+    await bot.handle_callback(athlete, "ob:v1:goal:template:MARATHON")
+    await bot.handle_text(athlete, "11/07/2027")
+
+    async with factory() as session:
+        goal = await session.scalar(select(TrainingGoal))
+        onboarding = await session.scalar(select(OnboardingSession))
+    assert goal is not None
+    assert goal.event_date == date(2027, 7, 11)
+    assert onboarding is not None
+    assert onboarding.current_step is OnboardingStep.GOAL_CONFIRMED
+
+
+@pytest.mark.asyncio
 async def test_profile_settings_goal_main_walks_sport_then_template_then_offers_support(
     journey: tuple[
         CoachBotApplicationService,
