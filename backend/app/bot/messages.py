@@ -613,10 +613,8 @@ def profile_setting_prompt(
     """Add the saved value to an edit prompt without changing stored data."""
 
     labels = {
-        ProfileSettingsStep.GOAL_MAIN: "Current goal",
         ProfileSettingsStep.GOAL_OUTCOME: "Current outcome",
         ProfileSettingsStep.GOAL_DATE: "Current event date",
-        ProfileSettingsStep.GOAL_SECONDARY: "Current secondary priority",
         ProfileSettingsStep.AVAILABILITY: "Current availability",
         ProfileSettingsStep.HEALTH: "Current training limitations",
         ProfileSettingsStep.PERSONAL_BIRTH_YEAR: "Current birth year",

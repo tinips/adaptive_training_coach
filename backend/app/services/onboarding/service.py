@@ -46,6 +46,7 @@ from app.services.training_catalog.grouping import (
 )
 
 _GOAL_SPORT_KEY = "goal_sport"
+_MAIN_GOAL_CHANGED_KEY = "main_goal_changed"
 _BIRTH_YEAR_KEY = "birth_year"
 _GENDER_KEY = "gender"
 _WEIGHT_KG_KEY = "weight_kg"
@@ -824,6 +825,7 @@ class OnboardingService:
                 )
                 if goal is None:
                     raise OnboardingApplicationError("stale_action")
+                main_changed = template.id != goal.goal_template_id
                 await ProfileRepository(session).upsert_training_goal(
                     user_id=user.id,
                     main_goal=template.display_name,
@@ -834,13 +836,17 @@ class OnboardingService:
                     goal_template_id=template.id,
                     supporting_goal_template_id=goal.supporting_goal_template_id,
                 )
+                # Carried into GOAL_SECONDARY's pending so the terminal
+                # goal:support: branch below knows to reopen equipment review
+                # even if the supporting goal itself doesn't change there.
                 state = await settings_repo.save(
                     user_id=user.id,
                     step=ProfileSettingsStep.GOAL_SECONDARY,
-                    pending={},
+                    pending={_MAIN_GOAL_CHANGED_KEY: main_changed},
                 )
                 return ProfileSettingsResult(
-                    step=state.current_step, saved_field="Main goal"
+                    step=state.current_step,
+                    saved_field="Main goal" if main_changed else None,
                 )
             if action.startswith("goal:support:"):
                 if step is not ProfileSettingsStep.GOAL_SECONDARY:
@@ -864,6 +870,11 @@ class OnboardingService:
                         raise OnboardingApplicationError("invalid_action")
                     supporting_id = template.id
                     secondary_priority = template.display_name
+                support_changed = supporting_id != goal.supporting_goal_template_id
+                # Carried from goal:template: above: the primary goal may
+                # already have changed earlier in this same session, even if
+                # the supporting goal picked here is the same as before.
+                main_changed = bool(pending.get(_MAIN_GOAL_CHANGED_KEY, False))
                 await ProfileRepository(session).upsert_training_goal(
                     user_id=user.id,
                     main_goal=goal.main_goal,
@@ -874,14 +885,29 @@ class OnboardingService:
                     goal_template_id=goal.goal_template_id,
                     supporting_goal_template_id=supporting_id,
                 )
+                if support_changed or main_changed:
+                    # Training contexts may have changed (new sport, new
+                    # template, or a supporting goal added/removed), so the
+                    # equipment & access review needs to reopen, mirroring
+                    # the deleted _save_profile_classification's behavior.
+                    updated_goal = await ProfileRepository(session).get_training_goal(
+                        user_id=user.id
+                    )
+                    return await self._open_profile_equipment(
+                        session,
+                        user.id,
+                        settings_repo,
+                        goal=updated_goal,
+                        saved_field=(
+                            "Secondary priority" if support_changed else "Main goal"
+                        ),
+                    )
                 state = await settings_repo.save(
                     user_id=user.id,
                     step=ProfileSettingsStep.GOAL_MENU,
                     pending={},
                 )
-                return ProfileSettingsResult(
-                    step=state.current_step, saved_field="Secondary priority"
-                )
+                return ProfileSettingsResult(step=state.current_step, saved_field=None)
             if action == "goal:back":
                 if step not in {
                     ProfileSettingsStep.GOAL_MENU,

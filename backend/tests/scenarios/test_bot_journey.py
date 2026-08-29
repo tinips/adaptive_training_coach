@@ -379,8 +379,18 @@ async def test_profile_settings_goal_main_walks_sport_then_template_then_offers_
     support_choice = await bot.handle_callback(
         athlete, "ps:v1:goal:support:MUSCLE_RETENTION"
     )
+    # Both the primary and supporting goal changed, and triathlon's training
+    # contexts differ entirely from running's, so equipment & access reopens
+    # instead of landing straight back on the goal menu.
     assert "Saved: Secondary priority." in support_choice.text
-    assert messages.PROFILE_GOAL_MENU in support_choice.text
+    equipment_buttons = _buttons(support_choice)
+    assert any(
+        callback.startswith("ps:v1:equipment:") for _, callback in equipment_buttons
+    )
+
+    done = await bot.handle_callback(athlete, "ps:v1:equipment:done")
+    assert "Saved: Equipment & access." in done.text
+    assert messages.PROFILE_SETTINGS_MENU in done.text
 
     async with factory() as session:
         goal = await session.scalar(select(TrainingGoal))
@@ -411,8 +421,12 @@ async def test_profile_settings_secondary_priority_is_a_direct_entry_point(
     added = await bot.handle_callback(
         athlete, "ps:v1:goal:support:STRENGTH_MAINTENANCE"
     )
+    # The supporting goal changed, so equipment & access reopens even though
+    # this entry point never touched the primary goal.
     assert "Saved: Secondary priority." in added.text
-    assert messages.PROFILE_GOAL_MENU in added.text
+    added_buttons = _buttons(added)
+    assert any(callback.startswith("ps:v1:equipment:") for _, callback in added_buttons)
+    await bot.handle_callback(athlete, "ps:v1:equipment:done")
 
     async with factory() as session:
         goal = await session.scalar(select(TrainingGoal))
@@ -424,13 +438,57 @@ async def test_profile_settings_secondary_priority_is_a_direct_entry_point(
     await bot.handle_callback(athlete, "ps:v1:section:goal")
     await bot.handle_callback(athlete, "ps:v1:goal:secondary")
     removed = await bot.handle_callback(athlete, "ps:v1:goal:support:none")
-    assert messages.PROFILE_GOAL_MENU in removed.text
+    # Removing it is a change too: equipment & access reopens again.
+    assert "Saved: Secondary priority." in removed.text
+    removed_buttons = _buttons(removed)
+    assert any(
+        callback.startswith("ps:v1:equipment:") for _, callback in removed_buttons
+    )
+    await bot.handle_callback(athlete, "ps:v1:equipment:done")
 
     async with factory() as session:
         goal = await session.scalar(select(TrainingGoal))
         assert goal is not None
         assert goal.secondary_priority is None
         assert goal.supporting_goal_template_id is None
+
+
+@pytest.mark.asyncio
+async def test_profile_settings_goal_edit_skips_equipment_review_when_nothing_changed(
+    journey: tuple[
+        CoachBotApplicationService,
+        async_sessionmaker[AsyncSession],
+    ],
+) -> None:
+    """Re-confirming the same goal shows no save notice and never reopens equipment."""
+
+    bot, factory = journey
+    athlete = _athlete()
+    await _onboard_to_completed(bot, athlete)
+
+    await bot.handle_callback(athlete, "ps:v1:section:goal")
+    await bot.handle_callback(athlete, "ps:v1:goal:main")
+    await bot.handle_callback(athlete, "ps:v1:goal:sport:RUNNING")
+    template_choice = await bot.handle_callback(athlete, "ps:v1:goal:template:MARATHON")
+    # Re-picking the identical template is not a change: no save notice.
+    assert template_choice.text == messages.PROFILE_GOAL_SECONDARY
+
+    support_choice = await bot.handle_callback(athlete, "ps:v1:goal:support:none")
+    # The supporting goal was already unset, so nothing changed at all:
+    # straight back to the goal menu, no equipment review, no save notice.
+    assert support_choice.text == messages.PROFILE_GOAL_MENU
+
+    async with factory() as session:
+        goal = await session.scalar(select(TrainingGoal))
+        assert goal is not None
+        assert goal.main_goal == "Marathon"
+        assert goal.secondary_priority is None
+
+    # Same story through the direct secondary-priority entry point.
+    await bot.handle_callback(athlete, "ps:v1:section:goal")
+    await bot.handle_callback(athlete, "ps:v1:goal:secondary")
+    unchanged = await bot.handle_callback(athlete, "ps:v1:goal:support:none")
+    assert unchanged.text == messages.PROFILE_GOAL_MENU
 
 
 @pytest.mark.asyncio
