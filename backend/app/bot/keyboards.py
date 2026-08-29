@@ -398,6 +398,8 @@ def health_limitations_keyboard() -> InlineKeyboardMarkup:
 def training_history_import_keyboard() -> InlineKeyboardMarkup:
     return _rows(
         [
+            [("Upload a workout file", "ob:v1:history:file")],
+            [("Connect my phone", "ob:v1:history:phone")],
             [("Skip for now", "ob:v1:history:skip")],
             [(LABELS["cancel"], "ob:v1:cancel")],
         ]

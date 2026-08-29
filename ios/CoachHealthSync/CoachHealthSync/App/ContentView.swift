@@ -43,7 +43,7 @@ struct ContentView: View {
 
                     Section {
                         HStack {
-                            Text("Workouts from the last 7 days")
+                            Text("Workouts from the last 3 months")
                             Spacer()
                             Button {
                                 Task { await viewModel.refreshWorkouts() }

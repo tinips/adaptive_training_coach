@@ -1,7 +1,7 @@
 # Coach Health Sync POC
 
 This is a deliberately small iPhone companion app for the Coach backend. It
-reads the last seven days of **workout summaries only** from Apple Health and
+reads the last three months of **workout summaries only** from Apple Health and
 lets the athlete manually synchronize one selected workout.
 
 It does not contain a Watch app, background sync, an offline queue, routes,

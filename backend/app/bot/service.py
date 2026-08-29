@@ -461,6 +461,33 @@ class CoachBotApplicationService:
         if callback_data == "ob:v1:history:skip":
             result = await self._onboarding.skip_training_history(identity)
             return await self._render_onboarding(identity, result)
+        if callback_data == "ob:v1:history:file":
+            return TelegramResponse(
+                messages.TRAINING_HISTORY_FILE_PROMPT,
+                keyboards.training_history_import_keyboard(),
+            )
+        if callback_data == "ob:v1:history:phone":
+            if not self._mobile_sync_enabled or self._mobile_sync is None:
+                return TelegramResponse(
+                    f"{messages.MOBILE_SYNC_UNAVAILABLE}\n\n"
+                    f"{messages.TRAINING_HISTORY_IMPORT}",
+                    keyboards.training_history_import_keyboard(),
+                )
+            try:
+                pairing = await self._mobile_sync.issue_pairing_code(identity)
+            except MobileSyncDisabledError:
+                return TelegramResponse(
+                    f"{messages.MOBILE_SYNC_UNAVAILABLE}\n\n"
+                    f"{messages.TRAINING_HISTORY_IMPORT}",
+                    keyboards.training_history_import_keyboard(),
+                )
+            except MobileSyncIdentityNotFoundError:
+                return TelegramResponse(messages.NOT_FOUND)
+            await self._onboarding.complete_training_history(identity)
+            return TelegramResponse(
+                f"{messages.iphone_pairing_code(pairing.code, pairing.expires_at)}\n\n"
+                f"{messages.ONBOARDING_COMPLETED}"
+            )
         if callback_data == "ob:v1:cancel":
             return TelegramResponse(
                 messages.CANCEL_CONFIRM, keyboards.cancel_confirmation_keyboard()
@@ -724,13 +751,18 @@ class CoachBotApplicationService:
                 keyboards.supporting_goal_keyboard(supporting_options),
             )
         if result.kind == "context_validation_error":
+            health_prompt = (
+                messages.PAST_INJURIES_INTAKE
+                if "_current_limitations" in result.answers
+                else messages.HEALTH_LIMITATIONS_INTAKE
+            )
             retry_prompts = {
                 OnboardingStep.AVAILABILITY_INTAKE: (
                     messages.AVAILABILITY_INTAKE,
                     keyboards.profile_text_input_keyboard(),
                 ),
                 OnboardingStep.HEALTH_LIMITATIONS_INTAKE: (
-                    messages.HEALTH_LIMITATIONS_INTAKE,
+                    health_prompt,
                     keyboards.health_limitations_keyboard(),
                 ),
             }
@@ -764,9 +796,23 @@ class CoachBotApplicationService:
             result.kind == "health_limitations_intake"
             and result.execution_assessment is not None
         ):
+            health_prompt = (
+                messages.PAST_INJURIES_INTAKE
+                if "_current_limitations" in result.answers
+                else messages.HEALTH_LIMITATIONS_INTAKE
+            )
             return TelegramResponse(
                 f"{messages.equipment_summary(result.execution_assessment)}\n\n"
-                f"{messages.HEALTH_LIMITATIONS_INTAKE}",
+                f"{health_prompt}",
+                keyboards.health_limitations_keyboard(),
+            )
+        if result.kind == "health_limitations_intake":
+            return TelegramResponse(
+                (
+                    messages.PAST_INJURIES_INTAKE
+                    if "_current_limitations" in result.answers
+                    else messages.HEALTH_LIMITATIONS_INTAKE
+                ),
                 keyboards.health_limitations_keyboard(),
             )
         if result.kind == "onboarding_completed":

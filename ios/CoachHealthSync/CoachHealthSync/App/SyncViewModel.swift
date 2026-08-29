@@ -143,7 +143,7 @@ final class SyncViewModel: ObservableObject {
 
     private func loadWorkouts() async throws {
         let now = Date()
-        guard let startDate = Calendar.current.date(byAdding: .day, value: -7, to: now) else {
+        guard let startDate = Calendar.current.date(byAdding: .month, value: -3, to: now) else {
             return
         }
         let loadedWorkouts = try await healthKitService.fetchWorkouts(from: startDate, to: now)
@@ -152,7 +152,7 @@ final class SyncViewModel: ObservableObject {
             self.selectedWorkoutID = nil
         }
         if loadedWorkouts.isEmpty {
-            statusMessage = "No workouts were found in the last 7 days."
+            statusMessage = "No workouts were found in the last 3 months."
         } else {
             statusMessage = "Choose one workout, then tap Sync now."
         }

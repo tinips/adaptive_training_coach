@@ -211,6 +211,50 @@ async def test_history_skip_renders_suggestion_and_completed_controls() -> None:
     assert response.edit_existing is True
 
 
+@pytest.mark.asyncio
+async def test_history_phone_choice_pairs_and_completes_onboarding() -> None:
+    identity = _identity()
+    onboarding = SimpleNamespace(
+        complete_training_history=AsyncMock(
+            return_value=_result(
+                "onboarding_completed",
+                OnboardingStep.TRAINING_HISTORY_IMPORT,
+            )
+        )
+    )
+    mobile_sync = SimpleNamespace(
+        issue_pairing_code=AsyncMock(
+            return_value=SimpleNamespace(
+                code="ABCD2345",
+                expires_at=datetime(2026, 8, 21, 10, 30, tzinfo=UTC),
+            )
+        )
+    )
+
+    response = await _facade(
+        onboarding,
+        mobile_sync=mobile_sync,
+        mobile_sync_enabled=True,
+    ).handle_callback(identity, "ob:v1:history:phone")
+
+    mobile_sync.issue_pairing_code.assert_awaited_once_with(identity)
+    onboarding.complete_training_history.assert_awaited_once_with(identity)
+    assert "<code>ABCD2345</code>" in response.text
+    assert messages.ONBOARDING_COMPLETED in response.text
+    assert response.edit_existing is True
+
+
+@pytest.mark.asyncio
+async def test_history_file_choice_prompts_for_a_document() -> None:
+    response = await _facade(SimpleNamespace()).handle_callback(
+        _identity(), "ob:v1:history:file"
+    )
+
+    assert response.text == messages.TRAINING_HISTORY_FILE_PROMPT
+    assert response.keyboard == keyboards.training_history_import_keyboard()
+    assert response.edit_existing is True
+
+
 def _weekly_plan() -> WeeklyPlan:
     week_start = date(2026, 8, 24)
     days = []

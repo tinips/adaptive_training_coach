@@ -167,13 +167,21 @@ AVAILABILITY_INTAKE = (
     "I can swim at a pool on Wednesday and Friday, and I can cycle only on weekends.'"
 )
 HEALTH_LIMITATIONS_INTAKE = (
-    "Write any current or past injuries, discomfort, or physical limitations that "
-    "should influence training, or choose None. This is not medical advice."
+    "Write any current injuries, discomfort, or physical limitations that should "
+    "influence training, or choose None. This is not medical advice."
+)
+PAST_INJURIES_INTAKE = (
+    "Do you have any past injuries or recurring issues that should influence "
+    "training? Write them down, or choose None. This is not medical advice."
 )
 TRAINING_HISTORY_IMPORT = (
-    "Optional: import your workout history so future coaching can use your actual "
-    "training data. Send an Apple Health export ZIP or a TCX workout file, or "
-    "choose Skip for now. Only workout data is imported."
+    "Optional: add your workouts from the last 3 months so future coaching can "
+    "use your actual training data. Choose whether to upload a workout file, "
+    "connect your phone, or skip for now. Only workout data is imported."
+)
+TRAINING_HISTORY_FILE_PROMPT = (
+    "Send an Apple Health export ZIP or a TCX workout file containing workouts "
+    "from the last 3 months. Only workout data is imported."
 )
 CONTEXT_VALIDATION_ERROR = (
     "Please send a short answer for this part of your athlete profile."

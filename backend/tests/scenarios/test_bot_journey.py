@@ -127,6 +127,7 @@ async def test_journey_collects_profile_goal_and_required_context_before_complet
     )
     await bot.handle_callback(athlete, equipment_callback)
     limitations = await bot.handle_callback(athlete, "ob:v1:equipment:done")
+    past_injuries = await bot.handle_callback(athlete, "ob:v1:health:none")
     history = await bot.handle_callback(athlete, "ob:v1:health:none")
     completed = await bot.handle_callback(athlete, "ob:v1:history:skip")
     displayed_profile = await bot.profile(athlete)
@@ -159,6 +160,7 @@ async def test_journey_collects_profile_goal_and_required_context_before_complet
     assert availability.text == messages.AVAILABILITY_INTAKE
     assert "select every resource" in equipment.text.casefold()
     assert messages.HEALTH_LIMITATIONS_INTAKE in limitations.text
+    assert past_injuries.text == messages.PAST_INJURIES_INTAKE
     assert history.text == messages.TRAINING_HISTORY_IMPORT
     assert completed.text == messages.TRAINING_HISTORY_SKIP_SUGGESTION
     assert "Birth year: 1990" in displayed_profile.text
@@ -204,7 +206,9 @@ async def test_journey_collects_profile_goal_and_required_context_before_complet
         assert profile.availability_text == (
             "Tuesday and Thursday evenings, plus a longer Saturday run."
         )
-        assert profile.health_limitations_text == "NONE_REPORTED"
+        assert profile.health_limitations_text == (
+            "Current limitations: NONE_REPORTED\nPast injuries: NONE_REPORTED"
+        )
         selected_equipment = await AthleteCapabilityRepository(session).available(
             athlete_id=user.id
         )
@@ -244,7 +248,8 @@ async def test_journey_collects_profile_goal_and_required_context_before_complet
     await bot.handle_callback(athlete, "ps:v1:back")
 
     health_current = await bot.handle_callback(athlete, "ps:v1:section:health")
-    assert "None reported" in health_current.text
+    assert "Current limitations: NONE_REPORTED" in health_current.text
+    assert "Past injuries: NONE_REPORTED" in health_current.text
     await bot.handle_callback(athlete, "ps:v1:done")
 
     await bot.handle_callback(athlete, "ps:v1:section:personal")
@@ -345,6 +350,7 @@ async def _onboard_to_completed(
     )
     await bot.handle_callback(athlete, equipment_callback)
     await bot.handle_callback(athlete, "ob:v1:equipment:done")
+    await bot.handle_callback(athlete, "ob:v1:health:none")
     await bot.handle_callback(athlete, "ob:v1:health:none")
     await bot.handle_callback(athlete, "ob:v1:history:skip")
 

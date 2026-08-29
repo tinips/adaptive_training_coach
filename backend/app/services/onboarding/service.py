@@ -52,6 +52,7 @@ _GENDER_KEY = "gender"
 _WEIGHT_KG_KEY = "weight_kg"
 _HEIGHT_CM_KEY = "height_cm"
 _CAPABILITY_SELECTION_KEY = "capability_selection"
+_CURRENT_LIMITATIONS_KEY = "_current_limitations"
 _CONTEXT_RETRY_ERROR_KEY = "_context_retry_error"
 _INTEGER_PATTERN = re.compile(r"[0-9]+")
 _WEIGHT_PATTERN = re.compile(r"[0-9]+(?:\.[0-9]+)?")
@@ -680,9 +681,24 @@ class OnboardingService:
             if onboarding.current_step is not OnboardingStep.HEALTH_LIMITATIONS_INTAKE:
                 raise OnboardingApplicationError("stale_action")
             answers = self._answers(onboarding)
+            if _CURRENT_LIMITATIONS_KEY not in answers:
+                answers[_CURRENT_LIMITATIONS_KEY] = "NONE_REPORTED"
+                onboarding = await OnboardingRepository(session).save_progress(
+                    user_id=user.id,
+                    current_step=OnboardingStep.HEALTH_LIMITATIONS_INTAKE,
+                    answers=cast(dict[str, object], answers),
+                )
+                await session.flush()
+                return self._result(user, onboarding)
+            current_limitations = answers[_CURRENT_LIMITATIONS_KEY]
             await ProfileRepository(session).update_athlete_profile_context_fields(
                 user_id=user.id,
-                payload={"health_limitations_text": "NONE_REPORTED"},
+                payload={
+                    "health_limitations_text": (
+                        f"Current limitations: {current_limitations}\n"
+                        "Past injuries: NONE_REPORTED"
+                    )
+                },
             )
             return await self._advance_to_training_history(
                 session=session,
@@ -697,6 +713,26 @@ class OnboardingService:
     ) -> OnboardingServiceResult:
         """Complete onboarding after an explicit, deterministic history skip."""
 
+        return await self._complete_training_history(
+            identity, training_history_skipped=True
+        )
+
+    async def complete_training_history(
+        self,
+        identity: TelegramIdentity,
+    ) -> OnboardingServiceResult:
+        """Complete onboarding after choosing phone sync for workout history."""
+
+        return await self._complete_training_history(
+            identity, training_history_skipped=False
+        )
+
+    async def _complete_training_history(
+        self,
+        identity: TelegramIdentity,
+        *,
+        training_history_skipped: bool,
+    ) -> OnboardingServiceResult:
         async with self._session_factory.begin() as session:
             user, onboarding = await self._locked_state(session, identity)
             self._require_active(onboarding)
@@ -713,7 +749,11 @@ class OnboardingService:
                 status=UserStatus.ONBOARDING_COMPLETED,
             )
             await session.flush()
-            return self._result(user, onboarding, training_history_skipped=True)
+            return self._result(
+                user,
+                onboarding,
+                training_history_skipped=training_history_skipped,
+            )
 
     async def profile_settings_snapshot(
         self, identity: TelegramIdentity
@@ -1816,19 +1856,38 @@ class OnboardingService:
             field = field_by_step.get(step)
             if field is None:
                 raise OnboardingApplicationError("invalid_action")
-            await profiles.update_athlete_profile_context_fields(
-                user_id=user.id,
-                # The original text is retained exactly; the workflow result is
-                # only a go/no-go validation signal.
-                payload={field: text},
-            )
             if step is OnboardingStep.HEALTH_LIMITATIONS_INTAKE:
+                current_limitations = answers.get(_CURRENT_LIMITATIONS_KEY)
+                if current_limitations is None:
+                    answers[_CURRENT_LIMITATIONS_KEY] = text
+                    onboarding = await OnboardingRepository(session).save_progress(
+                        user_id=user.id,
+                        current_step=OnboardingStep.HEALTH_LIMITATIONS_INTAKE,
+                        answers=cast(dict[str, object], answers),
+                    )
+                    await session.flush()
+                    return self._result(user, onboarding)
+                await profiles.update_athlete_profile_context_fields(
+                    user_id=user.id,
+                    payload={
+                        field: (
+                            f"Current limitations: {current_limitations}\n"
+                            f"Past injuries: {text}"
+                        )
+                    },
+                )
                 return await self._advance_to_training_history(
                     session=session,
                     user=user,
                     onboarding=onboarding,
                     answers=answers,
                 )
+            await profiles.update_athlete_profile_context_fields(
+                user_id=user.id,
+                # The original text is retained exactly; the workflow result is
+                # only a go/no-go validation signal.
+                payload={field: text},
+            )
             onboarding = await OnboardingRepository(session).save_progress(
                 user_id=user.id,
                 current_step=next_step_by_step[step],
