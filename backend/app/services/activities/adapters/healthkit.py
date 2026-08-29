@@ -8,12 +8,16 @@ from app.domain.enums import (
     ActivitySource,
     CyclingType,
     Discipline,
+    HeartRateTemporalQuality,
     RunningType,
     StrengthType,
     SwimmingEnvironment,
 )
 from app.schemas.mobile_sync import HealthKitWorkoutPayload
-from app.services.activities.contracts import ActivityImportData
+from app.services.activities.contracts import (
+    ActivityImportData,
+    HeartRateObservationData,
+)
 from app.services.activities.normalization import workout_title
 
 
@@ -44,10 +48,8 @@ def from_healthkit_workout(payload: HealthKitWorkoutPayload) -> ActivityImportDa
         cycling_type=mapping.cycling_type,
         swimming_environment=mapping.swimming_environment,
         strength_type=mapping.strength_type,
-        source_metadata={
-            "ingestion_channel": "HEALTHKIT_IOS_POC",
-            "healthkit_activity_type": raw_activity_type,
-        },
+        source_metadata=_source_metadata(payload),
+        heart_rate_observations=_heart_rate_observations(payload),
     )
 
 
@@ -131,6 +133,59 @@ def _normalise_activity_type(value: str) -> str:
             cleaned = cleaned[len(prefix) :]
             break
     return "".join(character for character in cleaned if character.isalnum())
+
+
+def _source_metadata(payload: HealthKitWorkoutPayload) -> dict[str, object]:
+    metadata: dict[str, object] = {
+        "ingestion_channel": "HEALTHKIT_IOS_POC",
+        "healthkit_activity_type": payload.activity_type,
+    }
+    if payload.source_name is not None:
+        metadata["healthkit_source_name"] = payload.source_name
+    if payload.all_statistics:
+        metadata["healthkit_all_statistics"] = {
+            quantity_type: statistics.model_dump(mode="json", exclude_none=True)
+            for quantity_type, statistics in payload.all_statistics.items()
+        }
+    if payload.raw_quantity_samples:
+        metadata["healthkit_raw_quantity_samples"] = [
+            sample.model_dump(mode="json") for sample in payload.raw_quantity_samples
+        ]
+    return metadata
+
+
+def _heart_rate_observations(
+    payload: HealthKitWorkoutPayload,
+) -> tuple[HeartRateObservationData, ...]:
+    observations: list[HeartRateObservationData] = []
+    for sample in payload.raw_quantity_samples:
+        if (
+            sample.quantity_type != "HKQuantityTypeIdentifierHeartRate"
+            or sample.heart_rate_bpm is None
+        ):
+            continue
+        interval_seconds = (sample.ended_at - sample.started_at).total_seconds()
+        quality = (
+            HeartRateTemporalQuality.UNKNOWN
+            if interval_seconds < 0
+            else HeartRateTemporalQuality.EXACT_SAMPLE
+            if interval_seconds == 0
+            else HeartRateTemporalQuality.SHORT_INTERVAL
+            if interval_seconds <= 60
+            else HeartRateTemporalQuality.COARSE_INTERVAL
+        )
+        observations.append(
+            HeartRateObservationData(
+                source=ActivitySource.APPLE_HEALTH,
+                source_record_key=f"healthkit:{sample.sample_uuid}",
+                source_name=sample.source_name,
+                started_at=sample.started_at,
+                ended_at=sample.ended_at,
+                beats_per_minute=sample.heart_rate_bpm,
+                temporal_quality=quality,
+            )
+        )
+    return tuple(observations)
 
 
 __all__ = ["from_healthkit_workout"]

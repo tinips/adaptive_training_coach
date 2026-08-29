@@ -28,6 +28,14 @@ HealthKitActivityType = Annotated[
     str,
     StringConstraints(strip_whitespace=True, min_length=1, max_length=128),
 ]
+HealthKitQuantityType = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=256),
+]
+HealthKitQuantityDescription = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=256),
+]
 
 
 class MobilePairRequest(_StrictMobileSchema):
@@ -44,8 +52,49 @@ class MobilePairResponse(_StrictMobileSchema):
     token_type: Literal["Bearer"] = "Bearer"
 
 
+class HealthKitQuantityStatisticsPayload(_StrictMobileSchema):
+    """Lossless display values for every statistic associated with a workout.
+
+    HealthKit does not expose the unit used by an ``HKQuantity`` separately.
+    The iPhone therefore sends its canonical HealthKit description (for
+    example, ``"148 count/min"``) instead of guessing a conversion for an
+    unknown future quantity type.
+    """
+
+    sum: HealthKitQuantityDescription | None = None
+    minimum: HealthKitQuantityDescription | None = None
+    maximum: HealthKitQuantityDescription | None = None
+    average: HealthKitQuantityDescription | None = None
+
+
+class HealthKitRawQuantitySamplePayload(_StrictMobileSchema):
+    """One source-matched quantity sample within a workout's time window."""
+
+    sample_uuid: UUID
+    quantity_type: HealthKitQuantityType
+    started_at: datetime
+    ended_at: datetime
+    value: HealthKitQuantityDescription
+    heart_rate_bpm: float | None = Field(default=None, gt=0, le=300)
+    source_name: str | None = Field(default=None, max_length=255)
+    association: Literal["workout_associated", "time_window_source_match"]
+
+    @field_validator("started_at", "ended_at")
+    @classmethod
+    def require_timezone_aware(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("timestamps must be timezone-aware")
+        return value
+
+    @model_validator(mode="after")
+    def require_valid_interval(self) -> HealthKitRawQuantitySamplePayload:
+        if self.ended_at < self.started_at:
+            raise ValueError("ended_at cannot be before started_at")
+        return self
+
+
 class HealthKitWorkoutPayload(_StrictMobileSchema):
-    """Minimum HealthKit workout evidence accepted by the POC."""
+    """HealthKit workout evidence plus lossless source-specific metrics."""
 
     workout_uuid: UUID
     activity_type: HealthKitActivityType
@@ -61,6 +110,13 @@ class HealthKitWorkoutPayload(_StrictMobileSchema):
     max_heart_rate: float | None = Field(default=None, ge=0)
     average_cadence: float | None = Field(default=None, ge=0)
     max_cadence: float | None = Field(default=None, ge=0)
+    source_name: str | None = Field(default=None, max_length=255)
+    all_statistics: dict[HealthKitQuantityType, HealthKitQuantityStatisticsPayload] = (
+        Field(default_factory=dict)
+    )
+    raw_quantity_samples: list[HealthKitRawQuantitySamplePayload] = Field(
+        default_factory=list
+    )
 
     @field_validator("started_at", "ended_at")
     @classmethod
@@ -107,6 +163,8 @@ class HealthKitWorkoutSyncResponse(_StrictMobileSchema):
 
 
 __all__ = [
+    "HealthKitQuantityStatisticsPayload",
+    "HealthKitRawQuantitySamplePayload",
     "HealthKitWorkoutPayload",
     "HealthKitWorkoutSyncRequest",
     "HealthKitWorkoutSyncResponse",

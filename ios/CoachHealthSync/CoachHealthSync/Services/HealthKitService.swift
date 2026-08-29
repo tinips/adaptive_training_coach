@@ -29,15 +29,9 @@ final class HealthKitService: HealthKitServicing {
 
     func requestWorkoutReadAuthorization() async throws {
         let workoutType = HKObjectType.workoutType()
-        let readTypes: Set<HKObjectType> = [
-            workoutType,
-            HKQuantityType.quantityType(forIdentifier: .activeEnergyBurned),
-            HKQuantityType.quantityType(forIdentifier: .heartRate),
-            HKQuantityType.quantityType(forIdentifier: .stepCount),
-            HKQuantityType.quantityType(forIdentifier: .cyclingCadence),
-            HKQuantityType.quantityType(forIdentifier: .elevationAscended),
-            HKQuantityType.quantityType(forIdentifier: .elevationDescended),
-        ].compactMap { $0 }
+        let readTypes = Set<HKObjectType>([workoutType]).union(
+            Self.workoutQuantityTypes.map { $0 as HKObjectType }
+        )
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             healthStore.requestAuthorization(toShare: [], read: readTypes) { success, error in
@@ -88,10 +82,19 @@ final class HealthKitService: HealthKitServicing {
             healthStore.execute(query)
         }
 
-        return workouts.map(Self.map)
+        let rawQuantitySamples = try await fetchRawQuantitySamples(
+            from: startDate,
+            to: endDate
+        )
+        return workouts.map { workout in
+            Self.map(workout, rawQuantitySamples: rawQuantitySamples)
+        }
     }
 
-    private static func map(_ workout: HKWorkout) -> HealthKitWorkout {
+    private static func map(
+        _ workout: HKWorkout,
+        rawQuantitySamples: [HKQuantitySample]
+    ) -> HealthKitWorkout {
         let activityTypeRawValue = Int(workout.workoutActivityType.rawValue)
         return HealthKitWorkout(
             id: workout.uuid,
@@ -136,7 +139,160 @@ final class HealthKitService: HealthKitServicing {
                 quantityType: cadenceQuantityType(for: workout.workoutActivityType),
                 unit: HKUnit.count().unitDivided(by: .minute())
             ),
+            allStatistics: allStatistics(for: workout),
+            rawQuantitySamples: rawSamples(
+                for: workout,
+                samples: rawQuantitySamples
+            ),
             sourceName: workout.sourceRevision.source.name
+        )
+    }
+
+    private static let workoutQuantityTypeIdentifiers = [
+        "HKQuantityTypeIdentifierActiveEnergyBurned",
+        "HKQuantityTypeIdentifierBasalEnergyBurned",
+        "HKQuantityTypeIdentifierHeartRate",
+        "HKQuantityTypeIdentifierHeartRateVariabilitySDNN",
+        "HKQuantityTypeIdentifierRestingHeartRate",
+        "HKQuantityTypeIdentifierWalkingHeartRateAverage",
+        "HKQuantityTypeIdentifierStepCount",
+        "HKQuantityTypeIdentifierDistanceWalkingRunning",
+        "HKQuantityTypeIdentifierDistanceCycling",
+        "HKQuantityTypeIdentifierDistanceSwimming",
+        "HKQuantityTypeIdentifierFlightsClimbed",
+        "HKQuantityTypeIdentifierElevationAscended",
+        "HKQuantityTypeIdentifierElevationDescended",
+        "HKQuantityTypeIdentifierCyclingCadence",
+        "HKQuantityTypeIdentifierCyclingSpeed",
+        "HKQuantityTypeIdentifierCyclingPower",
+        "HKQuantityTypeIdentifierCyclingFunctionalThresholdPower",
+        "HKQuantityTypeIdentifierRunningSpeed",
+        "HKQuantityTypeIdentifierRunningPower",
+        "HKQuantityTypeIdentifierRunningGroundContactTime",
+        "HKQuantityTypeIdentifierRunningStrideLength",
+        "HKQuantityTypeIdentifierRunningVerticalOscillation",
+        "HKQuantityTypeIdentifierSwimmingStrokeCount",
+        "HKQuantityTypeIdentifierVO2Max",
+    ]
+
+    private static let workoutQuantityTypes: Set<HKQuantityType> = Set(
+        workoutQuantityTypeIdentifiers.compactMap { identifier in
+            HKQuantityType.quantityType(
+                forIdentifier: HKQuantityTypeIdentifier(rawValue: identifier)
+            )
+        }
+    )
+
+    private func fetchRawQuantitySamples(
+        from startDate: Date,
+        to endDate: Date
+    ) async throws -> [HKQuantitySample] {
+        let store = healthStore
+        try await withThrowingTaskGroup(of: [HKQuantitySample].self) { group in
+            for quantityType in Self.workoutQuantityTypes {
+                group.addTask { [store] in
+                    try await Self.fetchQuantitySamples(
+                        from: store,
+                        quantityType: quantityType,
+                        startDate: startDate,
+                        endDate: endDate
+                    )
+                }
+            }
+
+            var samples: [HKQuantitySample] = []
+            for try await quantitySamples in group {
+                samples.append(contentsOf: quantitySamples)
+            }
+            return samples
+        }
+    }
+
+    private static func fetchQuantitySamples(
+        from healthStore: HKHealthStore,
+        quantityType: HKQuantityType,
+        startDate: Date,
+        endDate: Date
+    ) async throws -> [HKQuantitySample] {
+        let predicate = HKQuery.predicateForSamples(
+            withStart: startDate,
+            end: endDate,
+            options: []
+        )
+        return try await withCheckedThrowingContinuation { continuation in
+            let query = HKSampleQuery(
+                sampleType: quantityType,
+                predicate: predicate,
+                limit: HKObjectQueryNoLimit,
+                sortDescriptors: nil
+            ) { _, samples, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                    return
+                }
+                continuation.resume(
+                    returning: (samples ?? []).compactMap { $0 as? HKQuantitySample }
+                )
+            }
+            healthStore.execute(query)
+        }
+    }
+
+    private static func allStatistics(
+        for workout: HKWorkout
+    ) -> [String: HealthKitQuantityStatistics] {
+        Dictionary(
+            uniqueKeysWithValues: workout.allStatistics.compactMap {
+                quantityType,
+                statistics in
+                let values = HealthKitQuantityStatistics(
+                    sum: statistics.sumQuantity()?.description,
+                    minimum: statistics.minimumQuantity()?.description,
+                    maximum: statistics.maximumQuantity()?.description,
+                    average: statistics.averageQuantity()?.description
+                )
+                guard values.sum != nil || values.minimum != nil ||
+                    values.maximum != nil || values.average != nil
+                else {
+                    return nil
+                }
+                return (quantityType.identifier, values)
+            }
+        )
+    }
+
+    private static func rawSamples(
+        for workout: HKWorkout,
+        samples: [HKQuantitySample]
+    ) -> [HealthKitRawQuantitySample] {
+        let sourceBundleIdentifier = workout.sourceRevision.source.bundleIdentifier
+        return samples.compactMap { sample in
+            guard sample.startDate < workout.endDate,
+                  sample.endDate > workout.startDate,
+                  sample.sourceRevision.source.bundleIdentifier == sourceBundleIdentifier
+            else {
+                return nil
+            }
+            return HealthKitRawQuantitySample(
+                sampleUUID: sample.uuid,
+                quantityType: sample.quantityType.identifier,
+                startedAt: sample.startDate,
+                endedAt: sample.endDate,
+                value: sample.quantity.description,
+                heartRateBPM: heartRateBPM(for: sample),
+                sourceName: sample.sourceRevision.source.name,
+                association: "time_window_source_match"
+            )
+        }
+    }
+
+    private static func heartRateBPM(for sample: HKQuantitySample) -> Double? {
+        guard sample.quantityType == HKQuantityType.quantityType(forIdentifier: .heartRate)
+        else {
+            return nil
+        }
+        return sample.quantity.doubleValue(
+            for: HKUnit.count().unitDivided(by: .minute())
         )
     }
 

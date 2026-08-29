@@ -19,6 +19,8 @@ struct HealthKitWorkout: Identifiable, Equatable, Sendable {
     let maxHeartRate: Double? = nil
     let averageCadence: Double? = nil
     let maxCadence: Double? = nil
+    let allStatistics: [String: HealthKitQuantityStatistics] = [:]
+    let rawQuantitySamples: [HealthKitRawQuantitySample] = []
     let sourceName: String
 
     var syncPayload: HealthKitWorkoutSyncPayload {
@@ -37,7 +39,10 @@ struct HealthKitWorkout: Identifiable, Equatable, Sendable {
             averageHeartRate: averageHeartRate,
             maxHeartRate: maxHeartRate,
             averageCadence: averageCadence,
-            maxCadence: maxCadence
+            maxCadence: maxCadence,
+            sourceName: sourceName,
+            allStatistics: allStatistics,
+            rawQuantitySamples: rawQuantitySamples
         )
     }
 
@@ -51,6 +56,40 @@ struct HealthKitWorkout: Identifiable, Equatable, Sendable {
             return maximumDurationSeconds
         }
         return max(1, Int(rounded))
+    }
+}
+
+/// Preserves every associated HealthKit statistic without forcing an unsafe
+/// unit conversion for an identifier the app does not yet understand.
+struct HealthKitQuantityStatistics: Encodable, Equatable, Sendable {
+    let sum: String? = nil
+    let minimum: String? = nil
+    let maximum: String? = nil
+    let average: String? = nil
+}
+
+/// A quantity measurement collected during the workout's time window from the
+/// same HealthKit source as the workout. `value` is HealthKit's unit-qualified
+/// representation and is retained verbatim for future normalization.
+struct HealthKitRawQuantitySample: Encodable, Equatable, Sendable {
+    let sampleUUID: UUID
+    let quantityType: String
+    let startedAt: Date
+    let endedAt: Date
+    let value: String
+    let heartRateBPM: Double? = nil
+    let sourceName: String? = nil
+    let association: String
+
+    enum CodingKeys: String, CodingKey {
+        case sampleUUID = "sample_uuid"
+        case quantityType = "quantity_type"
+        case startedAt = "started_at"
+        case endedAt = "ended_at"
+        case value
+        case heartRateBPM = "heart_rate_bpm"
+        case sourceName = "source_name"
+        case association
     }
 }
 
@@ -74,6 +113,9 @@ struct HealthKitWorkoutSyncPayload: Encodable, Equatable, Sendable {
     let maxHeartRate: Double? = nil
     let averageCadence: Double? = nil
     let maxCadence: Double? = nil
+    let sourceName: String? = nil
+    let allStatistics: [String: HealthKitQuantityStatistics] = [:]
+    let rawQuantitySamples: [HealthKitRawQuantitySample] = []
 
     enum CodingKeys: String, CodingKey {
         case workoutUUID = "workout_uuid"
@@ -90,6 +132,9 @@ struct HealthKitWorkoutSyncPayload: Encodable, Equatable, Sendable {
         case maxHeartRate = "max_heart_rate"
         case averageCadence = "average_cadence"
         case maxCadence = "max_cadence"
+        case sourceName = "source_name"
+        case allStatistics = "all_statistics"
+        case rawQuantitySamples = "raw_quantity_samples"
     }
 }
 

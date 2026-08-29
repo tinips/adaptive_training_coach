@@ -20,7 +20,13 @@ from sqlalchemy.ext.asyncio import (
 from app.api.main import create_app
 from app.config import Settings
 from app.db.base import Base
-from app.db.models import AthleteBaselineAssessment, MobileSyncCredential, Workout
+from app.db.models import (
+    ActivitySourceLink,
+    AthleteBaselineAssessment,
+    MobileSyncCredential,
+    Workout,
+    WorkoutHeartRateObservation,
+)
 from app.domain.enums import ActivitySource
 from app.repositories.users import UserRepository
 from app.schemas.common import TelegramIdentity
@@ -106,6 +112,24 @@ async def test_pair_and_sync_healthkit_workout_idempotently(
                 "duration_seconds": 1800,
                 "distance_meters": 5100.0,
                 "calories_kcal": 420.0,
+                "source_name": "Mi Fitness",
+                "all_statistics": {
+                    "HKQuantityTypeIdentifierSwimmingStrokeCount": {"sum": "750 count"}
+                },
+                "raw_quantity_samples": [
+                    {
+                        "quantity_type": "HKQuantityTypeIdentifierHeartRate",
+                        "sample_uuid": "00000000-0000-0000-0000-000000000113",
+                        "started_at": (ended_at - timedelta(minutes=25)).isoformat(),
+                        "ended_at": (
+                            ended_at - timedelta(minutes=25, seconds=-1)
+                        ).isoformat(),
+                        "value": "148 count/min",
+                        "heart_rate_bpm": 148,
+                        "source_name": "Mi Fitness",
+                        "association": "time_window_source_match",
+                    }
+                ],
             }
         ]
     }
@@ -163,6 +187,16 @@ async def test_pair_and_sync_healthkit_workout_idempotently(
                 MobileSyncCredential.user_id == athlete_id
             )
         )
+        source_link = await session.scalar(
+            select(ActivitySourceLink).where(
+                ActivitySourceLink.workout_id == workouts[0].id
+            )
+        )
+        heart_rate_observation = await session.scalar(
+            select(WorkoutHeartRateObservation).where(
+                WorkoutHeartRateObservation.workout_id == workouts[0].id
+            )
+        )
 
     assert len(workouts) == 1
     assert workouts[0].source is ActivitySource.APPLE_HEALTH
@@ -173,6 +207,30 @@ async def test_pair_and_sync_healthkit_workout_idempotently(
     assert credential.device_token_hash != token
     assert credential.device_token_hash is not None
     assert len(credential.device_token_hash) == 64
+    assert source_link is not None
+    assert source_link.source_metadata_jsonb is not None
+    assert source_link.source_metadata_jsonb["healthkit_source_name"] == "Mi Fitness"
+    assert source_link.source_metadata_jsonb["healthkit_all_statistics"] == {
+        "HKQuantityTypeIdentifierSwimmingStrokeCount": {"sum": "750 count"}
+    }
+    assert source_link.source_metadata_jsonb["healthkit_raw_quantity_samples"] == [
+        {
+            "quantity_type": "HKQuantityTypeIdentifierHeartRate",
+            "sample_uuid": "00000000-0000-0000-0000-000000000113",
+            "started_at": (ended_at - timedelta(minutes=25)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            ),
+            "ended_at": (ended_at - timedelta(minutes=25, seconds=-1)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            ),
+            "value": "148 count/min",
+            "heart_rate_bpm": 148.0,
+            "source_name": "Mi Fitness",
+            "association": "time_window_source_match",
+        }
+    ]
+    assert heart_rate_observation is not None
+    assert heart_rate_observation.beats_per_minute == 148
 
 
 @pytest.mark.asyncio
