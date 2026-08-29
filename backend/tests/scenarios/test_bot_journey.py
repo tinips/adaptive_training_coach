@@ -25,7 +25,7 @@ from app.repositories.profiles import ProfileRepository
 from app.repositories.users import UserRepository
 from app.schemas.common import TelegramIdentity
 from app.services.accounts import AccountQueryService, AccountService
-from app.services.onboarding import OnboardingService
+from app.services.onboarding import OnboardingApplicationError, OnboardingService
 from app.services.profiles import ProfileService
 
 
@@ -638,6 +638,56 @@ async def test_profile_settings_goal_main_back_navigation_discards_the_pending_s
         assert goal is not None
         # Nothing was ever confirmed, so the original goal survives untouched.
         assert goal.main_goal == "Marathon"
+
+
+@pytest.mark.asyncio
+async def test_profile_settings_event_date_in_ddmmyyyy_format_is_parsed_correctly(
+    journey: tuple[
+        CoachBotApplicationService,
+        async_sessionmaker[AsyncSession],
+    ],
+) -> None:
+    """The profile-settings edit path parses dates the same way onboarding does."""
+
+    bot, factory = journey
+    athlete = _athlete()
+    await _onboard_to_completed(bot, athlete)
+
+    await bot.handle_callback(athlete, "ps:v1:section:goal")
+    await bot.handle_callback(athlete, "ps:v1:goal:date")
+    saved = await _agent_input(bot, "11/07/2027")
+
+    assert "Saved: Goal." in saved.text
+
+    async with factory() as session:
+        goal = await session.scalar(select(TrainingGoal))
+    assert goal is not None
+    assert goal.event_date == date(2027, 7, 11)
+
+
+@pytest.mark.asyncio
+async def test_profile_settings_event_date_rejects_a_past_date(
+    journey: tuple[
+        CoachBotApplicationService,
+        async_sessionmaker[AsyncSession],
+    ],
+) -> None:
+    """A race that already happened is rejected here the same as in onboarding."""
+
+    bot, factory = journey
+    athlete = _athlete()
+    await _onboard_to_completed(bot, athlete)
+
+    await bot.handle_callback(athlete, "ps:v1:section:goal")
+    await bot.handle_callback(athlete, "ps:v1:goal:date")
+
+    with pytest.raises(OnboardingApplicationError, match="invalid_event_date"):
+        await _agent_input(bot, "2020-01-01")
+
+    async with factory() as session:
+        goal = await session.scalar(select(TrainingGoal))
+    assert goal is not None
+    assert goal.event_date is None
 
 
 async def _agent_input(

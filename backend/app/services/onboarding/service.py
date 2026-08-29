@@ -1106,10 +1106,11 @@ class OnboardingService:
                     pending=pending,
                 )
             if step is ProfileSettingsStep.GOAL_DATE:
-                try:
-                    event_date = date.fromisoformat(text)
-                except ValueError as exc:
-                    raise OnboardingApplicationError("invalid_event_date") from exc
+                event_date = _parse_event_date(text)
+                if event_date is not None and event_date < utc_now().date():
+                    event_date = None
+                if event_date is None:
+                    raise OnboardingApplicationError("invalid_event_date")
                 pending["event_date"] = event_date.isoformat()
                 return await self._save_profile_goal(
                     session=session,
