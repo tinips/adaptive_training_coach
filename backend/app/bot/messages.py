@@ -31,6 +31,10 @@ SETUP_INTRODUCTION = (
 )
 GOAL_INTAKE = "Which sport is your goal in?"
 GOAL_TEMPLATE_PROMPT = "Which goal best matches what you're training for?"
+GOAL_EVENT_DATE_PROMPT = (
+    "When is your race? Send the date as YYYY-MM-DD (e.g. 2027-07-11) or "
+    "DD/MM/YYYY (e.g. 11/07/2027), or tap below if you don't have a date yet."
+)
 GOAL_SUPPORT_PROMPT = (
     "Would you like to add a supporting goal, such as maintaining strength? "
     "You can skip this."
@@ -318,7 +322,7 @@ VALIDATION_ERRORS: dict[str, str] = {
     "invalid_height_cm": (
         "Enter your height in centimeters as a whole number from 120 to 230."
     ),
-    "invalid_event_date": "Enter a future event date as YYYY-MM-DD.",
+    "invalid_event_date": ("Enter a future race date as YYYY-MM-DD or DD/MM/YYYY."),
     "apple_health_import_disabled": ("Apple Health import is currently unavailable."),
     "import_already_active": ("An Apple Health import is already in progress."),
     "training_file_not_expected": (

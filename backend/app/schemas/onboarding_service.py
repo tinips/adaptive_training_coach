@@ -18,6 +18,7 @@ OnboardingResultKind = Literal[
     "step",
     "setup_introduction",
     "goal_intake",
+    "goal_event_date",
     "goal_confirmed",
     "profile_birth_year_intake",
     "profile_gender_intake",

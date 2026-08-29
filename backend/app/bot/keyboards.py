@@ -43,6 +43,7 @@ LABELS = {
     "goal_sport_swimming": "Swimming",
     "goal_sport_triathlon": "Triathlon",
     "goal_back": "Back",
+    "goal_no_date": "No date yet",
     "support_none": "No supporting goal",
     "health_none": "None",
     "gender_male": "Male",
@@ -138,6 +139,15 @@ def goal_template_keyboard(
     rows.append([(LABELS["goal_back"], "ob:v1:goal:back")])
     rows.append([(LABELS["cancel"], "ob:v1:cancel")])
     return _rows(rows)
+
+
+def goal_event_date_keyboard() -> InlineKeyboardMarkup:
+    return _rows(
+        [
+            [(LABELS["goal_no_date"], "ob:v1:goal:nodate")],
+            [(LABELS["cancel"], "ob:v1:cancel")],
+        ]
+    )
 
 
 def supporting_goal_keyboard(

@@ -435,6 +435,9 @@ class CoachBotApplicationService:
                 identity, callback_data.removeprefix("ob:v1:goal:template:")
             )
             return await self._render_onboarding(identity, result)
+        if callback_data == "ob:v1:goal:nodate":
+            result = await self._onboarding.skip_event_date(identity)
+            return await self._render_onboarding(identity, result)
         if callback_data.startswith("ob:v1:support:"):
             raw = callback_data.removeprefix("ob:v1:support:")
             result = await self._onboarding.choose_supporting_goal(
@@ -710,6 +713,10 @@ class CoachBotApplicationService:
             return TelegramResponse(
                 messages.GOAL_INTAKE, keyboards.goal_sport_keyboard(sports)
             )
+        if result.kind == "goal_event_date":
+            return TelegramResponse(
+                messages.GOAL_EVENT_DATE_PROMPT, keyboards.goal_event_date_keyboard()
+            )
         if result.kind == "goal_confirmed":
             supporting_options = await self._onboarding.supporting_goal_options()
             return TelegramResponse(
@@ -774,6 +781,15 @@ class CoachBotApplicationService:
         if result.kind in mapping:
             text, keyboard = mapping[result.kind]
             return TelegramResponse(text, keyboard)
+        if (
+            result.kind == "profile_validation_error"
+            and result.current_step is OnboardingStep.GOAL_EVENT_DATE
+        ):
+            error = messages.validation_error(result.error_code or "invalid_action")
+            return TelegramResponse(
+                f"{error}\n\n{messages.GOAL_EVENT_DATE_PROMPT}",
+                keyboards.goal_event_date_keyboard(),
+            )
         if result.kind == "profile_validation_error":
             return TelegramResponse(
                 messages.validation_error(result.error_code or "invalid_action"),

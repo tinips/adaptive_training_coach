@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import uuid
 from collections.abc import Mapping
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import cast
 
@@ -79,6 +79,19 @@ _FREE_TEXT_CONTEXT_STEPS = frozenset(
 # nothing that was stored.
 _CONTEXT_TEXT_MIN_LENGTH = 3
 _CONTEXT_TEXT_MAX_LENGTH = 2000
+_EVENT_DATE_FORMATS = ("%Y-%m-%d", "%d/%m/%Y")
+
+
+def _parse_event_date(text: str) -> date | None:
+    """Parse a race date deterministically. No model, no fuzzy matching."""
+
+    cleaned = text.strip()
+    for pattern in _EVENT_DATE_FORMATS:
+        try:
+            return datetime.strptime(cleaned, pattern).date()
+        except ValueError:
+            continue
+    return None
 
 
 class OnboardingApplicationError(RuntimeError):
@@ -390,10 +403,81 @@ class OnboardingService:
             )
             onboarding = await OnboardingRepository(session).save_progress(
                 user_id=user.id,
-                # Task 5b inserts a race-date step (GOAL_EVENT_DATE) between the
-                # template choice and the supporting-goal offer. That step does
-                # not exist yet, so this advances straight to GOAL_CONFIRMED;
-                # Task 5b changes this to GOAL_EVENT_DATE once it lands.
+                # Task 5b: a race-date step sits between the template choice
+                # and the supporting-goal offer, so both a typed date
+                # (submit_event_date) and a skip (skip_event_date) advance
+                # from here to GOAL_CONFIRMED.
+                current_step=OnboardingStep.GOAL_EVENT_DATE,
+                answers=cast(dict[str, object], self._answers(onboarding)),
+            )
+            return self._result(user, onboarding)
+
+    async def submit_event_date(
+        self,
+        identity: TelegramIdentity,
+        text: str,
+    ) -> OnboardingServiceResult:
+        """Store a typed race date, or reject it without advancing.
+
+        A race date that has already happened is rejected the same way as
+        text that cannot be parsed at all: neither is a usable goal date.
+        Both cases return a validation-error result rather than raising,
+        matching every other text-intake step (birth year, weight, height):
+        `CoachBotApplicationService.handle_text` has no exception handler
+        for `OnboardingApplicationError`, so raising here would propagate
+        as an unhandled error instead of re-prompting the athlete.
+        """
+
+        parsed = _parse_event_date(text)
+        if parsed is not None and parsed < utc_now().date():
+            parsed = None
+        if parsed is None:
+            async with self._session_factory.begin() as session:
+                user, onboarding = await self._locked_state(session, identity)
+                self._require_active(onboarding)
+                if onboarding.current_step is not OnboardingStep.GOAL_EVENT_DATE:
+                    raise OnboardingApplicationError("stale_action")
+                return self._result(
+                    user,
+                    onboarding,
+                    kind="profile_validation_error",
+                    error_code="invalid_event_date",
+                )
+        return await self._store_event_date(identity, parsed)
+
+    async def skip_event_date(
+        self, identity: TelegramIdentity
+    ) -> OnboardingServiceResult:
+        """An athlete with no event still gets a plan, in the GENERAL phase."""
+
+        return await self._store_event_date(identity, None)
+
+    async def _store_event_date(
+        self,
+        identity: TelegramIdentity,
+        event_date: date | None,
+    ) -> OnboardingServiceResult:
+        async with self._session_factory.begin() as session:
+            user, onboarding = await self._locked_state(session, identity)
+            self._require_active(onboarding)
+            if onboarding.current_step is not OnboardingStep.GOAL_EVENT_DATE:
+                raise OnboardingApplicationError("stale_action")
+            profiles = ProfileRepository(session)
+            goal = await profiles.get_training_goal(user_id=user.id)
+            if goal is None:
+                raise OnboardingApplicationError("stale_action")
+            await profiles.upsert_training_goal(
+                user_id=user.id,
+                main_goal=goal.main_goal,
+                event_date=event_date,
+                target_outcome=goal.target_outcome,
+                secondary_priority=goal.secondary_priority,
+                original_description=goal.original_description,
+                goal_template_id=goal.goal_template_id,
+                supporting_goal_template_id=goal.supporting_goal_template_id,
+            )
+            onboarding = await OnboardingRepository(session).save_progress(
+                user_id=user.id,
                 current_step=OnboardingStep.GOAL_CONFIRMED,
                 answers=cast(dict[str, object], self._answers(onboarding)),
             )
@@ -1308,6 +1392,11 @@ class OnboardingService:
             return await self._handle_profile_text(identity, text)
         if (
             onboarding.status is OnboardingStatus.ACTIVE
+            and onboarding.current_step is OnboardingStep.GOAL_EVENT_DATE
+        ):
+            return await self.submit_event_date(identity, text)
+        if (
+            onboarding.status is OnboardingStatus.ACTIVE
             and onboarding.current_step in _FREE_TEXT_CONTEXT_STEPS
         ):
             return await self._handle_context_text(
@@ -1950,6 +2039,8 @@ class OnboardingService:
                 kind = "step"
             elif onboarding.current_step is OnboardingStep.SETUP_INTRODUCTION:
                 kind = "setup_introduction"
+            elif onboarding.current_step is OnboardingStep.GOAL_EVENT_DATE:
+                kind = "goal_event_date"
             elif onboarding.current_step is OnboardingStep.GOAL_CONFIRMED:
                 kind = "goal_confirmed"
             elif onboarding.current_step is OnboardingStep.PROFILE_BIRTH_YEAR_INTAKE:

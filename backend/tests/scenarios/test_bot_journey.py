@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import date
 
 import pytest
 import pytest_asyncio
@@ -16,7 +17,7 @@ from app.bot.rendering import TelegramResponse
 from app.bot.service import CoachBotApplicationService
 from app.config import Settings
 from app.db.base import Base
-from app.db.models import TrainingGoal
+from app.db.models import OnboardingSession, TrainingGoal
 from app.domain.enums import AthleteGender, OnboardingStatus, OnboardingStep, UserStatus
 from app.repositories.athlete_capabilities import AthleteCapabilityRepository
 from app.repositories.onboarding import OnboardingRepository
@@ -113,6 +114,7 @@ async def test_journey_collects_profile_goal_and_required_context_before_complet
     template_choice = await bot.handle_callback(
         athlete, "ob:v1:goal:template:TRIATHLON_HALF_DISTANCE"
     )
+    date_skipped = await bot.handle_callback(athlete, "ob:v1:goal:nodate")
     availability = await bot.handle_callback(
         athlete, "ob:v1:support:STRENGTH_MAINTENANCE"
     )
@@ -142,11 +144,13 @@ async def test_journey_collects_profile_goal_and_required_context_before_complet
         "ob:v1:goal:template:TRIATHLON_HALF_DISTANCE",
     ) in _buttons(sport_choice)
     assert ("Back", "ob:v1:goal:back") in _buttons(sport_choice)
-    assert template_choice.text == messages.GOAL_SUPPORT_PROMPT
+    assert template_choice.text == messages.GOAL_EVENT_DATE_PROMPT
+    assert ("No date yet", "ob:v1:goal:nodate") in _buttons(template_choice)
+    assert date_skipped.text == messages.GOAL_SUPPORT_PROMPT
     assert ("Maintain strength", "ob:v1:support:STRENGTH_MAINTENANCE") in _buttons(
-        template_choice
+        date_skipped
     )
-    assert ("No supporting goal", "ob:v1:support:none") in _buttons(template_choice)
+    assert ("No supporting goal", "ob:v1:support:none") in _buttons(date_skipped)
     assert birth_year.text == messages.PROFILE_BIRTH_YEAR_INTAKE
     assert gender.text == messages.PROFILE_GENDER_INTAKE
     assert ("Female", "ob:v1:profile:gender:FEMALE") in _buttons(gender)
@@ -297,10 +301,12 @@ async def test_a_single_sport_athlete_can_skip_the_supporting_goal(
     await bot.handle_text(athlete, "78")
     await bot.handle_text(athlete, "180")
     template_choice = await bot.handle_callback(athlete, "ob:v1:goal:sport:RUNNING")
-    support_choice = await bot.handle_callback(athlete, "ob:v1:goal:template:MARATHON")
+    date_prompt = await bot.handle_callback(athlete, "ob:v1:goal:template:MARATHON")
+    support_choice = await bot.handle_callback(athlete, "ob:v1:goal:nodate")
     skipped = await bot.handle_callback(athlete, "ob:v1:support:none")
 
     assert ("Marathon", "ob:v1:goal:template:MARATHON") in _buttons(template_choice)
+    assert date_prompt.text == messages.GOAL_EVENT_DATE_PROMPT
     assert support_choice.text == messages.GOAL_SUPPORT_PROMPT
     assert skipped.text == messages.AVAILABILITY_INTAKE
 
@@ -329,6 +335,7 @@ async def _onboard_to_completed(
     await bot.handle_text(athlete, "168")
     await bot.handle_callback(athlete, "ob:v1:goal:sport:RUNNING")
     await bot.handle_callback(athlete, "ob:v1:goal:template:MARATHON")
+    await bot.handle_callback(athlete, "ob:v1:goal:nodate")
     await bot.handle_callback(athlete, "ob:v1:support:none")
     equipment = await bot.handle_text(
         athlete, "Weekday evenings and a longer Saturday run."
@@ -340,6 +347,74 @@ async def _onboard_to_completed(
     await bot.handle_callback(athlete, "ob:v1:equipment:done")
     await bot.handle_callback(athlete, "ob:v1:health:none")
     await bot.handle_callback(athlete, "ob:v1:history:skip")
+
+
+async def _onboard_to_goal_chosen(
+    journey: tuple[
+        CoachBotApplicationService,
+        async_sessionmaker[AsyncSession],
+    ],
+) -> tuple[
+    CoachBotApplicationService, TelegramIdentity, async_sessionmaker[AsyncSession]
+]:
+    """Walk a fresh athlete from consent through to the sport choice.
+
+    The brief's own version of this helper takes a `database` fixture that
+    does not exist in this file; this file's fixture is `journey`, which
+    already bundles the bot service with the session factory, so this walks
+    the same steps against that instead.
+    """
+
+    bot, factory = journey
+    athlete = _athlete()
+    await bot.start(athlete)
+    await bot.handle_callback(athlete, "nav:v1:consent")
+    await bot.handle_callback(athlete, "ob:v1:consent")
+    await bot.handle_callback(athlete, "ob:v1:profile")
+    await bot.handle_text(athlete, "1990")
+    await bot.handle_callback(athlete, "ob:v1:profile:gender:FEMALE")
+    await bot.handle_text(athlete, "62.5")
+    await bot.handle_text(athlete, "168")
+    await bot.handle_callback(athlete, "ob:v1:goal:sport:RUNNING")
+    return bot, athlete, factory
+
+
+@pytest.mark.asyncio
+async def test_a_race_date_can_be_entered_and_skipped(
+    journey: tuple[
+        CoachBotApplicationService,
+        async_sessionmaker[AsyncSession],
+    ],
+) -> None:
+    """Without this the planner has no weeks-to-race and no phase."""
+
+    bot, athlete, factory = await _onboard_to_goal_chosen(journey)
+
+    await bot.handle_callback(athlete, "ob:v1:goal:template:MARATHON")
+    await bot.handle_text(athlete, "2027-07-11")
+
+    async with factory() as session:
+        goal = await session.scalar(select(TrainingGoal))
+    assert goal is not None
+    assert goal.event_date == date(2027, 7, 11)
+
+
+@pytest.mark.asyncio
+async def test_an_unparseable_race_date_is_rejected_without_advancing(
+    journey: tuple[
+        CoachBotApplicationService,
+        async_sessionmaker[AsyncSession],
+    ],
+) -> None:
+    bot, athlete, factory = await _onboard_to_goal_chosen(journey)
+    await bot.handle_callback(athlete, "ob:v1:goal:template:MARATHON")
+
+    await bot.handle_text(athlete, "sometime next summer")
+
+    async with factory() as session:
+        onboarding = await session.scalar(select(OnboardingSession))
+    assert onboarding is not None
+    assert onboarding.current_step is OnboardingStep.GOAL_EVENT_DATE
 
 
 @pytest.mark.asyncio
