@@ -150,6 +150,41 @@ final class SyncViewModel: ObservableObject {
         }
     }
 
+    func syncAllWorkouts() async {
+        guard let apiClient, let accessToken else {
+            errorMessage = "Pair this iPhone from Telegram before synchronizing."
+            return
+        }
+        guard !workouts.isEmpty else {
+            errorMessage = "Refresh workouts before synchronizing."
+            return
+        }
+
+        await performWork {
+            var insertedCount = 0
+            var unchangedCount = 0
+            var updatedCount = 0
+
+            for workout in workouts {
+                do {
+                    let result = try await apiClient.sync(workout: workout, accessToken: accessToken)
+                    switch result.outcome {
+                    case .inserted: insertedCount += 1
+                    case .unchanged: unchangedCount += 1
+                    case .updated: updatedCount += 1
+                    }
+                } catch let APIClientError.invalidHTTPStatus(statusCode) where statusCode == 401 {
+                    try? keychainStore.deleteAccessToken()
+                    self.accessToken = nil
+                    isPaired = false
+                    throw APIClientError.invalidHTTPStatus(401)
+                }
+            }
+
+            statusMessage = "Synced all: \(insertedCount) new, \(updatedCount) updated, \(unchangedCount) unchanged."
+        }
+    }
+
     func dismissError() {
         errorMessage = nil
     }

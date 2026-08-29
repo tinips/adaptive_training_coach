@@ -42,6 +42,10 @@ struct ContentView: View {
                             Task { await viewModel.authorizeAndLoadWorkouts() }
                         }
                         .disabled(viewModel.isWorking)
+                        Button("Sync all") {
+                            Task { await viewModel.syncAllWorkouts() }
+                        }
+                        .disabled(viewModel.isWorking || viewModel.workouts.isEmpty)
                     }
 
                     Section {
