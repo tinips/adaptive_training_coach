@@ -99,14 +99,26 @@ struct APIClient {
     }
 
     private func execute(_ request: URLRequest) async throws -> Data {
-        let (data, response) = try await session.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw APIClientError.invalidResponse
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw APIClientError.invalidResponse
+            }
+            guard (200...299).contains(httpResponse.statusCode) else {
+                // TEMPORARY DIAGNOSTIC LOGGING — remove once sync is confirmed working.
+                print("[DIAG] \(request.httpMethod ?? "?") \(request.url?.absoluteString ?? "?") -> HTTP \(httpResponse.statusCode)")
+                print("[DIAG] response body: \(String(data: data, encoding: .utf8) ?? "<non-utf8>")")
+                throw APIClientError.invalidHTTPStatus(httpResponse.statusCode)
+            }
+            return data
+        } catch let error as APIClientError {
+            throw error
+        } catch {
+            // TEMPORARY DIAGNOSTIC LOGGING — remove once sync is confirmed working.
+            print("[DIAG] \(request.httpMethod ?? "?") \(request.url?.absoluteString ?? "?") raw error: \(error)")
+            print("[DIAG] error type: \(type(of: error))")
+            throw error
         }
-        guard (200...299).contains(httpResponse.statusCode) else {
-            throw APIClientError.invalidHTTPStatus(httpResponse.statusCode)
-        }
-        return data
     }
 }
 

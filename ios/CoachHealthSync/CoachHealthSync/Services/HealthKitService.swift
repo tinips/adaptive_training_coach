@@ -108,11 +108,6 @@ final class HealthKitService: HealthKitServicing {
                 quantityType: distanceQuantityType(for: workout.workoutActivityType),
                 unit: .meter()
             ),
-            caloriesKcal: quantityValue(
-                for: workout,
-                quantityType: HKQuantityType.quantityType(forIdentifier: .activeEnergyBurned),
-                unit: .kilocalorie()
-            ),
             elevationGainMeters: quantityValue(
                 for: workout,
                 quantityType: quantityType(
@@ -126,6 +121,11 @@ final class HealthKitService: HealthKitServicing {
                     forIdentifier: "HKQuantityTypeIdentifierElevationDescended"
                 ),
                 unit: .meter()
+            ),
+            caloriesKcal: quantityValue(
+                for: workout,
+                quantityType: HKQuantityType.quantityType(forIdentifier: .activeEnergyBurned),
+                unit: .kilocalorie()
             ),
             averageHeartRate: averageQuantityValue(
                 for: workout,
@@ -186,7 +186,7 @@ final class HealthKitService: HealthKitServicing {
     )
 
     private static func quantityType(forIdentifier identifier: String) -> HKQuantityType? {
-        HKQuantityType.quantityType(forIdentifier: identifier)
+        HKQuantityType.quantityType(forIdentifier: HKQuantityTypeIdentifier(rawValue: identifier))
     }
 
     private func fetchRawQuantitySamples(

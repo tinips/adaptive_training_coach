@@ -11,14 +11,14 @@ struct HealthKitWorkout: Identifiable, Equatable, Sendable {
     let startDate: Date
     let endDate: Date
     let durationSeconds: Double
-    let distanceMeters: Double? = nil
-    let elevationGainMeters: Double? = nil
-    let elevationLossMeters: Double? = nil
-    let caloriesKcal: Double? = nil
-    let averageHeartRate: Double? = nil
-    let maxHeartRate: Double? = nil
-    let averageCadence: Double? = nil
-    let maxCadence: Double? = nil
+    let distanceMeters: Double?
+    let elevationGainMeters: Double?
+    let elevationLossMeters: Double?
+    let caloriesKcal: Double?
+    let averageHeartRate: Double?
+    let maxHeartRate: Double?
+    let averageCadence: Double?
+    let maxCadence: Double?
     let sourceName: String
     let allStatistics: [String: HealthKitQuantityStatistics]
     let rawQuantitySamples: [HealthKitRawQuantitySample]
@@ -194,15 +194,15 @@ struct HealthKitWorkoutSyncPayload: Encodable, Equatable, Sendable {
     let startedAt: Date
     let endedAt: Date
     let durationSeconds: Int
-    let movingDurationSeconds: Int? = nil
-    let distanceMeters: Double? = nil
-    let elevationGainMeters: Double? = nil
-    let elevationLossMeters: Double? = nil
-    let caloriesKcal: Double? = nil
-    let averageHeartRate: Double? = nil
-    let maxHeartRate: Double? = nil
-    let averageCadence: Double? = nil
-    let maxCadence: Double? = nil
+    let movingDurationSeconds: Int?
+    let distanceMeters: Double?
+    let elevationGainMeters: Double?
+    let elevationLossMeters: Double?
+    let caloriesKcal: Double?
+    let averageHeartRate: Double?
+    let maxHeartRate: Double?
+    let averageCadence: Double?
+    let maxCadence: Double?
     let sourceName: String?
     let allStatistics: [String: HealthKitQuantityStatistics]
     let rawQuantitySamples: [HealthKitRawQuantitySample]
@@ -279,15 +279,15 @@ struct HealthKitLegacyWorkoutSyncPayload: Encodable, Equatable, Sendable {
     let startedAt: Date
     let endedAt: Date
     let durationSeconds: Int
-    let movingDurationSeconds: Int? = nil
-    let distanceMeters: Double? = nil
-    let elevationGainMeters: Double? = nil
-    let elevationLossMeters: Double? = nil
-    let caloriesKcal: Double? = nil
-    let averageHeartRate: Double? = nil
-    let maxHeartRate: Double? = nil
-    let averageCadence: Double? = nil
-    let maxCadence: Double? = nil
+    let movingDurationSeconds: Int?
+    let distanceMeters: Double?
+    let elevationGainMeters: Double?
+    let elevationLossMeters: Double?
+    let caloriesKcal: Double?
+    let averageHeartRate: Double?
+    let maxHeartRate: Double?
+    let averageCadence: Double?
+    let maxCadence: Double?
 
     enum CodingKeys: String, CodingKey {
         case workoutUUID = "workout_uuid"

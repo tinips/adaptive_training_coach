@@ -311,7 +311,7 @@
 				CODE_SIGN_ENTITLEMENTS = CoachHealthSync/Resources/CoachHealthSync.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = 5DBRG4AT92;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = CoachHealthSync/Resources/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
@@ -336,7 +336,7 @@
 				CODE_SIGN_ENTITLEMENTS = CoachHealthSync/Resources/CoachHealthSync.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = 5DBRG4AT92;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = CoachHealthSync/Resources/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
