@@ -60,12 +60,6 @@ GOAL_TEMPLATES = (
         "Road cycling race, sportive, or gran fondo.",
     ),
     (
-        "MTB_RACE",
-        "PRIMARY",
-        "Mountain-bike race",
-        "Mountain-bike or cross-country cycling race.",
-    ),
-    (
         "POOL_SWIMMING_EVENT",
         "PRIMARY",
         "Pool swimming event",
@@ -211,7 +205,6 @@ GOAL_CONTEXTS = (
     ),
     ("TRAIL_RACE", "running_trail", "TARGET", 10),
     ("ROAD_CYCLING_EVENT", "cycling_road", "TARGET", 10),
-    ("MTB_RACE", "cycling_mountain", "TARGET", 10),
     ("POOL_SWIMMING_EVENT", "swimming_pool", "TARGET", 10),
     ("OPEN_WATER_SWIM", "swimming_open_water", "TARGET", 10),
     *(
@@ -461,33 +454,6 @@ EXECUTION_OPTIONS = (
         ("Does not reproduce outdoor handling or descending.",),
     ),
     (
-        "cycling_mountain",
-        "mountain_bike",
-        "Mountain bike",
-        "cycling_mountain",
-        "PREFERRED",
-        10,
-        (),
-    ),
-    (
-        "cycling_mountain",
-        "road_bike",
-        "Road bike",
-        "cycling_road",
-        "SUBSTITUTE",
-        20,
-        ("Does not reproduce technical mountain-bike terrain.",),
-    ),
-    (
-        "cycling_mountain",
-        "stationary_bike",
-        "Stationary bike",
-        "cycling_stationary",
-        "SUBSTITUTE",
-        30,
-        ("Provides conditioning without terrain skills.",),
-    ),
-    (
         "cycling_stationary",
         "stationary_bike",
         "Stationary bike",
@@ -551,18 +517,6 @@ OPTION_CAPABILITIES = (
     *(
         ("cycling_road", option, "helmet", "REQUIRED")
         for option in ("road_bike", "mountain_bike")
-    ),
-    *(
-        ("cycling_mountain", option, bike, "REQUIRED")
-        for option, bike in (
-            ("mountain_bike", "mountain_bike"),
-            ("road_bike", "road_bike"),
-            ("stationary_bike", "stationary_bike"),
-        )
-    ),
-    *(
-        ("cycling_mountain", option, "helmet", "REQUIRED")
-        for option in ("mountain_bike", "road_bike")
     ),
     ("cycling_stationary", "stationary_bike", "stationary_bike", "REQUIRED"),
     ("swimming_pool", "pool", "pool_access", "REQUIRED"),
