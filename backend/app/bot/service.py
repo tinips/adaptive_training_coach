@@ -467,27 +467,26 @@ class CoachBotApplicationService:
                 keyboards.training_history_import_keyboard(),
             )
         if callback_data == "ob:v1:history:phone":
-            if not self._mobile_sync_enabled or self._mobile_sync is None:
+            response = await self.connect_iphone(identity)
+            if response.text in {
+                messages.MOBILE_SYNC_UNAVAILABLE,
+                messages.NOT_FOUND,
+            }:
                 return TelegramResponse(
-                    f"{messages.MOBILE_SYNC_UNAVAILABLE}\n\n"
-                    f"{messages.TRAINING_HISTORY_IMPORT}",
+                    f"{response.text}\n\n{messages.TRAINING_HISTORY_IMPORT}",
                     keyboards.training_history_import_keyboard(),
                 )
-            try:
-                pairing = await self._mobile_sync.issue_pairing_code(identity)
-            except MobileSyncDisabledError:
-                return TelegramResponse(
-                    f"{messages.MOBILE_SYNC_UNAVAILABLE}\n\n"
-                    f"{messages.TRAINING_HISTORY_IMPORT}",
-                    keyboards.training_history_import_keyboard(),
-                )
-            except MobileSyncIdentityNotFoundError:
-                return TelegramResponse(messages.NOT_FOUND)
             await self._onboarding.complete_training_history(identity)
             return TelegramResponse(
-                f"{messages.iphone_pairing_code(pairing.code, pairing.expires_at)}\n\n"
-                f"{messages.ONBOARDING_COMPLETED}"
+                f"{response.text}\n\n{messages.ONBOARDING_COMPLETED}",
+                keyboards.phone_pairing_keyboard(),
             )
+        if callback_data == "ob:v1:history:phone:resend":
+            response = await self.connect_iphone(identity)
+            return replace(response, keyboard=keyboards.phone_pairing_keyboard())
+        if callback_data == "ob:v1:phone:connect":
+            response = await self.connect_iphone(identity)
+            return replace(response, keyboard=keyboards.phone_pairing_keyboard())
         if callback_data == "ob:v1:cancel":
             return TelegramResponse(
                 messages.CANCEL_CONFIRM, keyboards.cancel_confirmation_keyboard()

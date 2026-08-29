@@ -241,6 +241,7 @@ async def test_history_phone_choice_pairs_and_completes_onboarding() -> None:
     onboarding.complete_training_history.assert_awaited_once_with(identity)
     assert "<code>ABCD2345</code>" in response.text
     assert messages.ONBOARDING_COMPLETED in response.text
+    assert response.keyboard == keyboards.phone_pairing_keyboard()
     assert response.edit_existing is True
 
 
@@ -253,6 +254,28 @@ async def test_history_file_choice_prompts_for_a_document() -> None:
     assert response.text == messages.TRAINING_HISTORY_FILE_PROMPT
     assert response.keyboard == keyboards.training_history_import_keyboard()
     assert response.edit_existing is True
+
+
+@pytest.mark.asyncio
+async def test_phone_pairing_can_resend_code() -> None:
+    mobile_sync = SimpleNamespace(
+        issue_pairing_code=AsyncMock(
+            return_value=SimpleNamespace(
+                code="EFGH5678",
+                expires_at=datetime(2026, 8, 21, 10, 30, tzinfo=UTC),
+            )
+        )
+    )
+
+    response = await _facade(
+        SimpleNamespace(),
+        mobile_sync=mobile_sync,
+        mobile_sync_enabled=True,
+    ).handle_callback(_identity(), "ob:v1:history:phone:resend")
+
+    mobile_sync.issue_pairing_code.assert_awaited_once_with(_identity())
+    assert "<code>EFGH5678</code>" in response.text
+    assert response.keyboard == keyboards.phone_pairing_keyboard()
 
 
 def _weekly_plan() -> WeeklyPlan:

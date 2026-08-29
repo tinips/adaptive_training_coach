@@ -406,6 +406,10 @@ def training_history_import_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def phone_pairing_keyboard() -> InlineKeyboardMarkup:
+    return _rows([[("Resend code", "ob:v1:history:phone:resend")]])
+
+
 def resume_keyboard(*, cancelled: bool = False) -> InlineKeyboardMarkup:
     """Build resume or restart action."""
 
@@ -442,7 +446,12 @@ def deletion_confirmation_keyboard() -> InlineKeyboardMarkup:
 
 
 def add_workout_keyboard() -> InlineKeyboardMarkup:
-    return _rows([[(LABELS["cancel"], "ob:v1:cancel")]])
+    return _rows(
+        [
+            [("Connect my phone", "ob:v1:phone:connect")],
+            [(LABELS["cancel"], "ob:v1:cancel")],
+        ]
+    )
 
 
 def _rows(
