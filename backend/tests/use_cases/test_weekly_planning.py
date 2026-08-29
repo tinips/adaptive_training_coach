@@ -109,14 +109,28 @@ async def _seed_target_goal(
         role=GoalContextRole.TARGET,
         code="weekly_plan_target",
     )
+    supporting_goal_template_id: uuid.UUID | None = None
     if supporting_discipline is not None:
+        supporting = GoalTemplate(
+            id=uuid.uuid4(),
+            code="WEEKLY_PLAN_SUPPORTING",
+            kind=GoalTemplateKind.SUPPORTING,
+            display_name="Weekly plan supporting",
+            description="Synthetic plan support",
+            source=CatalogItemSource.SEEDED,
+            status=CatalogItemStatus.ACTIVE,
+            definition_version=1,
+        )
+        session.add(supporting)
+        await session.flush()
         await _add_context(
             session,
-            template=primary,
+            template=supporting,
             discipline=supporting_discipline,
             role=GoalContextRole.SUPPORTING,
             code="weekly_plan_supporting",
         )
+        supporting_goal_template_id = supporting.id
     session.add(
         TrainingGoal(
             user_id=user.id,
@@ -125,6 +139,7 @@ async def _seed_target_goal(
             secondary_priority=None,
             original_description="Synthetic goal",
             goal_template_id=primary.id,
+            supporting_goal_template_id=supporting_goal_template_id,
         )
     )
     await session.flush()
@@ -452,3 +467,32 @@ async def test_the_frozen_baseline_uses_the_window_the_gate_evaluated(
     assert baseline is not None
     assert baseline.session_count == 3
     assert baseline.analysis_started_at is not None
+
+
+@pytest.mark.asyncio
+async def test_a_supporting_goal_is_planned_alongside_the_primary_one(
+    database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Strength chosen as a support must appear in the planned disciplines."""
+
+    _, factory = database
+    monkeypatch.setattr("app.services.weekly_planning.service.utc_now", lambda: NOW)
+    async with factory.begin() as session:
+        athlete_id = await _seed_target_goal(
+            session, supporting_discipline=Discipline.STRENGTH
+        )
+        for days_ago in (1, 3, 5):
+            await _add_running(
+                session,
+                athlete_id=athlete_id,
+                started_at=NOW - timedelta(days=days_ago),
+            )
+
+    result = await _service(factory).generate_next_week(_identity())
+
+    assert result.kind == "created"
+    assert result.readiness is not None
+    planned = {row.discipline for row in result.readiness.disciplines}
+    assert Discipline.RUNNING in planned
+    assert Discipline.STRENGTH in planned

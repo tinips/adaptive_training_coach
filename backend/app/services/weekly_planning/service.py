@@ -81,6 +81,7 @@ class _TargetContext:
     code: str
     display_name: str
     discipline: Discipline
+    role: GoalContextRole
 
 
 class WeeklyPlanningService:
@@ -218,9 +219,12 @@ class WeeklyPlanningService:
             profiles = ProfileRepository(session)
             await profiles.lock_owner(user_id=user.id)
             goal = await profiles.get_training_goal(user_id=user.id)
-            target_contexts = await _primary_target_contexts(
+            target_contexts = await _planned_contexts(
                 catalog=TrainingCatalogRepository(session),
                 goal_template_id=(goal.goal_template_id if goal is not None else None),
+                supporting_goal_template_id=(
+                    goal.supporting_goal_template_id if goal is not None else None
+                ),
             )
             disciplines = tuple(
                 sorted(
@@ -308,6 +312,7 @@ class WeeklyPlanningService:
                             "code": item.code,
                             "display_name": item.display_name,
                             "discipline": item.discipline.value,
+                            "role": item.role.value,
                         }
                         for item in target_contexts
                     ],
@@ -398,7 +403,11 @@ class WeeklyPlanningService:
                     prompt_tokens=prompt_tokens,
                     completion_tokens=completion_tokens,
                 )
-                return WeeklyPlanningResult(kind="created", plan=_plan_schema(stored))
+                return WeeklyPlanningResult(
+                    kind="created",
+                    plan=_plan_schema(stored),
+                    readiness=prepared.readiness,
+                )
         except IntegrityError:
             # The unique constraint is the final authority for double clicks or
             # separate bot workers. The loser simply reads the winner's plan.
@@ -455,25 +464,45 @@ async def _record_usage_in_session(
     )
 
 
-async def _primary_target_contexts(
+async def _planned_contexts(
     *,
     catalog: TrainingCatalogRepository,
     goal_template_id: uuid.UUID | None,
+    supporting_goal_template_id: uuid.UUID | None,
 ) -> tuple[_TargetContext, ...]:
-    if goal_template_id is None:
+    """Disciplines the coach plans: the primary target plus any support.
+
+    A supporting goal previously reached the baseline service but never the
+    planner, so an athlete could hold strength maintenance, accumulate fitness
+    numbers for it, and never receive a strength session.
+    """
+
+    expected_role_by_goal_id: dict[uuid.UUID, GoalContextRole] = {}
+    if goal_template_id is not None:
+        primary = await catalog.active_goal_by_id(goal_template_id=goal_template_id)
+        if primary is not None and primary.kind is GoalTemplateKind.PRIMARY:
+            expected_role_by_goal_id[primary.id] = GoalContextRole.TARGET
+    if supporting_goal_template_id is not None:
+        supporting = await catalog.active_goal_by_id(
+            goal_template_id=supporting_goal_template_id
+        )
+        if supporting is not None and supporting.kind is GoalTemplateKind.SUPPORTING:
+            expected_role_by_goal_id[supporting.id] = GoalContextRole.SUPPORTING
+    if not expected_role_by_goal_id:
         return ()
-    goal = await catalog.active_goal_by_id(goal_template_id=goal_template_id)
-    if goal is None or goal.kind is not GoalTemplateKind.PRIMARY:
-        return ()
-    rows = await catalog.contexts_for_goals(goal_template_ids=(goal.id,))
+
+    rows = await catalog.contexts_for_goals(
+        goal_template_ids=expected_role_by_goal_id.keys()
+    )
     return tuple(
         _TargetContext(
             code=context.code,
             display_name=context.display_name,
             discipline=context.discipline,
+            role=relation.role,
         )
         for relation, context in rows
-        if relation.role is GoalContextRole.TARGET
+        if expected_role_by_goal_id.get(relation.goal_template_id) is relation.role
     )
 
 

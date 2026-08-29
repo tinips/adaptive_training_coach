@@ -8,7 +8,7 @@ from typing import Final
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
-WEEKLY_PLANNER_PROMPT_VERSION: Final = 2
+WEEKLY_PLANNER_PROMPT_VERSION: Final = 3
 
 _WEEKLY_PLANNER_SYSTEM_PROMPT: Final = """You are an endurance coach creating one
 safe, concise weekly plan.
@@ -28,7 +28,13 @@ NONE: no recent history at all. The athlete's goal still requires this disciplin
 include one short, easy, introductory session. Do not prescribe HARD intensity for it.
 
 Plan only the disciplines present in evidence_state. An athlete may have one target
-discipline or several."""
+discipline or several.
+
+Each entry in target_contexts carries a role. TARGET means the discipline the
+athlete's event is in; it gets the bulk of the week. SUPPORTING means a discipline
+that exists to support the target, such as strength work to maintain muscle. Give a
+supporting discipline one or two short sessions and never let it displace target
+training."""
 
 
 def build_weekly_planner_messages(
