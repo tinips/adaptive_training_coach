@@ -167,12 +167,8 @@ AVAILABILITY_INTAKE = (
     "I can swim at a pool on Wednesday and Friday, and I can cycle only on weekends.'"
 )
 HEALTH_LIMITATIONS_INTAKE = (
-    "Write any current injuries, discomfort, or physical limitations that should "
-    "influence training, or choose None. This is not medical advice."
-)
-PAST_INJURIES_INTAKE = (
-    "Do you have any past injuries or recurring issues that should influence "
-    "training? Write them down, or choose None. This is not medical advice."
+    "Write any current or past injuries, discomfort, or physical limitations that "
+    "should influence training, or choose None. This is not medical advice."
 )
 TRAINING_HISTORY_IMPORT = (
     "Optional: add your workouts from the last 3 months so future coaching can "

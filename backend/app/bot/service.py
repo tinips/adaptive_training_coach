@@ -751,18 +751,13 @@ class CoachBotApplicationService:
                 keyboards.supporting_goal_keyboard(supporting_options),
             )
         if result.kind == "context_validation_error":
-            health_prompt = (
-                messages.PAST_INJURIES_INTAKE
-                if "_current_limitations" in result.answers
-                else messages.HEALTH_LIMITATIONS_INTAKE
-            )
             retry_prompts = {
                 OnboardingStep.AVAILABILITY_INTAKE: (
                     messages.AVAILABILITY_INTAKE,
                     keyboards.profile_text_input_keyboard(),
                 ),
                 OnboardingStep.HEALTH_LIMITATIONS_INTAKE: (
-                    health_prompt,
+                    messages.HEALTH_LIMITATIONS_INTAKE,
                     keyboards.health_limitations_keyboard(),
                 ),
             }
@@ -789,30 +784,20 @@ class CoachBotApplicationService:
             )
         if result.kind == "equipment_unmatched":
             return TelegramResponse(
-                f"{messages.EQUIPMENT_UNMATCHED}\n\n{messages.HEALTH_LIMITATIONS_INTAKE}",
+                messages.HEALTH_LIMITATIONS_INTAKE,
                 keyboards.health_limitations_keyboard(),
             )
         if (
             result.kind == "health_limitations_intake"
             and result.execution_assessment is not None
         ):
-            health_prompt = (
-                messages.PAST_INJURIES_INTAKE
-                if "_current_limitations" in result.answers
-                else messages.HEALTH_LIMITATIONS_INTAKE
-            )
             return TelegramResponse(
-                f"{messages.equipment_summary(result.execution_assessment)}\n\n"
-                f"{health_prompt}",
+                messages.HEALTH_LIMITATIONS_INTAKE,
                 keyboards.health_limitations_keyboard(),
             )
         if result.kind == "health_limitations_intake":
             return TelegramResponse(
-                (
-                    messages.PAST_INJURIES_INTAKE
-                    if "_current_limitations" in result.answers
-                    else messages.HEALTH_LIMITATIONS_INTAKE
-                ),
+                messages.HEALTH_LIMITATIONS_INTAKE,
                 keyboards.health_limitations_keyboard(),
             )
         if result.kind == "onboarding_completed":
