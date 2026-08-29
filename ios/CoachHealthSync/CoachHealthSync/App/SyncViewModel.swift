@@ -57,6 +57,19 @@ final class SyncViewModel: ObservableObject {
         }
     }
 
+    func resetConnection() {
+        do {
+            try keychainStore.deleteAccessToken()
+            accessToken = nil
+            isPaired = false
+            workouts = []
+            selectedWorkoutID = nil
+            statusMessage = "Connection reset. Pair this iPhone from Telegram."
+        } catch {
+            errorMessage = safeMessage(for: error)
+        }
+    }
+
     func authorizeAndLoadWorkouts() async {
         await performWork {
             try await healthKitService.requestWorkoutReadAuthorization()

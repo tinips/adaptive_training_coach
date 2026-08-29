@@ -15,6 +15,9 @@ struct ContentView: View {
                         Text("To disconnect, use /disconnect_iphone in Telegram.")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
+                        Button("Reset connection") {
+                            viewModel.resetConnection()
+                        }
                     } else {
                         Text("Send /connect_iphone to the Telegram bot, then enter the one-time code below.")
                             .font(.footnote)
