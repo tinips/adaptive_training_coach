@@ -115,12 +115,16 @@ final class HealthKitService: HealthKitServicing {
             ),
             elevationGainMeters: quantityValue(
                 for: workout,
-                quantityType: HKQuantityType.quantityType(forIdentifier: .elevationAscended),
+                quantityType: quantityType(
+                    forIdentifier: "HKQuantityTypeIdentifierElevationAscended"
+                ),
                 unit: .meter()
             ),
             elevationLossMeters: quantityValue(
                 for: workout,
-                quantityType: HKQuantityType.quantityType(forIdentifier: .elevationDescended),
+                quantityType: quantityType(
+                    forIdentifier: "HKQuantityTypeIdentifierElevationDescended"
+                ),
                 unit: .meter()
             ),
             averageHeartRate: averageQuantityValue(
@@ -139,12 +143,12 @@ final class HealthKitService: HealthKitServicing {
                 quantityType: cadenceQuantityType(for: workout.workoutActivityType),
                 unit: HKUnit.count().unitDivided(by: .minute())
             ),
+            sourceName: workout.sourceRevision.source.name,
             allStatistics: allStatistics(for: workout),
             rawQuantitySamples: rawSamples(
                 for: workout,
                 samples: rawQuantitySamples
-            ),
-            sourceName: workout.sourceRevision.source.name
+            )
         )
     }
 
@@ -177,11 +181,13 @@ final class HealthKitService: HealthKitServicing {
 
     private static let workoutQuantityTypes: Set<HKQuantityType> = Set(
         workoutQuantityTypeIdentifiers.compactMap { identifier in
-            HKQuantityType.quantityType(
-                forIdentifier: HKQuantityTypeIdentifier(rawValue: identifier)
-            )
+            quantityType(forIdentifier: identifier)
         }
     )
+
+    private static func quantityType(forIdentifier identifier: String) -> HKQuantityType? {
+        HKQuantityType.quantityType(forIdentifier: identifier)
+    }
 
     private func fetchRawQuantitySamples(
         from startDate: Date,
@@ -273,7 +279,7 @@ final class HealthKitService: HealthKitServicing {
         samples: [HKQuantitySample]
     ) -> [HealthKitRawQuantitySample] {
         let sourceBundleIdentifier = workout.sourceRevision.source.bundleIdentifier
-        return samples.compactMap { sample in
+        return samples.compactMap { sample -> HealthKitRawQuantitySample? in
             guard sample.startDate < workout.endDate,
                   sample.endDate > workout.startDate,
                   sample.sourceRevision.source.bundleIdentifier == sourceBundleIdentifier
