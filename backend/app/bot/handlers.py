@@ -7,20 +7,36 @@ from pathlib import Path
 from typing import cast
 
 from langchain_core.messages import HumanMessage
-from telegram import Update
+from telegram import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+)
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import ContextTypes
 
 from app.bot import messages
 from app.bot.rendering import TelegramResponse
 from app.bot.service_protocol import CoachBotService
+from app.integrations.llm.vision import ScreenshotExtractionError
 from app.schemas.common import TelegramIdentity
+from app.schemas.manual_import import ManualWorkoutImportRequest
 from app.schemas.training_import import TelegramDocumentUpload
+from app.services.workout_screenshot import (
+    ActivityImportValidationError,
+    ScreenshotDraft,
+    WorkoutScreenshotDisabledError,
+    WorkoutScreenshotNotFoundError,
+    WorkoutScreenshotService,
+)
 
 logger = logging.getLogger(__name__)
 BOT_SERVICE_KEY = "coach_bot_service"
+WORKOUT_SCREENSHOT_SERVICE_KEY = "workout_screenshot_service"
 ALLOWED_USER_IDS_KEY = "telegram_allowed_user_ids"
 DEV_USER_IDS_KEY = "dev_telegram_user_ids"
+_SCREENSHOT_CALLBACK_PREFIX = "screenshot:"
 
 
 async def start_handler(
@@ -108,6 +124,9 @@ async def callback_handler(
     logger.info("telegram_callback_acknowledged callback=%s", query.data)
     if not _authorized(update, context):
         logger.warning("telegram_callback_unauthorized callback=%s", query.data)
+        return
+    if query.data.startswith(_SCREENSHOT_CALLBACK_PREFIX):
+        await _handle_screenshot_callback(update, context, query.data)
         return
     if query.data == "ob:v1:goal:confirm":
         try:
@@ -214,6 +233,152 @@ async def document_handler(
             response.text,
             reply_markup=response.user_keyboard or response.keyboard,
         )
+
+
+async def workout_screenshot_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Read a workout screenshot and ask the athlete to confirm before saving."""
+
+    message = update.effective_message
+    user = update.effective_user
+    photos = message.photo if message is not None else None
+    if (
+        message is None
+        or user is None
+        or not photos
+        or not _authorized(update, context)
+    ):
+        return
+
+    status_message = await message.reply_text(messages.SCREENSHOT_READING)
+    try:
+        # Telegram sends several resolutions of the same photo; the last is
+        # the largest.
+        telegram_file = await photos[-1].get_file()
+        image_bytes = bytes(await telegram_file.download_as_bytearray())
+        draft = await _workout_screenshot_service(context).extract_draft(
+            telegram_user_id=user.id,
+            image_bytes=image_bytes,
+        )
+    except WorkoutScreenshotDisabledError:
+        await status_message.edit_text(messages.SCREENSHOT_DISABLED)
+        return
+    except WorkoutScreenshotNotFoundError:
+        await status_message.edit_text(messages.SCREENSHOT_ATHLETE_NOT_FOUND)
+        return
+    except ScreenshotExtractionError:
+        logger.info("telegram_screenshot_extraction_failed user_id=%s", user.id)
+        await status_message.edit_text(messages.SCREENSHOT_EXTRACTION_FAILED)
+        return
+
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    messages.SCREENSHOT_CONFIRM_BUTTON,
+                    callback_data=f"screenshot:confirm:{draft.token}",
+                ),
+                InlineKeyboardButton(
+                    messages.SCREENSHOT_CANCEL_BUTTON,
+                    callback_data=f"screenshot:cancel:{draft.token}",
+                ),
+            ]
+        ]
+    )
+    await status_message.edit_text(
+        _format_draft_summary(draft),
+        reply_markup=keyboard,
+    )
+
+
+async def _handle_screenshot_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    callback_data: str,
+) -> None:
+    query = update.callback_query
+    user = update.effective_user
+    if query is None or user is None:
+        return
+    action, _, token = callback_data.removeprefix(
+        _SCREENSHOT_CALLBACK_PREFIX
+    ).partition(":")
+    service = _workout_screenshot_service(context)
+
+    if action == "cancel":
+        service.cancel(telegram_user_id=user.id, token=token)
+        await _edit_or_reply(query, messages.SCREENSHOT_DISCARDED)
+        return
+
+    if action != "confirm":
+        return
+
+    try:
+        _workout, outcome = await service.confirm(
+            telegram_user_id=user.id,
+            token=token,
+        )
+    except WorkoutScreenshotNotFoundError:
+        await _edit_or_reply(query, messages.SCREENSHOT_DRAFT_EXPIRED)
+        return
+    except ActivityImportValidationError:
+        logger.info("telegram_screenshot_import_invalid user_id=%s", user.id)
+        await _edit_or_reply(query, messages.SCREENSHOT_IMPORT_INVALID)
+        return
+
+    text = {
+        "inserted": messages.SCREENSHOT_SAVED,
+        "updated": messages.SCREENSHOT_UPDATED,
+        "unchanged": messages.SCREENSHOT_UNCHANGED,
+    }[outcome]
+    await _edit_or_reply(query, text)
+
+
+async def _edit_or_reply(query: CallbackQuery, text: str) -> None:
+    try:
+        await query.edit_message_text(text)
+    except BadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            logger.info("telegram_screenshot_message_edit_unavailable")
+
+
+def _format_draft_summary(draft: ScreenshotDraft) -> str:
+    request: ManualWorkoutImportRequest = draft.request
+    minutes, seconds = divmod(request.duration_seconds, 60)
+    lines = [
+        messages.SCREENSHOT_DRAFT_HEADER,
+        f"{request.discipline.title()} - {request.source_app_name}",
+        f"{request.started_at:%Y-%m-%d %H:%M}",
+        f"Duration: {minutes}:{seconds:02d}",
+    ]
+    if request.distance_meters is not None:
+        lines.append(f"Distance: {request.distance_meters:.0f} m")
+    if request.calories_active_kcal is not None:
+        lines.append(f"Active calories: {request.calories_active_kcal:.0f} kcal")
+    if request.average_heart_rate is not None:
+        lines.append(f"Avg heart rate: {request.average_heart_rate:.0f} bpm")
+    if request.swimming is not None:
+        swim = request.swimming
+        if swim.total_lengths is not None:
+            lines.append(f"Lengths: {swim.total_lengths}")
+        if swim.primary_stroke is not None:
+            lines.append(f"Stroke: {swim.primary_stroke.title()}")
+        if swim.total_strokes is not None:
+            lines.append(f"Total strokes: {swim.total_strokes}")
+    lines.append("")
+    lines.append(messages.SCREENSHOT_CONFIRM_PROMPT)
+    return "\n".join(lines)
+
+
+def _workout_screenshot_service(
+    context: ContextTypes.DEFAULT_TYPE,
+) -> WorkoutScreenshotService:
+    return cast(
+        WorkoutScreenshotService,
+        context.application.bot_data[WORKOUT_SCREENSHOT_SERVICE_KEY],
+    )
 
 
 async def global_error_handler(

@@ -41,6 +41,14 @@ class Settings(BaseSettings):
     llm_min_confidence: float = Field(default=0.75, ge=0, le=1)
     llm_other_requests_per_hour: int = Field(default=10, ge=1, le=100)
 
+    # Send a workout summary screenshot to the bot; a vision model reads the
+    # numbers a source app never exports through HealthKit (see the mobile
+    # HealthKit sync path's known gaps) and the athlete confirms before it is
+    # saved. Uses the same DeepSeek credentials as `llm_api_key`/`llm_base_url`
+    # above, with its own vision-capable model.
+    screenshot_import_enabled: bool = False
+    llm_vision_model: str = "deepseek-v4-flash-vision-exp"
+
     apple_health_import_enabled: bool = True
     apple_health_import_max_compressed_size_mb: int = Field(
         default=100,

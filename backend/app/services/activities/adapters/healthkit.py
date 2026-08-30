@@ -26,6 +26,11 @@ def from_healthkit_workout(payload: HealthKitWorkoutPayload) -> ActivityImportDa
 
     raw_activity_type = payload.activity_type
     mapping = _discipline_for_activity_type(raw_activity_type)
+    heart_rate_observations = _heart_rate_observations(payload)
+    average_heart_rate, max_heart_rate = _heart_rate_summary(
+        payload=payload,
+        observations=heart_rate_observations,
+    )
     return ActivityImportData(
         source=ActivitySource.APPLE_HEALTH,
         external_id=f"healthkit:{payload.workout_uuid}",
@@ -40,8 +45,8 @@ def from_healthkit_workout(payload: HealthKitWorkoutPayload) -> ActivityImportDa
         elevation_gain_meters=payload.elevation_gain_meters,
         elevation_loss_meters=payload.elevation_loss_meters,
         calories_kcal=payload.calories_kcal,
-        average_heart_rate=payload.average_heart_rate,
-        max_heart_rate=payload.max_heart_rate,
+        average_heart_rate=average_heart_rate,
+        max_heart_rate=max_heart_rate,
         average_cadence=payload.average_cadence,
         max_cadence=payload.max_cadence,
         running_type=mapping.running_type,
@@ -49,7 +54,7 @@ def from_healthkit_workout(payload: HealthKitWorkoutPayload) -> ActivityImportDa
         swimming_environment=mapping.swimming_environment,
         strength_type=mapping.strength_type,
         source_metadata=_source_metadata(payload),
-        heart_rate_observations=_heart_rate_observations(payload),
+        heart_rate_observations=heart_rate_observations,
     )
 
 
@@ -186,6 +191,34 @@ def _heart_rate_observations(
             )
         )
     return tuple(observations)
+
+
+def _heart_rate_summary(
+    *,
+    payload: HealthKitWorkoutPayload,
+    observations: tuple[HeartRateObservationData, ...],
+) -> tuple[float | None, float | None]:
+    """Fall back to the raw samples when HealthKit has no workout summary.
+
+    Some sources (observed with "Mi Fitness") never attach an official
+    per-workout heart-rate statistic the way they do for distance and
+    calories, so ``payload.average_heart_rate``/``max_heart_rate`` arrive
+    empty even though the individual background readings were captured.
+    Deriving the summary from those same readings keeps every workout's
+    heart-rate fields populated instead of silently staying blank.
+    """
+
+    average = payload.average_heart_rate
+    maximum = payload.max_heart_rate
+    if (average is not None and maximum is not None) or not observations:
+        return average, maximum
+
+    readings = [observation.beats_per_minute for observation in observations]
+    if average is None:
+        average = sum(readings) / len(readings)
+    if maximum is None:
+        maximum = max(readings)
+    return average, maximum
 
 
 __all__ = ["from_healthkit_workout"]

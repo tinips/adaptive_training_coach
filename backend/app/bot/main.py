@@ -11,13 +11,19 @@ from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import Application, Defaults
 
-from app.bot.handlers import ALLOWED_USER_IDS_KEY, BOT_SERVICE_KEY, DEV_USER_IDS_KEY
+from app.bot.handlers import (
+    ALLOWED_USER_IDS_KEY,
+    BOT_SERVICE_KEY,
+    DEV_USER_IDS_KEY,
+    WORKOUT_SCREENSHOT_SERVICE_KEY,
+)
 from app.bot.router import register_handlers
 from app.bot.service import CoachBotApplicationService
 from app.bot.service_protocol import CoachBotService
 from app.config import Settings, get_settings
 from app.db.session import create_engine, create_session_factory
 from app.integrations.llm.factory import create_goal_extraction_model
+from app.integrations.llm.vision import DeepSeekWorkoutScreenshotExtractor
 from app.logging import configure_logging
 from app.services.accounts import AccountQueryService, AccountService
 from app.services.mobile_sync import MobileSyncService
@@ -25,6 +31,7 @@ from app.services.onboarding import OnboardingService
 from app.services.profiles import ProfileService
 from app.services.training_import import TrainingFileImportService
 from app.services.weekly_planning import WeeklyPlanningService
+from app.services.workout_screenshot import WorkoutScreenshotService
 
 TelegramApplication = Application[Any, Any, Any, Any, Any, Any]
 logger = logging.getLogger(__name__)
@@ -38,6 +45,7 @@ class BotRuntime:
     engine: AsyncEngine
     apple_health: TrainingFileImportService
     service: CoachBotApplicationService
+    workout_screenshot: WorkoutScreenshotService
 
     async def recover(self) -> None:
         """Reconcile durable background work before accepting updates."""
@@ -87,11 +95,21 @@ def build_runtime(
             model=create_goal_extraction_model(runtime_settings),
         ),
     )
+    workout_screenshot = WorkoutScreenshotService(
+        session_factory=session_factory,
+        settings=runtime_settings,
+        extractor=DeepSeekWorkoutScreenshotExtractor(
+            api_key=runtime_settings.llm_api_key,
+            base_url=runtime_settings.llm_base_url or None,
+            model_name=runtime_settings.llm_vision_model,
+        ),
+    )
     return BotRuntime(
         settings=runtime_settings,
         engine=runtime_engine,
         apple_health=apple_health,
         service=service,
+        workout_screenshot=workout_screenshot,
     )
 
 
@@ -100,6 +118,7 @@ def create_application(
     *,
     runtime: BotRuntime | None = None,
     service: CoachBotService | None = None,
+    workout_screenshot: WorkoutScreenshotService | None = None,
 ) -> TelegramApplication:
     """Build a network-idle Telegram application suitable for tests or polling."""
 
@@ -112,6 +131,23 @@ def create_application(
     if service is None:
         owned_runtime = runtime or build_runtime(runtime_settings)
         service = owned_runtime.service
+    if workout_screenshot is None:
+        if owned_runtime is not None:
+            workout_screenshot = owned_runtime.workout_screenshot
+        else:
+            # Construction never calls out to DeepSeek - safe to build lazily
+            # here for a test/injection path that supplied its own `service`.
+            workout_screenshot = WorkoutScreenshotService(
+                session_factory=create_session_factory(
+                    create_engine(runtime_settings)
+                ),
+                settings=runtime_settings,
+                extractor=DeepSeekWorkoutScreenshotExtractor(
+                    api_key=runtime_settings.llm_api_key,
+                    base_url=runtime_settings.llm_base_url or None,
+                    model_name=runtime_settings.llm_vision_model,
+                ),
+            )
 
     builder = (
         Application.builder()
@@ -130,6 +166,7 @@ def create_application(
 
     application = builder.build()
     application.bot_data[BOT_SERVICE_KEY] = service
+    application.bot_data[WORKOUT_SCREENSHOT_SERVICE_KEY] = workout_screenshot
     application.bot_data[ALLOWED_USER_IDS_KEY] = frozenset(
         runtime_settings.telegram_allowed_user_ids
     )

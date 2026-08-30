@@ -400,6 +400,31 @@ TRAINING_FILE_PROGRESS = {
 }
 APPLE_HEALTH_PROGRESS = TRAINING_FILE_PROGRESS
 
+SCREENSHOT_READING = "Reading the screenshot..."
+SCREENSHOT_DISABLED = "Workout screenshot import is not enabled yet."
+SCREENSHOT_ATHLETE_NOT_FOUND = (
+    "This Telegram account is not linked to a Coach profile."
+)
+SCREENSHOT_EXTRACTION_FAILED = (
+    "Could not read a workout from that image. Try a clearer screenshot "
+    "of a single workout summary."
+)
+SCREENSHOT_DRAFT_HEADER = "Here's what I read from the screenshot:"
+SCREENSHOT_CONFIRM_PROMPT = "Save this workout?"
+SCREENSHOT_CONFIRM_BUTTON = "Save"
+SCREENSHOT_CANCEL_BUTTON = "Discard"
+SCREENSHOT_DISCARDED = "Discarded. Nothing was saved."
+SCREENSHOT_DRAFT_EXPIRED = (
+    "This confirmation has expired. Send the screenshot again."
+)
+SCREENSHOT_IMPORT_INVALID = (
+    "That workout could not be saved — some of the extracted values "
+    "were not valid."
+)
+SCREENSHOT_SAVED = "Saved as a new workout."
+SCREENSHOT_UPDATED = "Updated the matching existing workout."
+SCREENSHOT_UNCHANGED = "Already saved — nothing changed."
+
 
 def apple_health_file_result(
     *,

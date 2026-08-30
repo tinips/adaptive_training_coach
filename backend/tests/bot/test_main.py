@@ -35,7 +35,7 @@ def test_create_application_registers_handlers_and_injects_facade() -> None:
     application = create_application(settings, service=service)
 
     assert application.bot_data[BOT_SERVICE_KEY] is service
-    assert len(application.handlers[0]) == 11
+    assert len(application.handlers[0]) == 12
     registered = [
         handler
         for handler in application.handlers[0]

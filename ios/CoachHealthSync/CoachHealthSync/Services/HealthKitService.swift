@@ -86,9 +86,69 @@ final class HealthKitService: HealthKitServicing {
             from: startDate,
             to: endDate
         )
+        let samplesByWorkout = Self.assignSamplesExclusively(
+            samples: rawQuantitySamples,
+            workouts: workouts
+        )
         return workouts.map { workout in
-            Self.map(workout, rawQuantitySamples: rawQuantitySamples)
+            Self.map(workout, rawQuantitySamples: samplesByWorkout[workout.uuid] ?? [])
         }
+    }
+
+    /// Assigns each raw quantity sample to at most one workout.
+    ///
+    /// HealthKit does not expose which workout a background quantity sample
+    /// (heart rate, steps, calories, ...) "belongs" to; the app approximates
+    /// this with a same-source, overlapping-time-window heuristic. Some
+    /// sources (observed with "Mi Fitness") log multiple `HKWorkout` entries
+    /// whose time ranges overlap, so the naive heuristic can otherwise
+    /// attach the exact same sample to more than one workout. The backend
+    /// stores each physical sample once ever, so a duplicate attachment is
+    /// rejected as a conflict instead of silently double-counting one
+    /// reading as if it happened twice. Assigning each sample to only the
+    /// single workout it overlaps most keeps every sample represented
+    /// exactly once, attributed to its best match.
+    private static func assignSamplesExclusively(
+        samples: [HKQuantitySample],
+        workouts: [HKWorkout]
+    ) -> [UUID: [HKQuantitySample]] {
+        var grouped: [UUID: [HKQuantitySample]] = [:]
+
+        for sample in samples {
+            var bestWorkout: HKWorkout?
+            var bestOverlap: TimeInterval = 0
+
+            for workout in workouts {
+                guard sample.sourceRevision.source.bundleIdentifier
+                    == workout.sourceRevision.source.bundleIdentifier,
+                    sample.startDate < workout.endDate,
+                    sample.endDate > workout.startDate
+                else {
+                    continue
+                }
+
+                let overlapStart = max(sample.startDate, workout.startDate)
+                let overlapEnd = min(sample.endDate, workout.endDate)
+                let overlap = overlapEnd.timeIntervalSince(overlapStart)
+                guard overlap > 0 else {
+                    continue
+                }
+
+                if overlap > bestOverlap
+                    || (overlap == bestOverlap
+                        && (bestWorkout.map { workout.startDate < $0.startDate } ?? true))
+                {
+                    bestWorkout = workout
+                    bestOverlap = overlap
+                }
+            }
+
+            if let bestWorkout {
+                grouped[bestWorkout.uuid, default: []].append(sample)
+            }
+        }
+
+        return grouped
     }
 
     private static func map(
@@ -145,10 +205,7 @@ final class HealthKitService: HealthKitServicing {
             ),
             sourceName: workout.sourceRevision.source.name,
             allStatistics: allStatistics(for: workout),
-            rawQuantitySamples: rawSamples(
-                for: workout,
-                samples: rawQuantitySamples
-            )
+            rawQuantitySamples: rawSamples(from: rawQuantitySamples)
         )
     }
 
@@ -274,19 +331,14 @@ final class HealthKitService: HealthKitServicing {
         )
     }
 
+    /// Formats the samples already exclusively assigned to this workout by
+    /// `assignSamplesExclusively`. No further time-window or source
+    /// filtering happens here.
     private static func rawSamples(
-        for workout: HKWorkout,
-        samples: [HKQuantitySample]
+        from samples: [HKQuantitySample]
     ) -> [HealthKitRawQuantitySample] {
-        let sourceBundleIdentifier = workout.sourceRevision.source.bundleIdentifier
-        return samples.compactMap { sample -> HealthKitRawQuantitySample? in
-            guard sample.startDate < workout.endDate,
-                  sample.endDate > workout.startDate,
-                  sample.sourceRevision.source.bundleIdentifier == sourceBundleIdentifier
-            else {
-                return nil
-            }
-            return HealthKitRawQuantitySample(
+        samples.map { sample in
+            HealthKitRawQuantitySample(
                 sampleUUID: sample.uuid,
                 quantityType: sample.quantityType.identifier,
                 startedAt: sample.startDate,
