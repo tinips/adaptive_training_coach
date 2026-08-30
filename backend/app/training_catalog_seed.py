@@ -246,22 +246,10 @@ CAPABILITIES = (
         "Shoes suitable for general running.",
     ),
     (
-        "trail_running_shoes",
-        "Trail running shoes",
-        "EQUIPMENT",
-        "Shoes suitable for trail terrain.",
-    ),
-    (
         "treadmill_access",
         "Treadmill access",
         "ACCESS",
         "Reliable access to a treadmill.",
-    ),
-    (
-        "sports_watch",
-        "Sports watch",
-        "EQUIPMENT",
-        "A watch capable of recording training.",
     ),
     ("road_bike", "Road bike", "EQUIPMENT", "A road or triathlon bicycle."),
     ("mountain_bike", "Mountain bike", "EQUIPMENT", "A mountain bicycle."),
@@ -271,13 +259,6 @@ CAPABILITIES = (
         "EQUIPMENT",
         "A stationary bike or indoor trainer.",
     ),
-    ("helmet", "Cycling helmet", "EQUIPMENT", "A suitable cycling helmet."),
-    (
-        "repair_kit",
-        "Repair kit",
-        "EQUIPMENT",
-        "Basic equipment for common cycling repairs.",
-    ),
     ("pool_access", "Pool access", "ACCESS", "Reliable access to a swimming pool."),
     (
         "open_water_access",
@@ -286,104 +267,7 @@ CAPABILITIES = (
         "Access to a suitable open-water swimming location.",
     ),
     ("goggles", "Swimming goggles", "EQUIPMENT", "Swimming goggles."),
-    (
-        "wetsuit",
-        "Swimming wetsuit",
-        "EQUIPMENT",
-        "A wetsuit suitable for open-water swimming.",
-    ),
-    ("hiking_shoes", "Hiking shoes", "EQUIPMENT", "Footwear suitable for hiking."),
     ("gym_access", "Gym access", "FACILITY", "Access to an equipped gym."),
-    (
-        "ski_ergometer",
-        "SkiErg equipment",
-        "EQUIPMENT",
-        "Equipment for SkiErg station training.",
-    ),
-    (
-        "sled_push_pull_equipment",
-        "Sled push and pull equipment",
-        "EQUIPMENT",
-        "Equipment for sled push and sled pull station training.",
-    ),
-    (
-        "burpee_broad_jump_space",
-        "Burpee broad-jump space",
-        "FACILITY",
-        "Space for burpee broad-jump station training.",
-    ),
-    (
-        "rowing_ergometer",
-        "Rowing ergometer",
-        "EQUIPMENT",
-        "An ergometer for rowing station training.",
-    ),
-    (
-        "farmer_carry_weights",
-        "Farmer-carry weights",
-        "EQUIPMENT",
-        "Weights for farmer-carry station training.",
-    ),
-    (
-        "sandbag",
-        "Sandbag",
-        "EQUIPMENT",
-        "A sandbag for sandbag-lunge station training.",
-    ),
-    (
-        "wall_ball",
-        "Wall ball",
-        "EQUIPMENT",
-        "A wall ball for wall-ball station training.",
-    ),
-    (
-        "home_training_space",
-        "Home training space",
-        "FACILITY",
-        "Space suitable for training at home.",
-    ),
-    (
-        "resistance_bands",
-        "Resistance bands",
-        "EQUIPMENT",
-        "Resistance bands for strength training.",
-    ),
-    (
-        "free_weights",
-        "Free weights",
-        "EQUIPMENT",
-        "Dumbbells, barbells, or kettlebells.",
-    ),
-    (
-        "pull_up_bar",
-        "Pull-up bar",
-        "EQUIPMENT",
-        "A fixed bar suitable for hanging exercises.",
-    ),
-    (
-        "obstacle_access",
-        "Obstacle facility access",
-        "ACCESS",
-        "Access to obstacle-specific practice facilities.",
-    ),
-    (
-        "bike_access_unspecified",
-        "Unspecified bike access",
-        "ACCESS",
-        "Migrated bike access whose type is not known.",
-    ),
-    (
-        "swimming_access_unspecified",
-        "Unspecified swimming access",
-        "ACCESS",
-        "Migrated swimming access whose environment is not known.",
-    ),
-    (
-        "hiking_footwear_unspecified",
-        "Unspecified hiking footwear",
-        "EQUIPMENT",
-        "Migrated suitable hiking footwear whose specific type is not known.",
-    ),
 )
 
 # target context, option code, label, execution context, role, priority, limitations
@@ -500,7 +384,6 @@ OPTION_CAPABILITIES = (
     ("running_road", "outdoor_road", "running_shoes", "REQUIRED"),
     ("running_road", "treadmill", "running_shoes", "REQUIRED"),
     ("running_road", "treadmill", "treadmill_access", "REQUIRED"),
-    ("running_trail", "trail", "trail_running_shoes", "REQUIRED"),
     ("running_trail", "road", "running_shoes", "REQUIRED"),
     ("running_trail", "treadmill", "running_shoes", "REQUIRED"),
     ("running_trail", "treadmill", "treadmill_access", "REQUIRED"),
@@ -514,22 +397,13 @@ OPTION_CAPABILITIES = (
             ("stationary_bike", "stationary_bike"),
         )
     ),
-    *(
-        ("cycling_road", option, "helmet", "REQUIRED")
-        for option in ("road_bike", "mountain_bike")
-    ),
     ("cycling_stationary", "stationary_bike", "stationary_bike", "REQUIRED"),
     ("swimming_pool", "pool", "pool_access", "REQUIRED"),
     ("swimming_pool", "pool", "goggles", "RECOMMENDED"),
     ("swimming_open_water", "open_water", "open_water_access", "REQUIRED"),
     ("swimming_open_water", "open_water", "goggles", "REQUIRED"),
-    ("swimming_open_water", "open_water", "wetsuit", "OPTIONAL"),
     ("swimming_open_water", "pool", "pool_access", "REQUIRED"),
     ("swimming_open_water", "pool", "goggles", "RECOMMENDED"),
     ("strength_general", "gym", "gym_access", "REQUIRED"),
-    ("strength_general", "gym", "free_weights", "RECOMMENDED"),
-    ("strength_general", "home", "home_training_space", "REQUIRED"),
-    ("strength_general", "home", "resistance_bands", "RECOMMENDED"),
     ("strength_gym", "gym", "gym_access", "REQUIRED"),
-    ("strength_home", "home", "home_training_space", "REQUIRED"),
 )
