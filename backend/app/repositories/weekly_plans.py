@@ -6,14 +6,15 @@ import uuid
 from datetime import date
 from typing import cast
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.base import utc_now
 from app.db.models import WeeklyTrainingPlan
 
 
 class WeeklyTrainingPlanRepository:
-    """Read and create at most one published plan per athlete/week."""
+    """Read the current immutable plan and retain superseded revisions."""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -27,7 +28,9 @@ class WeeklyTrainingPlanRepository:
                 select(WeeklyTrainingPlan).where(
                     WeeklyTrainingPlan.athlete_id == athlete_id,
                     WeeklyTrainingPlan.week_start == week_start,
+                    WeeklyTrainingPlan.superseded_at.is_(None),
                 )
+                .order_by(WeeklyTrainingPlan.revision.desc())
             ),
         )
 
@@ -42,10 +45,12 @@ class WeeklyTrainingPlanRepository:
         prompt_version: int,
         calculation_version: int,
         planner_model: str | None,
+        revision: int,
     ) -> WeeklyTrainingPlan:
         plan = WeeklyTrainingPlan(
             athlete_id=athlete_id,
             week_start=week_start,
+            revision=revision,
             plan_jsonb=plan_jsonb,
             evidence_snapshot_jsonb=evidence_snapshot_jsonb,
             input_digest=input_digest,
@@ -54,5 +59,19 @@ class WeeklyTrainingPlanRepository:
             planner_model=planner_model,
         )
         self._session.add(plan)
+        await self._session.flush()
+        return plan
+
+    async def supersede_current(
+        self, *, athlete_id: uuid.UUID, week_start: date
+    ) -> WeeklyTrainingPlan | None:
+        plan = await self.get_for_week(athlete_id=athlete_id, week_start=week_start)
+        if plan is None:
+            return None
+        await self._session.execute(
+            update(WeeklyTrainingPlan)
+            .where(WeeklyTrainingPlan.id == plan.id)
+            .values(superseded_at=utc_now())
+        )
         await self._session.flush()
         return plan

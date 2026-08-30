@@ -52,6 +52,10 @@ def goal_metric_prompt(field: str) -> str:
             "What is your target pace? Send min:sec per km, for example 5:30, "
             "or tap Skip."
         ),
+        "elevation": (
+            "What elevation gain are you targeting? Send metres, for example 1200, "
+            "or tap Skip."
+        ),
         "cycling_distance": (
             "What distance are you targeting? Send kilometres, for example 100."
         ),
@@ -354,7 +358,7 @@ PROFILE_SETTINGS_UNPROMPTED = "Use Change profile to choose what you want to upd
 PROFILE_GOAL_MENU = "Choose the training goal field to change."
 PROFILE_GOAL_MAIN_SPORT = "Which sport is your new goal in?"
 PROFILE_GOAL_MAIN_TEMPLATE = "Which goal best matches what you're training for?"
-PROFILE_GOAL_OUTCOME = "What would success or the outcome look like?"
+PROFILE_GOAL_METRICS = "Set the performance targets for this goal."
 PROFILE_GOAL_DATE = "When is the event? Send YYYY-MM-DD, or choose Not yet."
 PROFILE_GOAL_SECONDARY = (
     "Would you like to add or change a supporting goal, such as maintaining "
@@ -610,7 +614,6 @@ def persisted_profile(profile: Mapping[str, Any]) -> str:
             value
             for key in (
                 "main_goal",
-                "target_outcome",
                 "secondary_priority",
             )
             if isinstance((value := training_goal.get(key)), str) and value
@@ -637,7 +640,6 @@ def persisted_profile(profile: Mapping[str, Any]) -> str:
             for label, key in (
                 ("Main goal", "main_goal"),
                 ("Primary template", "primary_template"),
-                ("Target outcome", "target_outcome"),
                 ("Secondary priority", "secondary_priority"),
                 ("Supporting template", "supporting_template"),
             ):
@@ -648,6 +650,9 @@ def persisted_profile(profile: Mapping[str, Any]) -> str:
                     else "Not set"
                 )
                 lines.append(f"{label}: {rendered}")
+            target_lines = _performance_target_lines(training_goal)
+            if target_lines:
+                lines.append("Performance targets: " + "; ".join(target_lines))
             lines.append(
                 f"Event date: {_readable_date(training_goal.get('event_date'))}"
             )
@@ -691,6 +696,29 @@ def persisted_profile(profile: Mapping[str, Any]) -> str:
         else:
             high = midpoint - 1
     return _assert_telegram_length(render(low))
+
+
+def _performance_target_lines(goal: Mapping[str, Any]) -> list[str]:
+    lines: list[str] = []
+    distance = goal.get("target_distance_km")
+    if isinstance(distance, (int, float)):
+        lines.append(f"distance {distance:g} km")
+    elevation = goal.get("target_elevation_m")
+    if isinstance(elevation, (int, float)):
+        lines.append(f"elevation {elevation:g} m")
+    pace = goal.get("target_pace_seconds_per_km")
+    if isinstance(pace, (int, float)):
+        lines.append(f"run pace {_duration(int(pace))}/km")
+    swim_pace = goal.get("target_swim_pace_seconds_per_100m")
+    if isinstance(swim_pace, (int, float)):
+        lines.append(f"swim pace {_duration(int(swim_pace))}/100 m")
+    speed = goal.get("target_average_speed_kph")
+    if isinstance(speed, (int, float)):
+        lines.append(f"average speed {speed:g} km/h")
+    finish = goal.get("target_finish_time_seconds")
+    if isinstance(finish, int):
+        lines.append(f"finish time {_duration(finish)}")
+    return lines
 
 
 def _profile_free_text(value: str, cap: int | None) -> str:

@@ -67,7 +67,6 @@ class ProfileService:
                 training_goal=(
                     PersistedTrainingGoalData(
                         main_goal=goal.main_goal,
-                        target_outcome=goal.target_outcome,
                         event_date=goal.event_date,
                         secondary_priority=goal.secondary_priority,
                         primary_template=(
@@ -81,6 +80,14 @@ class ProfileService:
                             else None
                         ),
                         status=goal.status,
+                        target_distance_km=goal.target_distance_km,
+                        target_elevation_m=goal.target_elevation_m,
+                        target_pace_seconds_per_km=goal.target_pace_seconds_per_km,
+                        target_swim_pace_seconds_per_100m=(
+                            goal.target_swim_pace_seconds_per_100m
+                        ),
+                        target_average_speed_kph=goal.target_average_speed_kph,
+                        target_finish_time_seconds=goal.target_finish_time_seconds,
                     )
                     if goal is not None
                     else None

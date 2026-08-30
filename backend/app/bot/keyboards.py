@@ -316,7 +316,7 @@ def profile_goal_keyboard() -> InlineKeyboardMarkup:
     return _rows(
         [
             [("Main goal", "ps:v1:goal:main")],
-            [("Target outcome", "ps:v1:goal:outcome")],
+            [("Performance targets", "ps:v1:goal:metrics")],
             [("Event date", "ps:v1:goal:date")],
             [("Secondary priority", "ps:v1:goal:secondary")],
             [("Back", "ps:v1:goal:back")],
@@ -326,6 +326,22 @@ def profile_goal_keyboard() -> InlineKeyboardMarkup:
 
 def profile_goal_text_keyboard() -> InlineKeyboardMarkup:
     return _rows([[("Back", "ps:v1:goal:back")]])
+
+
+def profile_goal_metric_keyboard() -> InlineKeyboardMarkup:
+    return _rows(
+        [[(LABELS["skip"], "ps:v1:goal:metric:skip")], [("Back", "ps:v1:goal:back")]]
+    )
+
+
+def profile_availability_review_keyboard() -> InlineKeyboardMarkup:
+    return _rows(
+        [
+            [("Confirm availability", "ps:v1:availability:confirm")],
+            [("Edit availability", "ps:v1:availability:edit")],
+            [("Back", "ps:v1:back")],
+        ]
+    )
 
 
 def profile_goal_date_keyboard() -> InlineKeyboardMarkup:

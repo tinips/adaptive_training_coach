@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import hashlib
+import json
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -45,7 +47,6 @@ from app.services.fitness.service import _fitness_evidence_for_workout
 from app.services.weekly_planning.evidence import (
     build_evidence_snapshot,
     build_plan_readiness,
-    evidence_input_digest,
 )
 from app.workflows.prompts.weekly_planning import (
     WEEKLY_PLANNER_PROMPT_VERSION,
@@ -90,6 +91,45 @@ def _confirmed_availability(profile: object) -> dict[str, object] | None:
     raw = getattr(profile, "weekly_availability_jsonb", None)
     if not isinstance(raw, dict):
         return None
+
+
+def _planning_input_digest(
+    *,
+    evidence_snapshot: dict[str, object],
+    goal: object | None,
+    confirmed_availability: dict[str, object] | None,
+) -> str:
+    """Digest all structured planner inputs, never raw profile text."""
+
+    payload = {
+        "evidence": evidence_snapshot,
+        "goal": {
+            "template_id": str(getattr(goal, "goal_template_id", None)),
+            "supporting_template_id": str(
+                getattr(goal, "supporting_goal_template_id", None)
+            ),
+            "event_date": (
+                getattr(goal, "event_date", None).isoformat()
+                if getattr(goal, "event_date", None) is not None
+                else None
+            ),
+            "targets": {
+                name: getattr(goal, name, None)
+                for name in (
+                    "target_distance_km",
+                    "target_elevation_m",
+                    "target_pace_seconds_per_km",
+                    "target_swim_pace_seconds_per_100m",
+                    "target_average_speed_kph",
+                    "target_finish_time_seconds",
+                )
+            },
+        },
+        "confirmed_availability": confirmed_availability,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
     try:
         return ConfirmedWeeklyAvailability.model_validate(raw).model_dump(mode="json")
     except ValidationError:
@@ -252,16 +292,6 @@ class WeeklyPlanningService:
                 return WeeklyPlanningResult(kind="unavailable")
 
             week_start = next_week_start(now, user.timezone)
-            plans = WeeklyTrainingPlanRepository(session)
-            existing = await plans.get_for_week(
-                athlete_id=user.id,
-                week_start=week_start,
-            )
-            if existing is not None:
-                return WeeklyPlanningResult(
-                    kind="existing", plan=_plan_schema(existing)
-                )
-
             profiles = ProfileRepository(session)
             await profiles.lock_owner(user_id=user.id)
             goal = await profiles.get_training_goal(user_id=user.id)
@@ -355,6 +385,22 @@ class WeeklyPlanningService:
                     "secondary_priority": (
                         goal.secondary_priority if goal is not None else None
                     ),
+                    "performance_targets": (
+                        {
+                            "distance_km": goal.target_distance_km,
+                            "elevation_m": goal.target_elevation_m,
+                            "running_pace_seconds_per_km": (
+                                goal.target_pace_seconds_per_km
+                            ),
+                            "swim_pace_seconds_per_100m": (
+                                goal.target_swim_pace_seconds_per_100m
+                            ),
+                            "average_speed_kph": goal.target_average_speed_kph,
+                            "finish_time_seconds": goal.target_finish_time_seconds,
+                        }
+                        if goal is not None
+                        else None
+                    ),
                     "target_contexts": [
                         {
                             "code": item.code,
@@ -392,13 +438,23 @@ class WeeklyPlanningService:
                     for row in readiness.disciplines
                 },
             }
+            input_digest = _planning_input_digest(
+                evidence_snapshot=evidence_snapshot,
+                goal=goal,
+                confirmed_availability=_confirmed_availability(profile),
+            )
+            existing = await WeeklyTrainingPlanRepository(session).get_for_week(
+                athlete_id=user.id, week_start=week_start
+            )
+            if existing is not None and existing.input_digest == input_digest:
+                return WeeklyPlanningResult(kind="existing", plan=_plan_schema(existing))
             return _PlanningInput(
                 athlete_id=user.id,
                 week_start=week_start,
                 readiness=readiness,
                 prompt_context=prompt_context,
                 evidence_snapshot=evidence_snapshot,
-                input_digest=evidence_input_digest(evidence_snapshot),
+                input_digest=input_digest,
             )
 
     async def _persist_generated(
@@ -426,18 +482,26 @@ class WeeklyPlanningService:
                     week_start=prepared.week_start,
                 )
                 if existing is not None:
-                    await _record_usage_in_session(
-                        session=session,
+                    if existing.input_digest == prepared.input_digest:
+                        await _record_usage_in_session(
+                            session=session,
+                            athlete_id=prepared.athlete_id,
+                            model=self._model.model_name,
+                            provider_mode=self._model.provider_mode,
+                            status=LLMUsageStatus.SUCCEEDED,
+                            prompt_tokens=prompt_tokens,
+                            completion_tokens=completion_tokens,
+                        )
+                        return WeeklyPlanningResult(
+                            kind="existing", plan=_plan_schema(existing)
+                        )
+                    previous_revision = existing.revision
+                    await plans.supersede_current(
                         athlete_id=prepared.athlete_id,
-                        model=self._model.model_name,
-                        provider_mode=self._model.provider_mode,
-                        status=LLMUsageStatus.SUCCEEDED,
-                        prompt_tokens=prompt_tokens,
-                        completion_tokens=completion_tokens,
+                        week_start=prepared.week_start,
                     )
-                    return WeeklyPlanningResult(
-                        kind="existing", plan=_plan_schema(existing)
-                    )
+                else:
+                    previous_revision = 0
                 stored = await plans.create(
                     athlete_id=prepared.athlete_id,
                     week_start=prepared.week_start,
@@ -447,6 +511,7 @@ class WeeklyPlanningService:
                     prompt_version=WEEKLY_PLANNER_PROMPT_VERSION,
                     calculation_version=CALCULATION_VERSION,
                     planner_model=self._model.model_name,
+                    revision=previous_revision + 1,
                 )
                 await _record_usage_in_session(
                     session=session,

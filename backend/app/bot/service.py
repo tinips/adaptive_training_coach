@@ -652,6 +652,25 @@ class CoachBotApplicationService:
                 text,
                 keyboards.profile_supporting_goal_keyboard(supporting_options),
             )
+        if result.step.value == "GOAL_METRICS":
+            fields = result.pending.get("goal_metric_fields")
+            index = result.pending.get("goal_metric_index")
+            if (
+                isinstance(fields, list)
+                and isinstance(index, int)
+                and 0 <= index < len(fields)
+                and isinstance(fields[index], str)
+            ):
+                return TelegramResponse(
+                    messages.goal_metric_prompt(fields[index]),
+                    keyboards.profile_goal_metric_keyboard(),
+                )
+            return TelegramResponse(messages.GENERIC_ERROR)
+        if result.step.value == "AVAILABILITY_REVIEW":
+            return TelegramResponse(
+                messages.availability_review(result.pending.get("availability_draft")),
+                keyboards.profile_availability_review_keyboard(),
+            )
         if result.step.value == "EQUIPMENT" and result.capability_review is not None:
             review = result.capability_review
             text = messages.equipment_review(review)
@@ -682,7 +701,6 @@ class CoachBotApplicationService:
             )
         prompts = {
             "GOAL_MENU": messages.PROFILE_GOAL_MENU,
-            "GOAL_OUTCOME": messages.PROFILE_GOAL_OUTCOME,
             "GOAL_DATE": messages.PROFILE_GOAL_DATE,
             "AVAILABILITY": messages.PROFILE_AVAILABILITY,
             "HEALTH": messages.PROFILE_HEALTH,

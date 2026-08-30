@@ -10,12 +10,17 @@ from app.schemas.capabilities import CapabilityAccessItem
 
 class PersistedTrainingGoalData(BaseModel):
     main_goal: str
-    target_outcome: str
     event_date: date | None = None
     secondary_priority: str | None = None
     primary_template: str | None = None
     supporting_template: str | None = None
     status: TrainingGoalStatus
+    target_distance_km: float | None = None
+    target_elevation_m: float | None = None
+    target_pace_seconds_per_km: float | None = None
+    target_swim_pace_seconds_per_100m: float | None = None
+    target_average_speed_kph: float | None = None
+    target_finish_time_seconds: int | None = None
 
 
 class PersistedMandatoryProfileData(BaseModel):

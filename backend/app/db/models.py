@@ -791,7 +791,8 @@ class WeeklyTrainingPlan(UUIDPrimaryKeyMixin, Base):
         UniqueConstraint(
             "athlete_id",
             "week_start",
-            name="uq_weekly_training_plans_athlete_week_start",
+            "revision",
+            name="uq_weekly_training_plans_athlete_week_revision",
         ),
         CheckConstraint(
             "calculation_version > 0",
@@ -809,6 +810,10 @@ class WeeklyTrainingPlan(UUIDPrimaryKeyMixin, Base):
         nullable=False,
     )
     week_start: Mapped[date] = mapped_column(Date, nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    superseded_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     plan_jsonb: Mapped[dict[str, object]] = mapped_column(
         json_document(),
         nullable=False,
