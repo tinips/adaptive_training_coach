@@ -88,9 +88,7 @@ class WorkoutScreenshotService:
 
         self._require_enabled()
         async with self._session_factory() as session:
-            user = await UserRepository(session).get_by_telegram_id(
-                telegram_user_id
-            )
+            user = await UserRepository(session).get_by_telegram_id(telegram_user_id)
         if user is None:
             raise WorkoutScreenshotNotFoundError("athlete not recognized")
 
@@ -119,9 +117,7 @@ class WorkoutScreenshotService:
             raise WorkoutScreenshotNotFoundError("draft not found or expired")
 
         async with self._session_factory() as session:
-            user = await UserRepository(session).get_by_telegram_id(
-                telegram_user_id
-            )
+            user = await UserRepository(session).get_by_telegram_id(telegram_user_id)
             if user is None:
                 raise WorkoutScreenshotNotFoundError("athlete not recognized")
 

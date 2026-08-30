@@ -48,7 +48,6 @@ from app.domain.enums import (
     CyclingType,
     Discipline,
     ExecutionOptionRole,
-    FitnessBaselineSource,
     GoalContextRole,
     GoalTemplateKind,
     HeartRateTemporalQuality,
@@ -173,11 +172,12 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         passive_deletes=True,
         lazy="raise",
     )
-    baseline_assessments: Mapped[list[AthleteBaselineAssessment]] = relationship(
+    self_reported_baseline: Mapped[AthleteSelfReportedBaseline | None] = relationship(
         back_populates="athlete",
         cascade="all, delete-orphan",
         passive_deletes=True,
         lazy="raise",
+        uselist=False,
     )
     weekly_training_plans: Mapped[list[WeeklyTrainingPlan]] = relationship(
         back_populates="athlete",
@@ -334,6 +334,9 @@ class AthleteProfile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     height_cm: Mapped[float | None] = mapped_column(Float, nullable=True)
     weight_kg: Mapped[float | None] = mapped_column(Float, nullable=True)
     availability_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    weekly_availability_jsonb: Mapped[dict[str, object] | None] = mapped_column(
+        json_document(), nullable=True
+    )
     health_limitations_text: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     user: Mapped[User] = relationship(
@@ -356,6 +359,21 @@ class TrainingGoal(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     event_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     main_goal: Mapped[str] = mapped_column(String(500), nullable=False)
     target_outcome: Mapped[str] = mapped_column(String(500), nullable=False)
+    target_distance_km: Mapped[float | None] = mapped_column(Float, nullable=True)
+    target_elevation_m: Mapped[float | None] = mapped_column(Float, nullable=True)
+    target_pace_seconds_per_km: Mapped[float | None] = mapped_column(
+        Float, nullable=True
+    )
+    target_swim_pace_seconds_per_100m: Mapped[float | None] = mapped_column(
+        Float, nullable=True
+    )
+    target_average_speed_kph: Mapped[float | None] = mapped_column(Float, nullable=True)
+    target_finish_time_seconds: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    goal_metadata_jsonb: Mapped[dict[str, object] | None] = mapped_column(
+        json_document(), nullable=True
+    )
     secondary_priority: Mapped[str | None] = mapped_column(
         String(500),
         nullable=True,
@@ -734,158 +752,19 @@ class Workout(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         self.title = value
 
 
-class _BaselineEvidenceColumns:
-    """Persisted evidence fields for an immutable baseline assessment."""
 
-    source: Mapped[FitnessBaselineSource] = mapped_column(
-        persisted_enum(
-            FitnessBaselineSource,
-            name="fitness_baseline_source",
-            length=32,
-        ),
-        nullable=False,
-    )
-    analysis_started_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-    )
-    analysis_ended_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-    )
-    calculated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-    )
-    session_count: Mapped[int] = mapped_column(Integer, nullable=False)
-    active_day_count: Mapped[int] = mapped_column(SmallInteger, nullable=False)
-    total_duration_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
-    known_distance_meters: Mapped[float | None] = mapped_column(Float, nullable=True)
-    distance_session_count: Mapped[int] = mapped_column(
-        SmallInteger,
-        nullable=False,
-    )
-    longest_duration_seconds: Mapped[int | None] = mapped_column(
-        Integer,
-        nullable=True,
-    )
-    longest_distance_meters: Mapped[float | None] = mapped_column(
-        Float,
-        nullable=True,
-    )
-    total_calories_kcal: Mapped[float | None] = mapped_column(Float, nullable=True)
-    reliable_hr_sample_count: Mapped[int] = mapped_column(Integer, nullable=False)
-    reliable_average_hr_bpm: Mapped[float | None] = mapped_column(
-        Float,
-        nullable=True,
-    )
-    reliable_max_hr_bpm: Mapped[float | None] = mapped_column(
-        Float,
-        nullable=True,
-    )
-    confidence: Mapped[float] = mapped_column(Float, nullable=False)
-    discipline_metrics_jsonb: Mapped[dict[str, object]] = mapped_column(
-        json_document(),
-        default=dict,
-        nullable=False,
-    )
-    evidence_summary_jsonb: Mapped[dict[str, object]] = mapped_column(
-        json_document(),
-        default=dict,
-        nullable=False,
-    )
-    quality_flags_jsonb: Mapped[list[str]] = mapped_column(
-        json_document(),
-        default=list,
-        nullable=False,
-    )
-    source_workout_through_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
-    )
-    input_updated_through_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
-    )
-    input_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
-    calculation_version: Mapped[int] = mapped_column(Integer, nullable=False)
+class AthleteSelfReportedBaseline(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Current goal-scoped baseline supplied during onboarding.
 
+    This record is explicitly self-reported and can be replaced after a goal change.
+    """
 
-def _baseline_evidence_constraints() -> tuple[CheckConstraint, ...]:
-    """Return fresh constraints for the baseline evidence record."""
-
-    return (
-        CheckConstraint(
-            "analysis_ended_at >= analysis_started_at",
-            name="analysis_window_order",
-        ),
-        CheckConstraint("session_count >= 0", name="session_count_nonnegative"),
-        CheckConstraint(
-            "active_day_count >= 0 AND active_day_count <= session_count",
-            name="active_day_count_range",
-        ),
-        CheckConstraint(
-            "total_duration_seconds >= 0",
-            name="total_duration_nonnegative",
-        ),
-        CheckConstraint(
-            "known_distance_meters IS NULL OR known_distance_meters >= 0",
-            name="known_distance_nonnegative",
-        ),
-        CheckConstraint(
-            "distance_session_count >= 0 AND distance_session_count <= session_count",
-            name="distance_session_count_range",
-        ),
-        CheckConstraint(
-            "longest_duration_seconds IS NULL OR longest_duration_seconds >= 0",
-            name="longest_duration_nonnegative",
-        ),
-        CheckConstraint(
-            "longest_distance_meters IS NULL OR longest_distance_meters >= 0",
-            name="longest_distance_nonnegative",
-        ),
-        CheckConstraint(
-            "total_calories_kcal IS NULL OR total_calories_kcal >= 0",
-            name="total_calories_nonnegative",
-        ),
-        CheckConstraint(
-            "reliable_hr_sample_count >= 0",
-            name="reliable_hr_sample_count_nonnegative",
-        ),
-        CheckConstraint(
-            "reliable_average_hr_bpm IS NULL OR reliable_average_hr_bpm > 0",
-            name="reliable_average_hr_positive",
-        ),
-        CheckConstraint(
-            "reliable_max_hr_bpm IS NULL OR reliable_max_hr_bpm > 0",
-            name="reliable_max_hr_positive",
-        ),
-        CheckConstraint(
-            "confidence >= 0 AND confidence <= 1",
-            name="confidence_range",
-        ),
-        CheckConstraint(
-            "calculation_version > 0",
-            name="calculation_version_positive",
-        ),
-    )
-
-
-class AthleteBaselineAssessment(
-    UUIDPrimaryKeyMixin,
-    _BaselineEvidenceColumns,
-    Base,
-):
-    """Immutable first eligible workout-window assessment per discipline."""
-
-    __tablename__ = "athlete_baseline_assessments"
+    __tablename__ = "athlete_self_reported_baselines"
     __table_args__ = (
-        *_baseline_evidence_constraints(),
         UniqueConstraint(
-            "athlete_id",
-            "discipline",
-            name="uq_athlete_baseline_assessments_athlete_discipline",
+            "athlete_id", name="uq_athlete_self_reported_baselines_athlete"
         ),
+        CheckConstraint("form_version > 0", name="baseline_form_version_positive"),
     )
 
     athlete_id: Mapped[uuid.UUID] = mapped_column(
@@ -893,22 +772,13 @@ class AthleteBaselineAssessment(
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
     )
-    discipline: Mapped[Discipline] = mapped_column(
-        persisted_enum(
-            Discipline,
-            name="athlete_fitness_discipline",
-            length=16,
-        ),
-        nullable=False,
+    goal_signature: Mapped[str] = mapped_column(String(128), nullable=False)
+    form_version: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
+    baseline_jsonb: Mapped[dict[str, object]] = mapped_column(
+        json_document(), nullable=False
     )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        default=utc_now,
-        nullable=False,
-    )
-
     athlete: Mapped[User] = relationship(
-        back_populates="baseline_assessments",
+        back_populates="self_reported_baseline",
         lazy="raise",
     )
 
@@ -1909,10 +1779,10 @@ WorkoutSourceLink = ActivitySourceLink
 __all__ = [
     "Activity",
     "ActivitySourceLink",
-    "AppleHealthImportJob",
-    "AthleteBaselineAssessment",
+    "AppleHealthImportJob",
     "AthleteCapability",
     "AthleteProfile",
+    "AthleteSelfReportedBaseline",
     "Capability",
     "ContextExecutionOption",
     "CyclingWorkoutDetails",

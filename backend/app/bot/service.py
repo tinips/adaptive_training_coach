@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import UUID
 
 from langchain_core.messages import HumanMessage
@@ -96,6 +98,7 @@ class CoachBotApplicationService:
         planning: WeeklyPlanningBotPort | None = None,
         mobile_sync: MobileHealthSyncBotPort | None = None,
         mobile_sync_enabled: bool = False,
+        telegram_web_app_url: str | None = None,
     ) -> None:
         self._onboarding = onboarding
         self._profiles = profiles
@@ -107,6 +110,7 @@ class CoachBotApplicationService:
         self._planning = planning
         self._mobile_sync = mobile_sync
         self._mobile_sync_enabled = mobile_sync_enabled
+        self._telegram_web_app_url = telegram_web_app_url
 
     async def handle_agent_input(
         self, identity: TelegramIdentity, message: HumanMessage
@@ -126,7 +130,7 @@ class CoachBotApplicationService:
         )
         return replace(
             response,
-            user_keyboard=lifecycle_keyboard,
+            user_keyboard=response.user_keyboard or lifecycle_keyboard,
             edit_existing=(False if requires_new_message else response.edit_existing),
             refresh_user_keyboard=(
                 lifecycle_changed or after is None or response.user_keyboard is not None
@@ -188,13 +192,13 @@ class CoachBotApplicationService:
         ):
             if content == keyboards.LABELS["change_profile"]:
                 return await self._render_profile_settings(
-                    await self._onboarding.open_profile_settings(identity)
+                    await self._onboarding.open_profile_settings(identity), identity
                 )
             result = await self._onboarding.submit_profile_settings_text(
                 identity, content
             )
             return (
-                await self._render_profile_settings(result)
+                await self._render_profile_settings(result, identity)
                 if result is not None
                 else TelegramResponse(
                     messages.PROFILE_SETTINGS_UNPROMPTED,
@@ -251,6 +255,11 @@ class CoachBotApplicationService:
                 identity,
                 await self._onboarding.reset_development_goal_and_equipment(identity),
             )
+        if content == "/dev_goal":
+            return await self._render_onboarding(
+                identity,
+                await self._onboarding.reset_development_goal_and_equipment(identity),
+            )
         return None
 
     async def _help(self, _: TelegramIdentity) -> TelegramResponse:
@@ -265,6 +274,18 @@ class CoachBotApplicationService:
         self, identity: TelegramIdentity, text: str
     ) -> TelegramResponse:
         result = await self._onboarding.handle_text(identity, text)
+        return await self._render_onboarding(identity, result)
+
+    async def submit_baseline_web_app(
+        self, identity: TelegramIdentity, data: str
+    ) -> TelegramResponse:
+        try:
+            payload = json.loads(data)
+        except json.JSONDecodeError:
+            raise OnboardingApplicationError("invalid_action") from None
+        if not isinstance(payload, dict):
+            raise OnboardingApplicationError("invalid_action")
+        result = await self._onboarding.submit_baseline_form(identity, payload)
         return await self._render_onboarding(identity, result)
 
     async def handle_document(
@@ -368,7 +389,7 @@ class CoachBotApplicationService:
                 state = await self._onboarding.profile_settings_snapshot(identity)
                 if state is None:
                     state = await self._onboarding.open_profile_settings(identity)
-                response = await self._render_profile_settings(state)
+                    response = await self._render_profile_settings(state, identity)
             else:
                 raise
         return replace(response, edit_existing=True)
@@ -397,13 +418,14 @@ class CoachBotApplicationService:
             return TelegramResponse(messages.ACCOUNT_KEPT)
         if callback_data == "ps:v1:open":
             return await self._render_profile_settings(
-                await self._onboarding.open_profile_settings(identity)
+                await self._onboarding.open_profile_settings(identity), identity
             )
         if callback_data.startswith("ps:v1:"):
             return await self._render_profile_settings(
                 await self._onboarding.choose_profile_settings(
                     identity, callback_data.removeprefix("ps:v1:")
-                )
+                ),
+                identity,
             )
         if callback_data in {"nav:v1:consent", "ob:v1:consent"}:
             state = await self._onboarding.start(identity)
@@ -430,11 +452,31 @@ class CoachBotApplicationService:
         if callback_data == "ob:v1:goal:back":
             result = await self._onboarding.reopen_goal_sports(identity)
             return await self._render_onboarding(identity, result)
+        if callback_data.startswith("ob:v1:goal:swim:"):
+            result = await self._onboarding.choose_swimming_type(
+                identity, callback_data.removeprefix("ob:v1:goal:swim:")
+            )
+            return await self._render_onboarding(identity, result)
         if callback_data.startswith("ob:v1:goal:template:"):
             result = await self._onboarding.choose_goal_template(
                 identity, callback_data.removeprefix("ob:v1:goal:template:")
             )
             return await self._render_onboarding(identity, result)
+        if callback_data == "ob:v1:goal:manual":
+            result = await self._onboarding.choose_manual_goal(identity)
+            return await self._render_onboarding(identity, result)
+        if callback_data == "ob:v1:goal:metric:skip":
+            return await self._render_onboarding(
+                identity, await self._onboarding.skip_goal_metric(identity)
+            )
+        if callback_data == "ob:v1:availability:confirm":
+            return await self._render_onboarding(
+                identity, await self._onboarding.confirm_availability(identity)
+            )
+        if callback_data == "ob:v1:availability:edit":
+            return await self._render_onboarding(
+                identity, await self._onboarding.edit_availability(identity)
+            )
         if callback_data == "ob:v1:goal:nodate":
             result = await self._onboarding.skip_event_date(identity)
             return await self._render_onboarding(identity, result)
@@ -562,6 +604,8 @@ class CoachBotApplicationService:
             return TelegramResponse(messages.weekly_plan(result.plan))
         if result.kind == "insufficient" and result.readiness is not None:
             return TelegramResponse(messages.weekly_plan_readiness(result.readiness))
+        if result.kind == "availability_conflict":
+            return TelegramResponse(messages.WEEKLY_PLAN_AVAILABILITY_CONFLICT)
         return TelegramResponse(
             messages.WEEKLY_PLAN_NOT_FOUND
             if viewing
@@ -579,7 +623,7 @@ class CoachBotApplicationService:
         )
 
     async def _render_profile_settings(
-        self, result: ProfileSettingsResult
+        self, result: ProfileSettingsResult, identity: TelegramIdentity
     ) -> TelegramResponse:
         if result.step.value == "GOAL_MAIN":
             sport = result.pending.get(_GOAL_SPORT_ANSWER_KEY)
@@ -595,7 +639,9 @@ class CoachBotApplicationService:
                 keyboards.profile_goal_sport_keyboard(sports),
             )
         if result.step.value == "GOAL_SECONDARY":
-            supporting_options = await self._onboarding.supporting_goal_options()
+            supporting_options = await self._onboarding.supporting_goal_options(
+                identity
+            )
             text = messages.PROFILE_GOAL_SECONDARY
             if result.saved_field not in {None, "__closed__"}:
                 text = (
@@ -743,11 +789,65 @@ class CoachBotApplicationService:
             return TelegramResponse(
                 messages.GOAL_EVENT_DATE_PROMPT, keyboards.goal_event_date_keyboard()
             )
+        if result.kind == "goal_swimming_type":
+            return TelegramResponse(
+                messages.GOAL_SWIMMING_TYPE_PROMPT, keyboards.swimming_type_keyboard()
+            )
+        if result.kind == "goal_metric_intake":
+            fields = result.answers.get("goal_metric_fields")
+            index = result.answers.get("goal_metric_index")
+            if (
+                not isinstance(fields, list)
+                or not isinstance(index, int)
+                or isinstance(index, bool)
+                or not 0 <= index < len(fields)
+                or not isinstance(fields[index], str)
+            ):
+                return TelegramResponse(messages.GENERIC_ERROR)
+            return TelegramResponse(
+                messages.goal_metric_prompt(cast(str, fields[index])),
+                keyboards.goal_metric_keyboard(),
+            )
+        if result.kind == "goal_manual_targets":
+            return TelegramResponse(
+                messages.GOAL_MANUAL_TARGETS_PROMPT,
+                keyboards.profile_text_input_keyboard(),
+            )
         if result.kind == "goal_confirmed":
-            supporting_options = await self._onboarding.supporting_goal_options()
+            supporting_options = await self._onboarding.supporting_goal_options(
+                identity
+            )
             return TelegramResponse(
                 messages.GOAL_SUPPORT_PROMPT,
                 keyboards.supporting_goal_keyboard(supporting_options),
+            )
+        if result.kind == "availability_review":
+            return TelegramResponse(
+                messages.availability_review(result.answers.get("availability_draft")),
+                keyboards.availability_review_keyboard(),
+            )
+        if result.kind == "availability_details":
+            draft = result.answers.get("availability_draft")
+            raw_missing = (
+                draft.get("missing_details") if isinstance(draft, dict) else []
+            )
+            missing = raw_missing if isinstance(raw_missing, list) else []
+            descriptions = [
+                str(item.get("description"))
+                for item in missing
+                if isinstance(item, dict) and item.get("description")
+            ]
+            detail = " ".join(dict.fromkeys(descriptions)) or (
+                "Please include a duration for each day."
+            )
+            return TelegramResponse(
+                f"{detail}\n\n{messages.AVAILABILITY_INTAKE}",
+                keyboards.profile_text_input_keyboard(),
+            )
+        if result.kind == "availability_clarification":
+            return TelegramResponse(
+                messages.AVAILABILITY_CLARIFICATION,
+                keyboards.profile_text_input_keyboard(),
             )
         if result.kind == "context_validation_error":
             retry_prompts = {
@@ -799,6 +899,28 @@ class CoachBotApplicationService:
                 messages.HEALTH_LIMITATIONS_INTAKE,
                 keyboards.health_limitations_keyboard(),
             )
+        if result.kind in {"baseline_intake", "baseline_validation_error"}:
+            if not self._telegram_web_app_url:
+                return TelegramResponse(
+                    "The baseline form is not configured. Please contact support."
+                )
+            raw_fields = result.answers.get("baseline_fields")
+            fields = raw_fields if isinstance(raw_fields, list) else []
+            query = dict(parse_qsl(urlsplit(self._telegram_web_app_url).query))
+            query["fields"] = ",".join(
+                value for value in fields if isinstance(value, str)
+            )
+            if result.kind == "baseline_validation_error" and result.error_code:
+                query["error"] = result.error_code
+            parts = urlsplit(self._telegram_web_app_url)
+            web_app_url = urlunsplit(
+                (parts.scheme, parts.netloc, parts.path, urlencode(query), "")
+            )
+            return TelegramResponse(
+                "Complete your training baseline\n\n"
+                "Answer a few quick questions so I can create a safe first-week plan.",
+                keyboards.baseline_web_app_keyboard(web_app_url),
+            )
         if result.kind == "onboarding_completed":
             return TelegramResponse(
                 (
@@ -821,6 +943,12 @@ class CoachBotApplicationService:
                 keyboards.goal_event_date_keyboard(),
             )
         if result.kind == "profile_validation_error":
+            if result.error_code == "invalid_manual_goal_targets":
+                return TelegramResponse(
+                    "That format is not valid.\n\n"
+                    f"{messages.GOAL_MANUAL_TARGETS_PROMPT}",
+                    keyboards.profile_text_input_keyboard(),
+                )
             return TelegramResponse(
                 messages.validation_error(result.error_code or "invalid_action"),
                 keyboards.profile_text_input_keyboard(),

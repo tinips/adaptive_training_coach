@@ -14,16 +14,27 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings
 from app.db.base import utc_now
-from app.db.models import OnboardingSession, ProfileSettingsSession, TrainingGoal, User
+from app.db.models import (
+    GoalTemplate,
+    OnboardingSession,
+    ProfileSettingsSession,
+    TrainingGoal,
+    User,
+)
 from app.domain.enums import (
     AthleteGender,
+    Discipline,
+    GoalContextRole,
     GoalTemplateKind,
     OnboardingStatus,
     OnboardingStep,
     ProfileSettingsStep,
     UserStatus,
 )
+from app.integrations.llm.factory import create_goal_extraction_model
+from app.integrations.llm.models import StructuredOnboardingModel
 from app.repositories.apple_health import AppleHealthRepository
+from app.repositories.athlete_baselines import AthleteBaselineRepository
 from app.repositories.athlete_capabilities import AthleteCapabilityRepository
 from app.repositories.onboarding import OnboardingRepository
 from app.repositories.profile_settings import ProfileSettingsRepository
@@ -39,6 +50,16 @@ from app.schemas.onboarding_service import (
 )
 from app.schemas.profile_settings import ProfileSettingsResult
 from app.services.capabilities import CapabilityAssessmentService
+from app.services.onboarding.availability import (
+    AvailabilityExtractionError,
+    AvailabilityExtractionService,
+)
+from app.services.onboarding.baseline_form import (
+    build_baseline,
+    fields_for_disciplines,
+    is_optional_field,
+    parse_answer,
+)
 from app.services.training_catalog.grouping import (
     GoalOption,
     GoalSport,
@@ -52,6 +73,29 @@ _GENDER_KEY = "gender"
 _WEIGHT_KG_KEY = "weight_kg"
 _HEIGHT_CM_KEY = "height_cm"
 _CAPABILITY_SELECTION_KEY = "capability_selection"
+_BASELINE_FIELDS_KEY = "baseline_fields"
+_BASELINE_INDEX_KEY = "baseline_index"
+_BASELINE_VALUES_KEY = "baseline_values"
+_BASELINE_GOAL_SIGNATURE_KEY = "baseline_goal_signature"
+_AVAILABILITY_DRAFT_KEY = "availability_draft"
+_AVAILABILITY_SOURCE_KEY = "availability_source_text"
+_GOAL_METRIC_FIELDS_KEY = "goal_metric_fields"
+_GOAL_METRIC_INDEX_KEY = "goal_metric_index"
+_GOAL_METRIC_VALUES_KEY = "goal_metric_values"
+_FIXED_RUNNING_DISTANCES = {
+    "RUNNING_5K": 5.0,
+    "RUNNING_10K": 10.0,
+    "HALF_MARATHON": 21.1,
+    "MARATHON": 42.2,
+}
+_TRIATHLON_CODES = frozenset(
+    {
+        "TRIATHLON_SPRINT",
+        "TRIATHLON_OLYMPIC",
+        "TRIATHLON_HALF_DISTANCE",
+        "TRIATHLON_FULL_DISTANCE",
+    }
+)
 _CONTEXT_RETRY_ERROR_KEY = "_context_retry_error"
 _INTEGER_PATTERN = re.compile(r"[0-9]+")
 _WEIGHT_PATTERN = re.compile(r"[0-9]+(?:\.[0-9]+)?")
@@ -82,6 +126,27 @@ _CONTEXT_TEXT_MAX_LENGTH = 2000
 _EVENT_DATE_FORMATS = ("%Y-%m-%d", "%d/%m/%Y")
 
 
+def _parse_manual_targets(text: str) -> tuple[Decimal, Decimal, int] | None:
+    """Parse `distance km, elevation m, pace min/km` supplied by an athlete."""
+
+    parts = [part.strip() for part in text.split(",")]
+    if len(parts) != 3:
+        return None
+    try:
+        distance = Decimal(parts[0])
+        elevation = Decimal(parts[1])
+        if ":" in parts[2]:
+            minutes, seconds = parts[2].split(":", 1)
+            pace_seconds = int(minutes) * 60 + int(seconds)
+        else:
+            pace_seconds = int(Decimal(parts[2]) * 60)
+    except (InvalidOperation, ValueError):
+        return None
+    if distance <= 0 or elevation < 0 or pace_seconds <= 0 or pace_seconds >= 3600:
+        return None
+    return distance, elevation, pace_seconds
+
+
 def _parse_event_date(text: str) -> date | None:
     """Parse a race date deterministically. No model, no fuzzy matching."""
 
@@ -92,6 +157,45 @@ def _parse_event_date(text: str) -> date | None:
         except ValueError:
             continue
     return None
+
+
+def _parse_goal_metric(field: str, text: str) -> JsonValue:
+    """Validate the one structured metric currently requested."""
+
+    cleaned = text.strip()
+    if field in {"running_distance", "cycling_distance", "cycling_average_speed"}:
+        try:
+            decimal_value = Decimal(cleaned)
+        except InvalidOperation as exc:
+            raise ValueError from exc
+        if decimal_value <= 0:
+            raise ValueError
+        return float(decimal_value)
+    if field == "swimming_distance":
+        try:
+            distance_m = int(cleaned)
+        except ValueError as exc:
+            raise ValueError from exc
+        if distance_m <= 0:
+            raise ValueError
+        return distance_m
+    if field in {"running_pace", "swimming_pace", "triathlon_finish_time"}:
+        parts = cleaned.split(":")
+        if len(parts) not in {2, 3} or not all(part.isdigit() for part in parts):
+            raise ValueError
+        components = [int(part) for part in parts]
+        if len(components) == 2:
+            minutes, seconds = components
+            total = minutes * 60 + seconds
+        else:
+            hours, minutes, seconds = components
+            total = hours * 3600 + minutes * 60 + seconds
+        if seconds >= 60 or (len(components) == 3 and minutes >= 60) or total <= 0:
+            raise ValueError
+        if field != "triathlon_finish_time" and total >= 3600:
+            raise ValueError
+        return total
+    raise ValueError
 
 
 class OnboardingApplicationError(RuntimeError):
@@ -110,9 +214,13 @@ class OnboardingService:
         *,
         session_factory: async_sessionmaker[AsyncSession],
         settings: Settings,
+        model: StructuredOnboardingModel | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._settings = settings
+        self._availability = AvailabilityExtractionService(
+            model or create_goal_extraction_model(settings)
+        )
 
     async def start(self, identity: TelegramIdentity) -> OnboardingServiceResult:
         """Create or resume one user and one durable onboarding session."""
@@ -150,12 +258,69 @@ class OnboardingService:
                 )
                 if review is not None:
                     capability_review = self._with_selection(review, selected)
+            if onboarding.current_step is OnboardingStep.BASELINE_INTAKE:
+                onboarding = await self._upgrade_legacy_baseline_fields(
+                    session=session,
+                    onboarding=onboarding,
+                )
             return self._result(
                 user,
                 onboarding,
                 created=created or onboarding_created,
                 capability_review=capability_review,
             )
+
+    async def _upgrade_legacy_baseline_fields(
+        self,
+        *,
+        session: AsyncSession,
+        onboarding: OnboardingSession,
+    ) -> OnboardingSession:
+        """Replace obsolete stored baseline fields without resetting onboarding."""
+
+        answers = self._answers(onboarding)
+        existing = answers.get(_BASELINE_FIELDS_KEY)
+        if not isinstance(existing, list) or not all(
+            isinstance(field, str) for field in existing
+        ):
+            return onboarding
+        existing_fields = tuple(field for field in existing if isinstance(field, str))
+        disciplines_in_order = (
+            Discipline.RUNNING,
+            Discipline.CYCLING,
+            Discipline.SWIMMING,
+        )
+
+        available = {
+            field
+            for discipline in disciplines_in_order
+            for field in fields_for_disciplines((discipline,))
+        }
+        if set(existing_fields).issubset(available):
+            return onboarding
+
+        disciplines = tuple(
+            discipline
+            for discipline in disciplines_in_order
+            if any(
+                field.startswith(f"{discipline.value}.")
+                for field in existing_fields
+            )
+        )
+        fields = fields_for_disciplines(disciplines)
+        if not fields:
+            return onboarding
+
+        answers[_BASELINE_FIELDS_KEY] = list(fields)
+        answers[_BASELINE_INDEX_KEY] = 0
+        answers[_BASELINE_VALUES_KEY] = {}
+        answers.pop("baseline_form_errors", None)
+        answers.pop("baseline_form_values", None)
+        return await OnboardingRepository(session).save_progress(
+            user_id=onboarding.user_id,
+            current_step=OnboardingStep.BASELINE_INTAKE,
+            answers=cast(dict[str, object], answers),
+        )
 
     async def restart(self, identity: TelegramIdentity) -> OnboardingServiceResult:
         """Restart a cancelled session from consent without deleting the account."""
@@ -333,7 +498,7 @@ class OnboardingService:
         identity: TelegramIdentity,
         choice: str,
     ) -> OnboardingServiceResult:
-        """Remember which sport the athlete is choosing a goal within."""
+        """Choose a goal sport, skipping a redundant one-item goal menu."""
 
         try:
             sport = GoalSport(choice)
@@ -346,12 +511,66 @@ class OnboardingService:
                 raise OnboardingApplicationError("stale_action")
             answers = self._answers(onboarding)
             answers[_GOAL_SPORT_KEY] = sport.value
+            if sport is GoalSport.CYCLING:
+                template = await TrainingCatalogRepository(session).active_goal_by_code(
+                    code="ROAD_CYCLING_EVENT", kind=GoalTemplateKind.PRIMARY
+                )
+                if template is None:
+                    raise OnboardingApplicationError("goal_template_not_found")
+                return await self._start_goal_metrics(
+                    session=session,
+                    user=user,
+                    onboarding=onboarding,
+                    answers=answers,
+                    template=template,
+                    fields=("cycling_distance", "cycling_average_speed"),
+                )
+            if sport is GoalSport.SWIMMING:
+                onboarding = await OnboardingRepository(session).save_progress(
+                    user_id=user.id,
+                    current_step=OnboardingStep.GOAL_SWIMMING_TYPE,
+                    answers=cast(dict[str, object], answers),
+                )
+                return self._result(user, onboarding)
             onboarding = await OnboardingRepository(session).save_progress(
                 user_id=user.id,
                 current_step=OnboardingStep.GOAL_INTAKE,
                 answers=cast(dict[str, object], answers),
             )
             return self._result(user, onboarding)
+
+    async def choose_swimming_type(
+        self, identity: TelegramIdentity, choice: str
+    ) -> OnboardingServiceResult:
+        """Choose the catalog-backed pool or open-water goal before metrics."""
+
+        code_by_choice = {
+            "pool": "POOL_SWIMMING_EVENT",
+            "open_water": "OPEN_WATER_SWIM",
+        }
+        code = code_by_choice.get(choice)
+        if code is None:
+            raise OnboardingApplicationError("invalid_action")
+        async with self._session_factory.begin() as session:
+            user, onboarding = await self._locked_state(session, identity)
+            self._require_active(onboarding)
+            if onboarding.current_step is not OnboardingStep.GOAL_SWIMMING_TYPE:
+                raise OnboardingApplicationError("stale_action")
+            template = await TrainingCatalogRepository(session).active_goal_by_code(
+                code=code, kind=GoalTemplateKind.PRIMARY
+            )
+            if template is None:
+                raise OnboardingApplicationError("goal_template_not_found")
+            answers = self._answers(onboarding)
+            answers["swimming_type"] = choice.upper()
+            return await self._start_goal_metrics(
+                session=session,
+                user=user,
+                onboarding=onboarding,
+                answers=answers,
+                template=template,
+                fields=("swimming_distance", "swimming_pace"),
+            )
 
     async def reopen_goal_sports(
         self, identity: TelegramIdentity
@@ -387,28 +606,329 @@ class OnboardingService:
             template = await TrainingCatalogRepository(session).active_goal_by_code(
                 code=code
             )
+            sport = self._answers(onboarding).get(_GOAL_SPORT_KEY)
+            if not isinstance(sport, str):
+                raise OnboardingApplicationError("stale_action")
+            if sport == GoalSport.RUNNING.value and code not in {
+                "RUNNING_5K",
+                "RUNNING_10K",
+                "HALF_MARATHON",
+                "MARATHON",
+                "GENERAL_RUNNING",
+            }:
+                raise OnboardingApplicationError("invalid_action")
+            if sport == GoalSport.TRIATHLON.value and code not in _TRIATHLON_CODES:
+                raise OnboardingApplicationError("invalid_action")
             # Callback data is not trustworthy. An unvalidated code would write
             # a dangling foreign key into training_goals.
             if template is None or template.kind is not GoalTemplateKind.PRIMARY:
                 raise OnboardingApplicationError("invalid_action")
-            await ProfileRepository(session).upsert_training_goal(
-                user_id=user.id,
-                main_goal=template.display_name,
-                event_date=None,
-                target_outcome=template.display_name,
-                secondary_priority=None,
-                original_description=template.display_name,
-                goal_template_id=template.id,
-                supporting_goal_template_id=None,
+            fields = (
+                ("running_distance", "running_pace")
+                if code == "GENERAL_RUNNING"
+                else (
+                    ("running_pace",)
+                    if sport == GoalSport.RUNNING.value
+                    else ("triathlon_finish_time",)
+                )
+            )
+            return await self._start_goal_metrics(
+                session=session,
+                user=user,
+                onboarding=onboarding,
+                answers=self._answers(onboarding),
+                template=template,
+                fields=fields,
+            )
+
+    async def _start_goal_metrics(
+        self,
+        *,
+        session: AsyncSession,
+        user: User,
+        onboarding: OnboardingSession,
+        answers: dict[str, JsonValue],
+        template: GoalTemplate,
+        fields: tuple[str, ...],
+    ) -> OnboardingServiceResult:
+        """Stage the known structured fields for one catalog-backed goal."""
+
+        code = template.code
+        template_id = template.id
+        display_name = template.display_name
+        answers["goal_template_code"] = code
+        answers[_GOAL_METRIC_FIELDS_KEY] = list(fields)
+        answers[_GOAL_METRIC_INDEX_KEY] = 0
+        values: dict[str, JsonValue] = {}
+        fixed_distance = _FIXED_RUNNING_DISTANCES.get(code)
+        if fixed_distance is not None:
+            values["running_distance"] = fixed_distance
+        answers[_GOAL_METRIC_VALUES_KEY] = values
+        await ProfileRepository(session).upsert_training_goal(
+            user_id=user.id,
+            main_goal=display_name,
+            event_date=None,
+            target_outcome=display_name,
+            secondary_priority=None,
+            original_description=display_name,
+            goal_template_id=template_id,
+            supporting_goal_template_id=None,
+            target_distance_km=fixed_distance,
+        )
+        onboarding = await OnboardingRepository(session).save_progress(
+            user_id=user.id,
+            current_step=OnboardingStep.GOAL_METRIC_INTAKE,
+            answers=cast(dict[str, object], answers),
+        )
+        return self._result(user, onboarding)
+
+    async def skip_goal_metric(
+        self, identity: TelegramIdentity
+    ) -> OnboardingServiceResult:
+        return await self._save_goal_metric(identity, value=None)
+
+    async def submit_goal_metric(
+        self, identity: TelegramIdentity, text: str
+    ) -> OnboardingServiceResult:
+        async with self._session_factory() as session:
+            user, onboarding = await self._locked_state(session, identity)
+            if onboarding.current_step is not OnboardingStep.GOAL_METRIC_INTAKE:
+                raise OnboardingApplicationError("stale_action")
+            field = self._current_goal_metric_field(onboarding)
+        try:
+            value = _parse_goal_metric(field, text)
+        except ValueError:
+            async with self._session_factory.begin() as session:
+                user, onboarding = await self._locked_state(session, identity)
+                return self._result(
+                    user,
+                    onboarding,
+                    kind="profile_validation_error",
+                    error_code=f"invalid_{field}",
+                )
+        return await self._save_goal_metric(identity, value=value)
+
+    async def _save_goal_metric(
+        self, identity: TelegramIdentity, *, value: JsonValue | None
+    ) -> OnboardingServiceResult:
+        async with self._session_factory.begin() as session:
+            user, onboarding = await self._locked_state(session, identity)
+            self._require_active(onboarding)
+            if onboarding.current_step is not OnboardingStep.GOAL_METRIC_INTAKE:
+                raise OnboardingApplicationError("stale_action")
+            field = self._current_goal_metric_field(onboarding)
+            answers = self._answers(onboarding)
+            values = dict(cast(dict[str, JsonValue], answers[_GOAL_METRIC_VALUES_KEY]))
+            values[field] = value
+            fields = cast(list[str], answers[_GOAL_METRIC_FIELDS_KEY])
+            index = cast(int, answers[_GOAL_METRIC_INDEX_KEY]) + 1
+            if index < len(fields):
+                answers[_GOAL_METRIC_VALUES_KEY] = values
+                answers[_GOAL_METRIC_INDEX_KEY] = index
+                onboarding = await OnboardingRepository(session).save_progress(
+                    user_id=user.id,
+                    current_step=OnboardingStep.GOAL_METRIC_INTAKE,
+                    answers=cast(dict[str, object], answers),
+                )
+                return self._result(user, onboarding)
+            await self._persist_structured_goal(
+                session=session, user=user, answers=answers, values=values
             )
             onboarding = await OnboardingRepository(session).save_progress(
                 user_id=user.id,
-                # Task 5b: a race-date step sits between the template choice
-                # and the supporting-goal offer, so both a typed date
-                # (submit_event_date) and a skip (skip_event_date) advance
-                # from here to GOAL_CONFIRMED.
                 current_step=OnboardingStep.GOAL_EVENT_DATE,
-                answers=cast(dict[str, object], self._answers(onboarding)),
+                answers=cast(dict[str, object], answers),
+            )
+            return self._result(user, onboarding)
+
+    @staticmethod
+    def _current_goal_metric_field(onboarding: OnboardingSession) -> str:
+        answers = onboarding.answers
+        fields = answers.get(_GOAL_METRIC_FIELDS_KEY)
+        index = answers.get(_GOAL_METRIC_INDEX_KEY)
+        if (
+            not isinstance(fields, list)
+            or not all(isinstance(item, str) for item in fields)
+            or not isinstance(index, int)
+            or isinstance(index, bool)
+            or not 0 <= index < len(fields)
+        ):
+            raise OnboardingApplicationError("stale_action")
+        return cast(str, fields[index])
+
+    async def _persist_structured_goal(
+        self,
+        *,
+        session: AsyncSession,
+        user: User,
+        answers: dict[str, JsonValue],
+        values: dict[str, JsonValue],
+    ) -> None:
+        code = answers.get("goal_template_code")
+        sport = answers.get(_GOAL_SPORT_KEY)
+        if not isinstance(code, str) or not isinstance(sport, str):
+            raise OnboardingApplicationError("stale_action")
+        template = await TrainingCatalogRepository(session).active_goal_by_code(
+            code=code, kind=GoalTemplateKind.PRIMARY
+        )
+        if template is None:
+            raise OnboardingApplicationError("stale_action")
+        distance_km = values.get("running_distance", values.get("cycling_distance"))
+        distance_meters = values.get("swimming_distance")
+        running_pace = values.get("running_pace")
+        swimming_pace = values.get("swimming_pace")
+        cycling_speed = values.get("cycling_average_speed")
+        finish_time = values.get("triathlon_finish_time")
+        metadata: dict[str, object] = {
+            "primary_goal": {
+                "discipline": sport,
+                "goal_type": code,
+                "swimming_type": answers.get("swimming_type"),
+                "target_distance": (
+                    {"value": distance_meters, "unit": "m", "source": "user"}
+                    if distance_meters is not None
+                    else (
+                        {
+                            "value": distance_km,
+                            "unit": "km",
+                            "source": "predefined"
+                            if code in _FIXED_RUNNING_DISTANCES
+                            else "user",
+                        }
+                        if distance_km is not None
+                        else None
+                    )
+                ),
+                "target_pace": running_pace,
+                "target_average_speed_kph": cycling_speed,
+                "target_swim_pace_seconds_per_100m": swimming_pace,
+                "target_finish_time_seconds": finish_time,
+            }
+        }
+        await ProfileRepository(session).upsert_training_goal(
+            user_id=user.id,
+            main_goal=template.display_name,
+            event_date=None,
+            target_outcome=template.display_name,
+            secondary_priority=None,
+            original_description=template.display_name,
+            goal_template_id=template.id,
+            supporting_goal_template_id=None,
+            target_distance_km=(
+                float(distance_km) if isinstance(distance_km, (int, float)) else None
+            ),
+            target_pace_seconds_per_km=(
+                float(running_pace) if isinstance(running_pace, (int, float)) else None
+            ),
+            target_swim_pace_seconds_per_100m=(
+                float(swimming_pace)
+                if isinstance(swimming_pace, (int, float))
+                else None
+            ),
+            target_average_speed_kph=(
+                float(cycling_speed)
+                if isinstance(cycling_speed, (int, float))
+                else None
+            ),
+            target_finish_time_seconds=(
+                int(finish_time) if isinstance(finish_time, int) else None
+            ),
+            goal_metadata_jsonb=metadata,
+        )
+
+    async def choose_manual_goal(
+        self, identity: TelegramIdentity
+    ) -> OnboardingServiceResult:
+        """Start a custom target while retaining the selected sport context."""
+
+        async with self._session_factory.begin() as session:
+            user, onboarding = await self._locked_state(session, identity)
+            self._require_active(onboarding)
+            if onboarding.current_step is not OnboardingStep.GOAL_INTAKE:
+                raise OnboardingApplicationError("stale_action")
+            answers = self._answers(onboarding)
+            raw_sport = answers.get(_GOAL_SPORT_KEY)
+            if not isinstance(raw_sport, str):
+                raise OnboardingApplicationError("stale_action")
+            try:
+                sport = GoalSport(raw_sport)
+            except ValueError as exc:
+                raise OnboardingApplicationError("stale_action") from exc
+            rows = await TrainingCatalogRepository(
+                session
+            ).active_primary_goal_target_disciplines()
+            options = group_goals_by_sport(
+                tuple(
+                    GoalOption(
+                        code=code,
+                        display_name=display_name,
+                        disciplines=disciplines,
+                    )
+                    for code, display_name, disciplines in rows
+                )
+            ).get(sport, ())
+            if not options:
+                raise OnboardingApplicationError("invalid_action")
+            answers["manual_goal_sport"] = sport.value
+            answers["manual_goal_template"] = options[0].code
+            onboarding = await OnboardingRepository(session).save_progress(
+                user_id=user.id,
+                current_step=OnboardingStep.GOAL_MANUAL_TARGETS,
+                answers=cast(dict[str, object], answers),
+            )
+            return self._result(user, onboarding)
+
+    async def submit_manual_goal_targets(
+        self, identity: TelegramIdentity, text: str
+    ) -> OnboardingServiceResult:
+        """Persist a custom target before asking for its optional event date."""
+
+        parsed = _parse_manual_targets(text)
+        async with self._session_factory.begin() as session:
+            user, onboarding = await self._locked_state(session, identity)
+            self._require_active(onboarding)
+            if onboarding.current_step is not OnboardingStep.GOAL_MANUAL_TARGETS:
+                raise OnboardingApplicationError("stale_action")
+            if parsed is None:
+                return self._result(
+                    user,
+                    onboarding,
+                    kind="profile_validation_error",
+                    error_code="invalid_manual_goal_targets",
+                )
+            answers = self._answers(onboarding)
+            code = answers.get("manual_goal_template")
+            sport = answers.get("manual_goal_sport")
+            if not isinstance(code, str) or not isinstance(sport, str):
+                raise OnboardingApplicationError("stale_action")
+            template = await TrainingCatalogRepository(session).active_goal_by_code(
+                code=code, kind=GoalTemplateKind.PRIMARY
+            )
+            if template is None:
+                raise OnboardingApplicationError("stale_action")
+            distance, elevation, pace_seconds = parsed
+            pace = f"{pace_seconds // 60}:{pace_seconds % 60:02d} min/km"
+            target = (
+                f"Custom target: {distance:g} km, {elevation:g} m elevation, "
+                f"{pace} pace"
+            )
+            await ProfileRepository(session).upsert_training_goal(
+                user_id=user.id,
+                main_goal=f"Custom {sport.title()} goal",
+                event_date=None,
+                target_outcome=target,
+                secondary_priority=None,
+                original_description=target,
+                goal_template_id=template.id,
+                supporting_goal_template_id=None,
+                target_distance_km=float(distance),
+                target_elevation_m=float(elevation),
+                target_pace_seconds_per_km=float(pace_seconds),
+            )
+            onboarding = await OnboardingRepository(session).save_progress(
+                user_id=user.id,
+                current_step=OnboardingStep.GOAL_EVENT_DATE,
+                answers=cast(dict[str, object], answers),
             )
             return self._result(user, onboarding)
 
@@ -475,6 +995,13 @@ class OnboardingService:
                 original_description=goal.original_description,
                 goal_template_id=goal.goal_template_id,
                 supporting_goal_template_id=goal.supporting_goal_template_id,
+                target_distance_km=goal.target_distance_km,
+                target_elevation_m=goal.target_elevation_m,
+                target_pace_seconds_per_km=goal.target_pace_seconds_per_km,
+                target_swim_pace_seconds_per_100m=goal.target_swim_pace_seconds_per_100m,
+                target_average_speed_kph=goal.target_average_speed_kph,
+                target_finish_time_seconds=goal.target_finish_time_seconds,
+                goal_metadata_jsonb=goal.goal_metadata_jsonb,
             )
             onboarding = await OnboardingRepository(session).save_progress(
                 user_id=user.id,
@@ -521,6 +1048,13 @@ class OnboardingService:
                 original_description=goal.original_description,
                 goal_template_id=goal.goal_template_id,
                 supporting_goal_template_id=supporting_id,
+                target_distance_km=goal.target_distance_km,
+                target_elevation_m=goal.target_elevation_m,
+                target_pace_seconds_per_km=goal.target_pace_seconds_per_km,
+                target_swim_pace_seconds_per_100m=goal.target_swim_pace_seconds_per_100m,
+                target_average_speed_kph=goal.target_average_speed_kph,
+                target_finish_time_seconds=goal.target_finish_time_seconds,
+                goal_metadata_jsonb=goal.goal_metadata_jsonb,
             )
             onboarding = await OnboardingRepository(session).save_progress(
                 user_id=user.id,
@@ -546,19 +1080,55 @@ class OnboardingService:
         except ValueError as exc:
             raise OnboardingApplicationError("invalid_action") from exc
         grouped = await self._grouped_primary_goals()
-        return tuple(
-            (option.code, option.display_name) for option in grouped.get(goal_sport, ())
-        )
+        options = grouped.get(goal_sport, ())
+        if goal_sport is GoalSport.RUNNING:
+            allowed = set(_FIXED_RUNNING_DISTANCES) | {"GENERAL_RUNNING"}
+            options = tuple(option for option in options if option.code in allowed)
+        elif goal_sport is GoalSport.TRIATHLON:
+            options = tuple(
+                option for option in options if option.code in _TRIATHLON_CODES
+            )
+        return tuple((option.code, option.display_name) for option in options)
 
-    async def supporting_goal_options(self) -> tuple[tuple[str, str], ...]:
-        """(code, display_name) pairs for every active supporting goal."""
+    async def supporting_goal_options(
+        self, identity: TelegramIdentity | None = None
+    ) -> tuple[tuple[str, str], ...]:
+        """Return supporting goals except the athlete's current main goal."""
 
         async with self._session_factory() as session:
+            goal = None
+            if identity is not None:
+                profiles = ProfileRepository(session)
+                goal = await profiles.get_training_goal(
+                    user_id=(await self._require_user(session, identity)).id
+                )
             templates = await TrainingCatalogRepository(session).active_goal_templates()
+        main_goal = goal.main_goal.casefold().strip() if goal is not None else None
+        excluded_codes: set[str] = set()
+        if goal is not None and goal.goal_template_id is not None:
+            primary = next(
+                (item for item in templates if item.id == goal.goal_template_id), None
+            )
+            primary_code = primary.code if primary is not None else ""
+            if primary_code in _TRIATHLON_CODES:
+                excluded_codes = {
+                    "IMPROVE_RUNNING",
+                    "IMPROVE_CYCLING",
+                    "IMPROVE_SWIMMING",
+                }
+            elif primary_code in set(_FIXED_RUNNING_DISTANCES) | {"GENERAL_RUNNING"}:
+                excluded_codes = {"IMPROVE_RUNNING"}
+            elif primary_code == "ROAD_CYCLING_EVENT":
+                excluded_codes = {"IMPROVE_CYCLING"}
+            elif primary_code in {"POOL_SWIMMING_EVENT", "OPEN_WATER_SWIM"}:
+                excluded_codes = {"IMPROVE_SWIMMING"}
         return tuple(
             (item.code, item.display_name)
             for item in templates
             if item.kind is GoalTemplateKind.SUPPORTING
+            and item.code not in excluded_codes
+            and item.id != (goal.goal_template_id if goal is not None else None)
+            and item.display_name.casefold().strip() != main_goal
         )
 
     async def _grouped_primary_goals(self) -> dict[GoalSport, tuple[GoalOption, ...]]:
@@ -684,12 +1254,131 @@ class OnboardingService:
                 user_id=user.id,
                 payload={"health_limitations_text": "NONE_REPORTED"},
             )
-            return await self._advance_to_training_history(
-                session=session,
-                user=user,
-                onboarding=onboarding,
-                answers=answers,
+            del answers
+            user_id = user.id
+        return await self._start_baseline(identity=identity, user_id=user_id)
+
+    async def _start_baseline(
+        self,
+        *,
+        identity: TelegramIdentity,
+        user_id: uuid.UUID,
+    ) -> OnboardingServiceResult:
+        """Create the goal-adaptive baseline checkpoint after health intake."""
+
+        async with self._session_factory.begin() as session:
+            user, onboarding = await self._locked_state(session, identity)
+            self._require_active(onboarding)
+            if (
+                user.id != user_id
+                or onboarding.current_step
+                is not OnboardingStep.HEALTH_LIMITATIONS_INTAKE
+            ):
+                raise OnboardingApplicationError("stale_action")
+            goal = await ProfileRepository(session).get_training_goal(user_id=user.id)
+            if goal is None or goal.goal_template_id is None:
+                raise OnboardingApplicationError("stale_action")
+            expected_roles = {goal.goal_template_id: GoalContextRole.TARGET}
+            if goal.supporting_goal_template_id is not None:
+                expected_roles[goal.supporting_goal_template_id] = (
+                    GoalContextRole.SUPPORTING
+                )
+            catalog = TrainingCatalogRepository(session)
+            primary_goal = await catalog.active_goal_by_id(
+                goal_template_id=goal.goal_template_id
             )
+            if primary_goal is None:
+                raise OnboardingApplicationError("stale_action")
+            rows = await catalog.contexts_for_goals(
+                goal_template_ids=expected_roles.keys()
+            )
+            disciplines = tuple(
+                sorted(
+                    {
+                        context.discipline
+                        for relation, context in rows
+                        if expected_roles.get(relation.goal_template_id)
+                        is relation.role
+                        and context.discipline
+                        in {Discipline.RUNNING, Discipline.CYCLING, Discipline.SWIMMING}
+                    },
+                    key=lambda item: item.value,
+                )
+            )
+            fields = fields_for_disciplines(
+                disciplines,
+                include_triathlon=primary_goal.code in _TRIATHLON_CODES,
+            )
+            if not fields:
+                raise OnboardingApplicationError("baseline_not_supported")
+            answers = self._answers(onboarding)
+            answers[_BASELINE_FIELDS_KEY] = list(fields)
+            answers[_BASELINE_INDEX_KEY] = 0
+            answers[_BASELINE_VALUES_KEY] = {}
+            answers[_BASELINE_GOAL_SIGNATURE_KEY] = "|".join(
+                str(item)
+                for item in (goal.goal_template_id, goal.supporting_goal_template_id)
+                if item is not None
+            )
+            onboarding = await OnboardingRepository(session).save_progress(
+                user_id=user.id,
+                current_step=OnboardingStep.BASELINE_INTAKE,
+                answers=cast(dict[str, object], answers),
+            )
+            return self._result(user, onboarding)
+
+    async def submit_baseline_form(
+        self, identity: TelegramIdentity, values: Mapping[str, object]
+    ) -> OnboardingServiceResult:
+        """Validate the complete Web App payload and save it atomically."""
+
+        async with self._session_factory.begin() as session:
+            user, onboarding = await self._locked_state(session, identity)
+            self._require_active(onboarding)
+            if onboarding.current_step is not OnboardingStep.BASELINE_INTAKE:
+                raise OnboardingApplicationError("stale_action")
+            answers = self._answers(onboarding)
+            fields = answers.get(_BASELINE_FIELDS_KEY)
+            signature = answers.get(_BASELINE_GOAL_SIGNATURE_KEY)
+            if not isinstance(fields, list) or not isinstance(signature, str):
+                raise OnboardingApplicationError("stale_action")
+            parsed: dict[str, object] = {}
+            invalid: list[str] = []
+            for field in fields:
+                if not isinstance(field, str):
+                    raise OnboardingApplicationError("stale_action")
+                raw = values.get(field)
+                text = raw if isinstance(raw, str) else ""
+                if not text and is_optional_field(field):
+                    text = "skip"
+                try:
+                    parsed[field] = parse_answer(key=field, text=text)
+                except ValueError:
+                    invalid.append(field)
+            if invalid:
+                answers["baseline_form_errors"] = cast(JsonValue, invalid)
+                answers["baseline_form_values"] = {
+                    key: value
+                    for key, value in values.items()
+                    if isinstance(value, str)
+                }
+                return self._result(
+                    user,
+                    onboarding,
+                    kind="baseline_validation_error",
+                    error_code=invalid[0],
+                )
+            await AthleteBaselineRepository(session).upsert(
+                athlete_id=user.id,
+                goal_signature=signature,
+                baseline=build_baseline(parsed),
+            )
+            onboarding.status = OnboardingStatus.COMPLETED
+            user = await UserRepository(session).update_status(
+                user_id=user.id, status=UserStatus.ONBOARDING_COMPLETED
+            )
+            await session.flush()
+            return self._result(user, onboarding)
 
     async def skip_training_history(
         self,
@@ -1422,6 +2111,16 @@ class OnboardingService:
             return await self.submit_event_date(identity, text)
         if (
             onboarding.status is OnboardingStatus.ACTIVE
+            and onboarding.current_step is OnboardingStep.GOAL_METRIC_INTAKE
+        ):
+            return await self.submit_goal_metric(identity, text)
+        if (
+            onboarding.status is OnboardingStatus.ACTIVE
+            and onboarding.current_step is OnboardingStep.GOAL_MANUAL_TARGETS
+        ):
+            return await self.submit_manual_goal_targets(identity, text)
+        if (
+            onboarding.status is OnboardingStatus.ACTIVE
             and onboarding.current_step in _FREE_TEXT_CONTEXT_STEPS
         ):
             return await self._handle_context_text(
@@ -1430,6 +2129,11 @@ class OnboardingService:
                 text=text,
                 step=onboarding.current_step,
             )
+        if (
+            onboarding.status is OnboardingStatus.ACTIVE
+            and onboarding.current_step is OnboardingStep.BASELINE_INTAKE
+        ):
+            return self._result(user, onboarding)
         if (
             onboarding.status is OnboardingStatus.ACTIVE
             and onboarding.current_step is OnboardingStep.EQUIPMENT_RECOMMENDATION
@@ -1821,6 +2525,83 @@ class OnboardingService:
         if not (_CONTEXT_TEXT_MIN_LENGTH <= len(cleaned) <= _CONTEXT_TEXT_MAX_LENGTH):
             raise OnboardingApplicationError("invalid_action")
 
+        if step is OnboardingStep.AVAILABILITY_INTAKE:
+            async with self._session_factory() as session:
+                user, onboarding = await self._locked_state(session, identity)
+                goal = await ProfileRepository(session).get_training_goal(
+                    user_id=user.id
+                )
+                if goal is None or goal.goal_template_id is None:
+                    raise OnboardingApplicationError("stale_action")
+                expected_roles = {goal.goal_template_id: GoalContextRole.TARGET}
+                if goal.supporting_goal_template_id is not None:
+                    expected_roles[goal.supporting_goal_template_id] = (
+                        GoalContextRole.SUPPORTING
+                    )
+                contexts = await TrainingCatalogRepository(session).contexts_for_goals(
+                    goal_template_ids=expected_roles.keys()
+                )
+                discipline_names = tuple(
+                    sorted(
+                        {
+                            "strength_training"
+                            if context.discipline is Discipline.STRENGTH
+                            else context.discipline.value.casefold()
+                            for relation, context in contexts
+                            if expected_roles.get(relation.goal_template_id)
+                            is relation.role
+                            and context.discipline
+                            in {
+                                Discipline.RUNNING,
+                                Discipline.CYCLING,
+                                Discipline.SWIMMING,
+                                Discipline.STRENGTH,
+                            }
+                        }
+                    )
+                )
+            try:
+                extraction = await self._availability.extract(
+                    cleaned, goal_disciplines=discipline_names
+                )
+            except AvailabilityExtractionError:
+                async with self._session_factory.begin() as session:
+                    user, onboarding = await self._locked_state(session, identity)
+                    return self._result(
+                        user,
+                        onboarding,
+                        kind="availability_clarification",
+                        error_code="availability_extraction_failed",
+                    )
+            async with self._session_factory.begin() as session:
+                user, onboarding = await self._locked_state(session, identity)
+                self._require_active(onboarding)
+                if onboarding.current_step is not step:
+                    raise OnboardingApplicationError("stale_action")
+                answers = self._answers(onboarding)
+                answers[_AVAILABILITY_SOURCE_KEY] = cleaned
+                answers[_AVAILABILITY_DRAFT_KEY] = extraction.model_dump(mode="json")
+                if extraction.parse_status == "needs_clarification":
+                    return self._result(
+                        user,
+                        onboarding,
+                        kind="availability_clarification",
+                        error_code=extraction.clarification_reason,
+                    )
+                if extraction.parse_status == "needs_details":
+                    onboarding = await OnboardingRepository(session).save_progress(
+                        user_id=user.id,
+                        current_step=OnboardingStep.AVAILABILITY_INTAKE,
+                        answers=cast(dict[str, object], answers),
+                    )
+                    return self._result(user, onboarding, kind="availability_details")
+                onboarding = await OnboardingRepository(session).save_progress(
+                    user_id=user.id,
+                    current_step=OnboardingStep.AVAILABILITY_REVIEW,
+                    answers=cast(dict[str, object], answers),
+                )
+                return self._result(user, onboarding)
+
         async with self._session_factory.begin() as session:
             user, onboarding = await self._locked_state(session, identity)
             self._require_active(onboarding)
@@ -1829,12 +2610,13 @@ class OnboardingService:
             profiles = ProfileRepository(session)
             answers = self._answers(onboarding)
             field_by_step = {
-                OnboardingStep.AVAILABILITY_INTAKE: "availability_text",
                 OnboardingStep.HEALTH_LIMITATIONS_INTAKE: "health_limitations_text",
             }
             next_step_by_step = {
-                OnboardingStep.AVAILABILITY_INTAKE: (
-                    OnboardingStep.EQUIPMENT_RECOMMENDATION
+                # Keep the health checkpoint while the next transaction builds
+                # the goal-adaptive baseline fields.
+                OnboardingStep.HEALTH_LIMITATIONS_INTAKE: (
+                    OnboardingStep.HEALTH_LIMITATIONS_INTAKE
                 ),
             }
             field = field_by_step.get(step)
@@ -1853,13 +2635,61 @@ class OnboardingService:
             )
             saved_result = self._result(user, onboarding)
 
-        if step is OnboardingStep.AVAILABILITY_INTAKE:
-            # Availability is committed before the deterministic catalog lookup.
-            return await self._resume_capability_review(
-                identity=identity,
-                user_id=user_id,
-            )
+        if step is OnboardingStep.HEALTH_LIMITATIONS_INTAKE:
+            return await self._start_baseline(identity=identity, user_id=user_id)
         return saved_result
+
+    async def confirm_availability(
+        self, identity: TelegramIdentity
+    ) -> OnboardingServiceResult:
+        """Persist only the reviewed, complete availability draft."""
+
+        from app.schemas.availability import ConfirmedWeeklyAvailability
+
+        async with self._session_factory.begin() as session:
+            user, onboarding = await self._locked_state(session, identity)
+            self._require_active(onboarding)
+            if onboarding.current_step is not OnboardingStep.AVAILABILITY_REVIEW:
+                raise OnboardingApplicationError("stale_action")
+            answers = self._answers(onboarding)
+            draft = answers.get(_AVAILABILITY_DRAFT_KEY)
+            source = answers.get(_AVAILABILITY_SOURCE_KEY)
+            if not isinstance(draft, dict) or not isinstance(source, str):
+                raise OnboardingApplicationError("stale_action")
+            try:
+                confirmed = ConfirmedWeeklyAvailability(
+                    source_text=source, days=draft["days"]
+                )
+            except (KeyError, ValueError):
+                raise OnboardingApplicationError("invalid_availability_draft") from None
+            await ProfileRepository(session).update_athlete_profile_context_fields(
+                user_id=user.id,
+                payload={
+                    "availability_text": source,
+                    "weekly_availability_jsonb": confirmed.model_dump(mode="json"),
+                },
+            )
+            onboarding = await OnboardingRepository(session).save_progress(
+                user_id=user.id,
+                current_step=OnboardingStep.EQUIPMENT_RECOMMENDATION,
+                answers=cast(dict[str, object], answers),
+            )
+        return await self._resume_capability_review(identity=identity, user_id=user.id)
+
+    async def edit_availability(
+        self, identity: TelegramIdentity
+    ) -> OnboardingServiceResult:
+        async with self._session_factory.begin() as session:
+            user, onboarding = await self._locked_state(session, identity)
+            self._require_active(onboarding)
+            if onboarding.current_step is not OnboardingStep.AVAILABILITY_REVIEW:
+                raise OnboardingApplicationError("stale_action")
+            onboarding = await OnboardingRepository(session).save_progress(
+                user_id=user.id,
+                current_step=OnboardingStep.AVAILABILITY_INTAKE,
+                answers=cast(dict[str, object], self._answers(onboarding)),
+            )
+            return self._result(user, onboarding)
 
     async def _prepare_capability_review(
         self,
@@ -2059,6 +2889,12 @@ class OnboardingService:
                 kind = "setup_introduction"
             elif onboarding.current_step is OnboardingStep.GOAL_EVENT_DATE:
                 kind = "goal_event_date"
+            elif onboarding.current_step is OnboardingStep.GOAL_SWIMMING_TYPE:
+                kind = "goal_swimming_type"
+            elif onboarding.current_step is OnboardingStep.GOAL_METRIC_INTAKE:
+                kind = "goal_metric_intake"
+            elif onboarding.current_step is OnboardingStep.GOAL_MANUAL_TARGETS:
+                kind = "goal_manual_targets"
             elif onboarding.current_step is OnboardingStep.GOAL_CONFIRMED:
                 kind = "goal_confirmed"
             elif onboarding.current_step is OnboardingStep.PROFILE_BIRTH_YEAR_INTAKE:
@@ -2071,12 +2907,16 @@ class OnboardingService:
                 kind = "profile_height_intake"
             elif onboarding.current_step is OnboardingStep.AVAILABILITY_INTAKE:
                 kind = "availability_intake"
+            elif onboarding.current_step is OnboardingStep.AVAILABILITY_REVIEW:
+                kind = "availability_review"
             elif onboarding.current_step is OnboardingStep.EQUIPMENT_RECOMMENDATION:
                 kind = "equipment_recommendation"
             elif onboarding.current_step is OnboardingStep.EQUIPMENT_INTAKE:
                 kind = "equipment_intake"
             elif onboarding.current_step is OnboardingStep.HEALTH_LIMITATIONS_INTAKE:
                 kind = "health_limitations_intake"
+            elif onboarding.current_step is OnboardingStep.BASELINE_INTAKE:
+                kind = "baseline_intake"
             elif onboarding.current_step is OnboardingStep.TRAINING_HISTORY_IMPORT:
                 kind = "training_history_import"
             else:

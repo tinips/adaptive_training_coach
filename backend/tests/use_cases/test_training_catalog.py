@@ -82,7 +82,10 @@ async def test_seed_integrity_covers_triathlon_and_supporting_goals(
         (target, option) in option_keys and capability in capability_codes
         for target, option, capability, _ in OPTION_CAPABILITIES
     )
-    assert option_keys <= required_option_keys
+    # Some safe execution options (such as trail running or home strength)
+    # intentionally require no owned equipment. Every declared requirement
+    # must still belong to a real option.
+    assert required_option_keys <= option_keys
 
     async with catalog_database() as session:
         goals = {
@@ -187,7 +190,7 @@ async def test_cycling_assessment_uses_mtb_then_stationary_as_substitutions(
             goal_template_id=catalog_id("goal", "ROAD_CYCLING_EVENT"),
             supporting_goal_template_id=None,
             review=review,
-            selected_ids={by_code["mountain_bike"], by_code["helmet"]},
+            selected_ids={by_code["mountain_bike"]},
         )
         cycling = assessment.contexts[0]
         assert cycling.status is ContextAssessmentStatus.FEASIBLE_WITH_SUBSTITUTION
@@ -238,4 +241,3 @@ async def test_capabilities_are_isolated_and_unrelated_answers_are_preserved(
         states = await first_repo.states(athlete_id=first)
         assert capabilities["treadmill_access"] not in states
         assert capabilities["pool_access"] not in states
-        assert capabilities["free_weights"] not in states

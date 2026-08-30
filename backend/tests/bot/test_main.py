@@ -16,6 +16,7 @@ from app.bot.handlers import (
     connect_iphone_handler,
     disconnect_iphone_handler,
     document_handler,
+    web_app_data_handler,
 )
 from app.bot.main import build_runtime, create_application
 from app.bot.service_protocol import CoachBotService
@@ -35,7 +36,7 @@ def test_create_application_registers_handlers_and_injects_facade() -> None:
     application = create_application(settings, service=service)
 
     assert application.bot_data[BOT_SERVICE_KEY] is service
-    assert len(application.handlers[0]) == 12
+    assert len(application.handlers[0]) == 13
     registered = [
         handler
         for handler in application.handlers[0]
@@ -55,6 +56,13 @@ def test_create_application_registers_handlers_and_injects_facade() -> None:
         "connect_iphone": connect_iphone_handler,
         "disconnect_iphone": disconnect_iphone_handler,
     }
+    web_app_handlers = [
+        handler
+        for handler in application.handlers[0]
+        if isinstance(handler, MessageHandler)
+        and handler.callback is web_app_data_handler
+    ]
+    assert len(web_app_handlers) == 1
     assert application.error_handlers
     assert application.bot.defaults.parse_mode == ParseMode.HTML
 
@@ -95,6 +103,7 @@ def test_create_application_registers_development_commands_only_in_development()
         "dev_reset",
         "dev_import_history",
         "dev_reset_goal_equipment",
+        "dev_goal",
     } <= command_names
     assert application.bot_data[DEV_USER_IDS_KEY] == frozenset({206072865})
 

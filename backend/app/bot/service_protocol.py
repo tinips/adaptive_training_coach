@@ -36,6 +36,10 @@ class CoachBotService(Protocol):
         text: str,
     ) -> TelegramResponse: ...
 
+    async def submit_baseline_web_app(
+        self, identity: TelegramIdentity, data: str
+    ) -> TelegramResponse: ...
+
     async def handle_document(
         self,
         identity: TelegramIdentity,

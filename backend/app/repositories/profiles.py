@@ -19,6 +19,7 @@ from app.repositories.errors import OwnedRecordNotFoundError
 @dataclass(frozen=True, slots=True)
 class AthleteProfileContext:
     availability_text: str | None
+    weekly_availability_jsonb: dict[str, object] | None
     health_limitations_text: str | None
 
 
@@ -50,6 +51,7 @@ class ProfileRepository:
             return None
         return AthleteProfileContext(
             availability_text=profile.availability_text,
+            weekly_availability_jsonb=profile.weekly_availability_jsonb,
             health_limitations_text=profile.health_limitations_text,
         )
 
@@ -80,6 +82,13 @@ class ProfileRepository:
         original_description: str,
         goal_template_id: uuid.UUID | None = None,
         supporting_goal_template_id: uuid.UUID | None = None,
+        target_distance_km: float | None = None,
+        target_elevation_m: float | None = None,
+        target_pace_seconds_per_km: float | None = None,
+        target_swim_pace_seconds_per_100m: float | None = None,
+        target_average_speed_kph: float | None = None,
+        target_finish_time_seconds: int | None = None,
+        goal_metadata_jsonb: dict[str, object] | None = None,
     ) -> TrainingGoal:
         # Goal template changes determine baseline eligibility. Serialize them
         # with import-time baseline creation, which locks this same owner row
@@ -95,6 +104,13 @@ class ProfileRepository:
         goal.secondary_priority = secondary_priority
         goal.goal_template_id = goal_template_id
         goal.supporting_goal_template_id = supporting_goal_template_id
+        goal.target_distance_km = target_distance_km
+        goal.target_elevation_m = target_elevation_m
+        goal.target_pace_seconds_per_km = target_pace_seconds_per_km
+        goal.target_swim_pace_seconds_per_100m = target_swim_pace_seconds_per_100m
+        goal.target_average_speed_kph = target_average_speed_kph
+        goal.target_finish_time_seconds = target_finish_time_seconds
+        goal.goal_metadata_jsonb = goal_metadata_jsonb
         goal.original_description = original_description
         goal.status = TrainingGoalStatus.CONFIRMED
         await self._session.flush()
@@ -115,6 +131,7 @@ class ProfileRepository:
             payload,
             {
                 "availability_text",
+                "weekly_availability_jsonb",
                 "health_limitations_text",
             },
         )
@@ -146,6 +163,13 @@ class ProfileRepository:
                 "secondary_priority",
                 "goal_template_id",
                 "supporting_goal_template_id",
+                "target_distance_km",
+                "target_elevation_m",
+                "target_pace_seconds_per_km",
+                "target_swim_pace_seconds_per_100m",
+                "target_average_speed_kph",
+                "target_finish_time_seconds",
+                "goal_metadata_jsonb",
             }
         ):
             raise ValueError("unsupported training goal update field")

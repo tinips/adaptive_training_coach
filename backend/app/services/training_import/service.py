@@ -46,7 +46,6 @@ from app.repositories.users import UserRepository
 from app.schemas.common import TelegramIdentity
 from app.schemas.training_import import TelegramDocumentUpload
 from app.schemas.workouts import workout_metrics
-from app.services.fitness import BaselineAssessmentService
 from app.services.onboarding import OnboardingApplicationError
 
 logger = logging.getLogger(__name__)
@@ -102,7 +101,6 @@ class TrainingFileImportService:
         self._session_factory = session_factory
         self._settings = settings
         self._clock = clock or (lambda: datetime.now(UTC))
-        self._baseline_assessments = BaselineAssessmentService(settings=settings)
         self._apple_parser = AppleHealthParser(
             AppleHealthArchiveLimits(
                 max_compressed_bytes=(
@@ -419,15 +417,6 @@ class TrainingFileImportService:
                 session=session,
                 job=completed,
             )
-            if fitness_input_changed:
-                baselines = self._baseline_assessments
-                await (
-                    baselines.create_missing_baselines_for_goal_disciplines_in_session(
-                        session,
-                        athlete_id=user_id,
-                        calculated_at=self._clock(),
-                    )
-                )
             return await self._outcome_in_session(session, completed)
 
     async def _process_tcx(
@@ -480,19 +469,6 @@ class TrainingFileImportService:
                 session=session,
                 job=completed,
             )
-            if _fitness_input_changed_in_import(
-                activity=activity,
-                outcome=outcome,
-                job=job,
-            ):
-                baselines = self._baseline_assessments
-                await (
-                    baselines.create_missing_baselines_for_goal_disciplines_in_session(
-                        session,
-                        athlete_id=user_id,
-                        calculated_at=self._clock(),
-                    )
-                )
             return await self._outcome_in_session(session, completed)
 
     async def _mark_processing(

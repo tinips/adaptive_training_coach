@@ -31,10 +31,49 @@ SETUP_INTRODUCTION = (
 )
 GOAL_INTAKE = "Which sport is your goal in?"
 GOAL_TEMPLATE_PROMPT = "Which goal best matches what you're training for?"
+GOAL_SWIMMING_TYPE_PROMPT = "Where will your main swim goal take place?"
+GOAL_MANUAL_TARGETS_PROMPT = (
+    "Describe your custom target in one line: distance in km, elevation gain in m, "
+    "and target pace in min/km. Example: 100, 1200, 5:30. Use 0 for a value that "
+    "does not apply."
+)
 GOAL_EVENT_DATE_PROMPT = (
     "When is your race? Send the date as YYYY-MM-DD (e.g. 2027-07-11) or "
     "DD/MM/YYYY (e.g. 11/07/2027), or tap below if you don't have a date yet."
 )
+
+
+def goal_metric_prompt(field: str) -> str:
+    prompts = {
+        "running_distance": (
+            "What distance are you targeting? Send kilometres, for example 12.5."
+        ),
+        "running_pace": (
+            "What is your target pace? Send min:sec per km, for example 5:30, "
+            "or tap Skip."
+        ),
+        "cycling_distance": (
+            "What distance are you targeting? Send kilometres, for example 100."
+        ),
+        "cycling_average_speed": (
+            "What average speed are you targeting? Send km/h, for example 28.5, "
+            "or tap Skip."
+        ),
+        "swimming_distance": (
+            "What distance are you targeting? Send metres, for example 1500."
+        ),
+        "swimming_pace": (
+            "What is your target pace? Send min:sec per 100 m, for example 2:05, "
+            "or tap Skip."
+        ),
+        "triathlon_finish_time": (
+            "What total finish time are you targeting? Send H:MM:SS, for example "
+            "2:45:00, or tap Skip."
+        ),
+    }
+    return prompts[field]
+
+
 GOAL_SUPPORT_PROMPT = (
     "Would you like to add a supporting goal, such as maintaining strength? "
     "You can skip this."
@@ -42,8 +81,7 @@ GOAL_SUPPORT_PROMPT = (
 COACH_HELP = (
     "How can Adaptive Endurance Coach help me?\n\n"
     "The coach builds your athlete profile from your goal, availability, equipment, "
-    "and training limitations. You can also import Apple Health history or TCX "
-    "workout files.\n\n"
+    "and training limitations. Add completed workouts by sending a screenshot.\n\n"
     "This product is not medical advice and does not generate training plans in this "
     "version."
 )
@@ -53,7 +91,7 @@ PRIVACY_SAFETY = (
     "medical advice and must not be used for emergencies.\n\n"
     "You choose what information to provide. This may include injury history or "
     "other health-related training limitations.\n\n"
-    "Training-data imports are optional.\n\n"
+    "Workout screenshots are optional.\n\n"
     "You can cancel the setup at any time, update your information later or request "
     "deletion of your stored data."
 )
@@ -74,7 +112,7 @@ DELETE_FAILED = "I could not delete the local account data. Please try again lat
 ACCOUNT_KEPT = "Your account was not deleted."
 HELP = (
     "Adaptive Endurance Coach uses visible buttons to guide setup, show your saved "
-    "profile and import workouts.\n\n"
+    "profile and add workout screenshots.\n\n"
     "This product is not medical advice and must not be used for emergencies. "
     "No training plan is generated in this version."
 )
@@ -84,9 +122,9 @@ PROFILE_INCOMPLETE = (
     "your saved step."
 )
 ADD_WORKOUT_REQUEST = (
-    "Send a TCX workout file or an Apple Health export ZIP.\n\n"
-    "TCX is recommended for a single new workout.\n"
-    "Apple Health ZIP can update or enrich your history."
+    "Send one screenshot of a completed workout summary.\n\n"
+    "I will read the visible metrics, show you what I found, and only save it "
+    "after you confirm."
 )
 MOBILE_SYNC_UNAVAILABLE = "iPhone workout sync is not enabled right now."
 IPHONE_DISCONNECTED = (
@@ -166,6 +204,36 @@ AVAILABILITY_INTAKE = (
     "\n'I can ride for up to two hours on the weekend. "
     "I can swim at a pool on Wednesday and Friday, and I can cycle only on weekends.'"
 )
+WEEKLY_PLAN_AVAILABILITY_CONFLICT = (
+    "I couldn't create a plan that fits your confirmed availability. Please update "
+    "your availability and try again."
+)
+AVAILABILITY_CLARIFICATION = (
+    "I couldn't map that to a weekly schedule. Please list the days, activities, "
+    "and duration for each day."
+)
+
+
+def availability_review(schedule: object) -> str:
+    if not isinstance(schedule, dict) or not isinstance(schedule.get("days"), dict):
+        return GENERIC_ERROR
+    rows = ["Review your weekly availability:"]
+    for day, details in schedule["days"].items():
+        if not isinstance(details, dict) or not details.get("available"):
+            rows.append(f"• {str(day).title()}: unavailable")
+            continue
+        disciplines = ", ".join(str(value) for value in details.get("disciplines", []))
+        windows = details.get("time_windows", [])
+        duration = sum(
+            int(window.get("duration_minutes", 0))
+            for window in windows
+            if isinstance(window, dict)
+        )
+        rows.append(f"• {str(day).title()}: {disciplines} ({duration} min)")
+    rows.append("\nConfirm it, or edit by sending a corrected description.")
+    return "\n".join(rows)
+
+
 HEALTH_LIMITATIONS_INTAKE = (
     "Write any current or past injuries, discomfort, or physical limitations that "
     "should influence training, or choose None. This is not medical advice."
@@ -402,9 +470,7 @@ APPLE_HEALTH_PROGRESS = TRAINING_FILE_PROGRESS
 
 SCREENSHOT_READING = "Reading the screenshot..."
 SCREENSHOT_DISABLED = "Workout screenshot import is not enabled yet."
-SCREENSHOT_ATHLETE_NOT_FOUND = (
-    "This Telegram account is not linked to a Coach profile."
-)
+SCREENSHOT_ATHLETE_NOT_FOUND = "This Telegram account is not linked to a Coach profile."
 SCREENSHOT_EXTRACTION_FAILED = (
     "Could not read a workout from that image. Try a clearer screenshot "
     "of a single workout summary."
@@ -414,12 +480,9 @@ SCREENSHOT_CONFIRM_PROMPT = "Save this workout?"
 SCREENSHOT_CONFIRM_BUTTON = "Save"
 SCREENSHOT_CANCEL_BUTTON = "Discard"
 SCREENSHOT_DISCARDED = "Discarded. Nothing was saved."
-SCREENSHOT_DRAFT_EXPIRED = (
-    "This confirmation has expired. Send the screenshot again."
-)
+SCREENSHOT_DRAFT_EXPIRED = "This confirmation has expired. Send the screenshot again."
 SCREENSHOT_IMPORT_INVALID = (
-    "That workout could not be saved — some of the extracted values "
-    "were not valid."
+    "That workout could not be saved — some of the extracted values were not valid."
 )
 SCREENSHOT_SAVED = "Saved as a new workout."
 SCREENSHOT_UPDATED = "Updated the matching existing workout."

@@ -177,6 +177,25 @@ async def text_handler(
     await _deliver(update, response)
 
 
+async def web_app_data_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    message = update.effective_message
+    identity = _identity(update)
+    if (
+        message is None
+        or message.web_app_data is None
+        or identity is None
+        or not _authorized(update, context)
+    ):
+        return
+    response = await _service(context).submit_baseline_web_app(
+        identity, message.web_app_data.data
+    )
+    await _deliver(update, response)
+
+
 async def document_handler(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,

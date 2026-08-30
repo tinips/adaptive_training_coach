@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.api.routes.baseline_web_app import router as baseline_web_app_router
 from app.api.routes.health import router as health_router
 from app.api.routes.mobile_sync import router as mobile_sync_router
 from app.config import Settings, get_settings
@@ -43,6 +44,7 @@ def create_app(
     application.state.engine = runtime_engine
     application.state.session_factory = session_factory
     application.include_router(health_router)
+    application.include_router(baseline_web_app_router)
     application.include_router(mobile_sync_router)
     return application
 

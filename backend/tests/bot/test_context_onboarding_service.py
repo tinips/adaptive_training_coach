@@ -516,6 +516,25 @@ async def test_development_goal_equipment_reset_bypasses_global_agent() -> None:
 
 
 @pytest.mark.asyncio
+async def test_development_goal_shortcut_starts_at_goal_selection() -> None:
+    identity = _identity()
+    onboarding = SimpleNamespace(
+        reset_development_goal_and_equipment=AsyncMock(
+            return_value=_result("goal_intake", OnboardingStep.GOAL_INTAKE)
+        ),
+        goal_sport_options=AsyncMock(return_value=("RUNNING", "TRIATHLON")),
+    )
+
+    response = await _facade(onboarding).handle_agent_input(
+        identity, HumanMessage(content="/dev_goal")
+    )
+
+    onboarding.reset_development_goal_and_equipment.assert_awaited_once_with(identity)
+    assert response.text == messages.GOAL_INTAKE
+    assert response.keyboard == keyboards.goal_sport_keyboard(("RUNNING", "TRIATHLON"))
+
+
+@pytest.mark.asyncio
 async def test_context_steps_render_the_correct_prompt_and_controls() -> None:
     facade = _facade(SimpleNamespace())
     identity = _identity()

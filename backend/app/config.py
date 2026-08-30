@@ -28,6 +28,7 @@ class Settings(BaseSettings):
 
     telegram_bot_token: SecretStr | None = None
     telegram_bot_username: str | None = None
+    telegram_web_app_url: str | None = None
     telegram_allowed_user_ids: set[int] = Field(default_factory=set)
     dev_telegram_user_ids: set[int] = Field(default_factory=set)
     database_url: str = (

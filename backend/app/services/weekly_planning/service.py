@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings
 from app.db.base import utc_now
-from app.db.models import AthleteBaselineAssessment, WeeklyTrainingPlan
+from app.db.models import WeeklyTrainingPlan
 from app.domain.enums import (
     Discipline,
     GoalContextRole,
@@ -25,6 +25,7 @@ from app.domain.enums import (
 )
 from app.integrations.llm.models import StructuredOnboardingModel
 from app.observability.protocol import ProviderMode
+from app.repositories.athlete_baselines import AthleteBaselineRepository
 from app.repositories.athlete_capabilities import AthleteCapabilityRepository
 from app.repositories.fitness import FitnessRepository
 from app.repositories.llm_usage import LLMUsageRepository
@@ -32,16 +33,15 @@ from app.repositories.profiles import ProfileRepository
 from app.repositories.training_catalog import TrainingCatalogRepository
 from app.repositories.users import UserRepository
 from app.repositories.weekly_plans import WeeklyTrainingPlanRepository
+from app.schemas.availability import ConfirmedWeeklyAvailability
+from app.schemas.baseline import AthleteBaselineData
 from app.schemas.common import TelegramIdentity
 from app.schemas.weekly_plans import PlanReadiness, WeeklyPlan
 from app.services.fitness.calculator import (
     CALCULATION_VERSION,
     calculate_baseline_window,
 )
-from app.services.fitness.service import (
-    BaselineAssessmentService,
-    _fitness_evidence_for_workout,
-)
+from app.services.fitness.service import _fitness_evidence_for_workout
 from app.services.weekly_planning.evidence import (
     build_evidence_snapshot,
     build_plan_readiness,
@@ -61,7 +61,9 @@ logger = logging.getLogger(__name__)
 class WeeklyPlanningResult:
     """Safe service outcome consumed by the deterministic Telegram layer."""
 
-    kind: Literal["created", "existing", "insufficient", "unavailable"]
+    kind: Literal[
+        "created", "existing", "insufficient", "unavailable", "availability_conflict"
+    ]
     plan: WeeklyPlan | None = None
     readiness: PlanReadiness | None = None
 
@@ -82,6 +84,44 @@ class _TargetContext:
     display_name: str
     discipline: Discipline
     role: GoalContextRole
+
+
+def _confirmed_availability(profile: object) -> dict[str, object] | None:
+    raw = getattr(profile, "weekly_availability_jsonb", None)
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return ConfirmedWeeklyAvailability.model_validate(raw).model_dump(mode="json")
+    except ValidationError:
+        return None
+
+
+def _plan_fits_availability(plan: WeeklyPlan, availability: dict[str, object]) -> bool:
+    raw_days = availability.get("days")
+    if not isinstance(raw_days, dict):
+        return False
+    for plan_day in plan.days:
+        details = raw_days.get(plan_day.date.strftime("%A").casefold())
+        if not isinstance(details, dict):
+            return False
+        allowed = details.get("disciplines")
+        windows = details.get("time_windows")
+        if not isinstance(allowed, list) or not isinstance(windows, list):
+            return False
+        limit = sum(
+            int(window.get("duration_minutes", 0))
+            for window in windows
+            if isinstance(window, dict)
+        )
+        if plan_day.sessions and (not details.get("available") or limit <= 0):
+            return False
+        if any(
+            session.discipline.value.casefold() not in allowed
+            or session.duration_minutes > limit
+            for session in plan_day.sessions
+        ):
+            return False
+    return True
 
 
 class WeeklyPlanningService:
@@ -187,6 +227,12 @@ class WeeklyPlanningService:
             )
             return WeeklyPlanningResult(kind="unavailable")
 
+        availability = prepared.prompt_context.get("confirmed_availability")
+        if isinstance(availability, dict) and not _plan_fits_availability(
+            plan, availability
+        ):
+            return WeeklyPlanningResult(kind="availability_conflict")
+
         return await self._persist_generated(
             prepared=prepared,
             plan=plan,
@@ -235,6 +281,28 @@ class WeeklyPlanningService:
             if not disciplines:
                 return WeeklyPlanningResult(kind="unavailable")
 
+            self_reported_baseline: AthleteBaselineData | None = None
+            saved_baseline = await AthleteBaselineRepository(session).get(
+                athlete_id=user.id
+            )
+            if (
+                saved_baseline is not None
+                and saved_baseline.goal_signature == _goal_signature(goal)
+            ):
+                try:
+                    self_reported_baseline = AthleteBaselineData.model_validate(
+                        saved_baseline.baseline_jsonb
+                    )
+                except ValidationError:
+                    logger.warning(
+                        "weekly_plan_self_reported_baseline_invalid athlete_id=%s",
+                        str(user.id),
+                    )
+            self_reported_disciplines = _self_reported_disciplines(
+                baseline=self_reported_baseline,
+                planned=disciplines,
+            )
+
             window_started_at = now - timedelta(days=self._settings.planner_window_days)
             workouts = await FitnessRepository(session).workouts_for_window(
                 athlete_id=user.id,
@@ -260,31 +328,11 @@ class WeeklyPlanningService:
                 window_started_at=window_started_at,
                 window_ended_at=now,
                 calculations=calculations,
+                self_reported_disciplines=self_reported_disciplines,
             )
             if not readiness.ready:
                 return WeeklyPlanningResult(kind="insufficient", readiness=readiness)
 
-            await BaselineAssessmentService(
-                settings=self._settings
-            ).create_missing_baselines_for_disciplines_in_session(
-                session,
-                athlete_id=user.id,
-                disciplines=disciplines,
-                calculated_at=now,
-                owner_locked=True,
-                window_started_at=window_started_at,
-                window_ended_at=now,
-            )
-            repository = FitnessRepository(session)
-            baseline_rows: list[AthleteBaselineAssessment] = []
-            for discipline in disciplines:
-                baseline = await repository.baseline_for_discipline(
-                    athlete_id=user.id,
-                    discipline=discipline,
-                )
-                if baseline is not None:
-                    baseline_rows.append(baseline)
-            baselines = tuple(baseline_rows)
             profile = await profiles.get_athlete_profile_context(user_id=user.id)
             capabilities = await AthleteCapabilityRepository(session).available(
                 athlete_id=user.id
@@ -292,7 +340,7 @@ class WeeklyPlanningService:
             evidence_snapshot = build_evidence_snapshot(
                 readiness=readiness,
                 calculations=calculations,
-                baselines=baselines,
+                self_reported_baseline=self_reported_baseline,
             )
             prompt_context = {
                 "week_start": week_start.isoformat(),
@@ -320,6 +368,7 @@ class WeeklyPlanningService:
                 # Raw profile text is intentionally prompt-only. It is not put in
                 # evidence_snapshot, input_digest, LLMUsage, or log messages.
                 "availability": profile.availability_text if profile else None,
+                "confirmed_availability": _confirmed_availability(profile),
                 "health_limitations": (
                     profile.health_limitations_text if profile else None
                 ),
@@ -333,6 +382,11 @@ class WeeklyPlanningService:
                 ],
                 "recent_evidence": evidence_snapshot["recent_evidence"],
                 "baselines": evidence_snapshot["baselines"],
+                "self_reported_baseline": (
+                    self_reported_baseline.model_dump(mode="json", exclude_none=True)
+                    if self_reported_baseline is not None
+                    else None
+                ),
                 "evidence_state": {
                     row.discipline.value: row.state.value
                     for row in readiness.disciplines
@@ -508,6 +562,36 @@ async def _planned_contexts(
 
 def _plan_schema(plan: WeeklyTrainingPlan) -> WeeklyPlan:
     return WeeklyPlan.model_validate(plan.plan_jsonb)
+
+
+def _goal_signature(goal: object | None) -> str:
+    if goal is None:
+        return ""
+    return "|".join(
+        str(value)
+        for value in (
+            getattr(goal, "goal_template_id", None),
+            getattr(goal, "supporting_goal_template_id", None),
+        )
+        if value is not None
+    )
+
+
+def _self_reported_disciplines(
+    *,
+    baseline: AthleteBaselineData | None,
+    planned: tuple[Discipline, ...],
+) -> frozenset[Discipline]:
+    if baseline is None:
+        return frozenset()
+    available = {
+        Discipline.RUNNING: baseline.running,
+        Discipline.CYCLING: baseline.cycling,
+        Discipline.SWIMMING: baseline.swimming,
+    }
+    return frozenset(
+        discipline for discipline in planned if available.get(discipline) is not None
+    )
 
 
 def next_week_start(now: datetime, timezone: str | None) -> date:

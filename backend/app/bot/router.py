@@ -26,6 +26,7 @@ from app.bot.handlers import (
     profile_handler,
     start_handler,
     text_handler,
+    web_app_data_handler,
     workout_screenshot_handler,
 )
 from app.config import Settings, get_settings
@@ -53,9 +54,13 @@ def register_handlers(
         application.add_handler(CommandHandler("dev_reset", dev_handler))
         application.add_handler(CommandHandler("dev_import_history", dev_handler))
         application.add_handler(CommandHandler("dev_reset_goal_equipment", dev_handler))
+        application.add_handler(CommandHandler("dev_goal", dev_handler))
     application.add_handler(CallbackQueryHandler(callback_handler))
     application.add_handler(MessageHandler(filters.Document.ALL, document_handler))
     application.add_handler(MessageHandler(filters.PHOTO, workout_screenshot_handler))
+    application.add_handler(
+        MessageHandler(filters.StatusUpdate.WEB_APP_DATA, web_app_data_handler)
+    )
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler)
     )

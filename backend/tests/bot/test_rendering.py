@@ -46,7 +46,6 @@ def test_onboarding_keyboards_expose_only_supported_actions() -> None:
         ("Cancel", "ob:v1:cancel"),
     ]
     assert _button_pairs(keyboards.add_workout_keyboard()) == [
-        ("Connect my phone", "ob:v1:phone:connect"),
         ("Cancel", "ob:v1:cancel"),
     ]
     assert _button_pairs(keyboards.profile_settings_text_keyboard()) == [

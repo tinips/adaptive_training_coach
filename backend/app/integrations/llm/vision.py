@@ -110,9 +110,7 @@ class DeepSeekWorkoutScreenshotExtractor:
             content=[
                 {
                     "type": "image_url",
-                    "image_url": {
-                        "url": f"data:{image_media_type};base64,{encoded}"
-                    },
+                    "image_url": {"url": f"data:{image_media_type};base64,{encoded}"},
                 },
                 {"type": "text", "text": _EXTRACTION_PROMPT},
             ]

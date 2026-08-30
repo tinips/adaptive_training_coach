@@ -114,21 +114,23 @@ async def test_journey_collects_profile_goal_and_required_context_before_complet
     template_choice = await bot.handle_callback(
         athlete, "ob:v1:goal:template:TRIATHLON_HALF_DISTANCE"
     )
+    date_prompt = await bot.handle_callback(athlete, "ob:v1:goal:metric:skip")
     date_skipped = await bot.handle_callback(athlete, "ob:v1:goal:nodate")
     availability = await bot.handle_callback(
         athlete, "ob:v1:support:STRENGTH_MAINTENANCE"
     )
-    equipment = await bot.handle_text(
+    availability_review = await bot.handle_text(
         athlete,
         "Tuesday and Thursday evenings, plus a longer Saturday run.",
     )
+    equipment = await bot.handle_callback(athlete, "ob:v1:availability:confirm")
     equipment_callback = next(
         callback for label, callback in _buttons(equipment) if "Running shoes" in label
     )
     await bot.handle_callback(athlete, equipment_callback)
     limitations = await bot.handle_callback(athlete, "ob:v1:equipment:done")
-    history = await bot.handle_callback(athlete, "ob:v1:health:none")
-    completed = await bot.handle_callback(athlete, "ob:v1:history:skip")
+    baseline = await bot.handle_callback(athlete, "ob:v1:health:none")
+    completed = await _submit_triathlon_baseline(bot, athlete)
     displayed_profile = await bot.profile(athlete)
     profile_button = await _agent_input(bot, "Profile")
 
@@ -144,8 +146,10 @@ async def test_journey_collects_profile_goal_and_required_context_before_complet
         "ob:v1:goal:template:TRIATHLON_HALF_DISTANCE",
     ) in _buttons(sport_choice)
     assert ("Back", "ob:v1:goal:back") in _buttons(sport_choice)
-    assert template_choice.text == messages.GOAL_EVENT_DATE_PROMPT
-    assert ("No date yet", "ob:v1:goal:nodate") in _buttons(template_choice)
+    assert template_choice.text == messages.goal_metric_prompt("triathlon_finish_time")
+    assert ("Skip", "ob:v1:goal:metric:skip") in _buttons(template_choice)
+    assert date_prompt.text == messages.GOAL_EVENT_DATE_PROMPT
+    assert ("No date yet", "ob:v1:goal:nodate") in _buttons(date_prompt)
     assert date_skipped.text == messages.GOAL_SUPPORT_PROMPT
     assert ("Maintain strength", "ob:v1:support:STRENGTH_MAINTENANCE") in _buttons(
         date_skipped
@@ -157,10 +161,11 @@ async def test_journey_collects_profile_goal_and_required_context_before_complet
     assert weight.text == messages.PROFILE_WEIGHT_INTAKE
     assert height.text == messages.PROFILE_HEIGHT_INTAKE
     assert availability.text == messages.AVAILABILITY_INTAKE
+    assert "Review your weekly availability" in availability_review.text
     assert "select every resource" in equipment.text.casefold()
     assert messages.HEALTH_LIMITATIONS_INTAKE in limitations.text
-    assert history.text == messages.TRAINING_HISTORY_IMPORT
-    assert completed.text == messages.TRAINING_HISTORY_SKIP_SUGGESTION
+    assert "Running: typical sessions" in baseline.text
+    assert completed.text == messages.ONBOARDING_COMPLETED
     assert "Birth year: 1990" in displayed_profile.text
     assert "Category: Female" in displayed_profile.text
     assert "Running shoes" in displayed_profile.text
@@ -186,7 +191,7 @@ async def test_journey_collects_profile_goal_and_required_context_before_complet
         assert user.status is UserStatus.ONBOARDING_COMPLETED
         state = await OnboardingRepository(session).require_for_user(user_id=user.id)
         assert state.status is OnboardingStatus.COMPLETED
-        assert state.current_step is OnboardingStep.TRAINING_HISTORY_IMPORT
+        assert state.current_step is OnboardingStep.BASELINE_INTAKE
         goal = await ProfileRepository(session).get_training_goal(user_id=user.id)
         assert goal is not None
         assert goal.main_goal == "Half-distance triathlon"
@@ -301,11 +306,13 @@ async def test_a_single_sport_athlete_can_skip_the_supporting_goal(
     await bot.handle_text(athlete, "78")
     await bot.handle_text(athlete, "180")
     template_choice = await bot.handle_callback(athlete, "ob:v1:goal:sport:RUNNING")
-    date_prompt = await bot.handle_callback(athlete, "ob:v1:goal:template:MARATHON")
+    metric_prompt = await bot.handle_callback(athlete, "ob:v1:goal:template:MARATHON")
+    date_prompt = await bot.handle_callback(athlete, "ob:v1:goal:metric:skip")
     support_choice = await bot.handle_callback(athlete, "ob:v1:goal:nodate")
     skipped = await bot.handle_callback(athlete, "ob:v1:support:none")
 
     assert ("Marathon", "ob:v1:goal:template:MARATHON") in _buttons(template_choice)
+    assert metric_prompt.text == messages.goal_metric_prompt("running_pace")
     assert date_prompt.text == messages.GOAL_EVENT_DATE_PROMPT
     assert support_choice.text == messages.GOAL_SUPPORT_PROMPT
     assert skipped.text == messages.AVAILABILITY_INTAKE
@@ -335,18 +342,55 @@ async def _onboard_to_completed(
     await bot.handle_text(athlete, "168")
     await bot.handle_callback(athlete, "ob:v1:goal:sport:RUNNING")
     await bot.handle_callback(athlete, "ob:v1:goal:template:MARATHON")
+    await bot.handle_callback(athlete, "ob:v1:goal:metric:skip")
     await bot.handle_callback(athlete, "ob:v1:goal:nodate")
     await bot.handle_callback(athlete, "ob:v1:support:none")
-    equipment = await bot.handle_text(
-        athlete, "Weekday evenings and a longer Saturday run."
-    )
+    await bot.handle_text(athlete, "Weekday evenings and a longer Saturday run.")
+    equipment = await bot.handle_callback(athlete, "ob:v1:availability:confirm")
     equipment_callback = next(
         callback for label, callback in _buttons(equipment) if "Running shoes" in label
     )
     await bot.handle_callback(athlete, equipment_callback)
     await bot.handle_callback(athlete, "ob:v1:equipment:done")
     await bot.handle_callback(athlete, "ob:v1:health:none")
-    await bot.handle_callback(athlete, "ob:v1:history:skip")
+    await _submit_running_baseline(bot, athlete)
+
+
+async def _submit_running_baseline(
+    bot: CoachBotApplicationService, athlete: TelegramIdentity
+) -> None:
+    for value in ("3", "150", "55", "5 km, 27:30"):
+        await bot.handle_text(athlete, value)
+
+
+async def _submit_triathlon_baseline(
+    bot: CoachBotApplicationService, athlete: TelegramIdentity
+):
+    response = None
+    for value in (
+        "3",
+        "150",
+        "55",
+        "5 km, 27:30",
+        "2",
+        "180",
+        "90",
+        "BOTH",
+        "SIMPLE_ROUTES",
+        "skip",
+        "2",
+        "90",
+        "1000",
+        "POOL",
+        "25",
+        "skip",
+        "NONE",
+        "SWIMMING",
+        "NOT_CONFIDENT",
+    ):
+        response = await bot.handle_text(athlete, value)
+    assert response is not None
+    return response
 
 
 async def _onboard_to_goal_chosen(
@@ -391,6 +435,7 @@ async def test_a_race_date_can_be_entered_and_skipped(
     bot, athlete, factory = await _onboard_to_goal_chosen(journey)
 
     await bot.handle_callback(athlete, "ob:v1:goal:template:MARATHON")
+    await bot.handle_callback(athlete, "ob:v1:goal:metric:skip")
     await bot.handle_text(athlete, "2027-07-11")
 
     async with factory() as session:
@@ -408,6 +453,7 @@ async def test_an_unparseable_race_date_is_rejected_without_advancing(
 ) -> None:
     bot, athlete, factory = await _onboard_to_goal_chosen(journey)
     await bot.handle_callback(athlete, "ob:v1:goal:template:MARATHON")
+    await bot.handle_callback(athlete, "ob:v1:goal:metric:skip")
 
     await bot.handle_text(athlete, "sometime next summer")
 
@@ -428,6 +474,7 @@ async def test_a_past_race_date_is_rejected_without_advancing(
 
     bot, athlete, factory = await _onboard_to_goal_chosen(journey)
     await bot.handle_callback(athlete, "ob:v1:goal:template:MARATHON")
+    await bot.handle_callback(athlete, "ob:v1:goal:metric:skip")
 
     await bot.handle_text(athlete, "2020-01-01")
 
@@ -449,6 +496,7 @@ async def test_a_race_date_in_ddmmyyyy_format_is_parsed_correctly(
     bot, athlete, factory = await _onboard_to_goal_chosen(journey)
 
     await bot.handle_callback(athlete, "ob:v1:goal:template:MARATHON")
+    await bot.handle_callback(athlete, "ob:v1:goal:metric:skip")
     await bot.handle_text(athlete, "11/07/2027")
 
     async with factory() as session:

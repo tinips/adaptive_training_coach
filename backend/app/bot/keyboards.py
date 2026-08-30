@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    WebAppInfo,
+)
 
 from app.bot.rendering import TelegramButtonSpec
 
@@ -139,6 +144,41 @@ def goal_template_keyboard(
     rows.append([(LABELS["goal_back"], "ob:v1:goal:back")])
     rows.append([(LABELS["cancel"], "ob:v1:cancel")])
     return _rows(rows)
+
+
+def swimming_type_keyboard() -> InlineKeyboardMarkup:
+    return _rows(
+        [
+            [("Pool swim", "ob:v1:goal:swim:pool")],
+            [("Open-water swim", "ob:v1:goal:swim:open_water")],
+            [(LABELS["cancel"], "ob:v1:cancel")],
+        ]
+    )
+
+
+def goal_metric_keyboard() -> InlineKeyboardMarkup:
+    return _rows(
+        [
+            [(LABELS["skip"], "ob:v1:goal:metric:skip")],
+            [(LABELS["cancel"], "ob:v1:cancel")],
+        ]
+    )
+
+
+def availability_review_keyboard() -> InlineKeyboardMarkup:
+    return _rows(
+        [
+            [("Confirm availability", "ob:v1:availability:confirm")],
+            [("Edit availability", "ob:v1:availability:edit")],
+            [(LABELS["cancel"], "ob:v1:cancel")],
+        ]
+    )
+
+
+def baseline_web_app_keyboard(url: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("Complete baseline", web_app=WebAppInfo(url=url))]]
+    )
 
 
 def goal_event_date_keyboard() -> InlineKeyboardMarkup:
@@ -448,7 +488,6 @@ def deletion_confirmation_keyboard() -> InlineKeyboardMarkup:
 def add_workout_keyboard() -> InlineKeyboardMarkup:
     return _rows(
         [
-            [("Connect my phone", "ob:v1:phone:connect")],
             [(LABELS["cancel"], "ob:v1:cancel")],
         ]
     )

@@ -23,11 +23,13 @@ from app.domain.enums import (
     TrainingImportContext,
     UserStatus,
 )
+from app.repositories.athlete_baselines import AthleteBaselineRepository
 from app.repositories.onboarding import OnboardingRepository
 from app.repositories.profiles import ProfileRepository
 from app.repositories.users import UserRepository
 from app.schemas.common import TelegramIdentity
 from app.services.onboarding import OnboardingApplicationError, OnboardingService
+from app.training_catalog_seed import catalog_id
 
 
 @pytest_asyncio.fixture
@@ -49,6 +51,78 @@ def _identity() -> TelegramIdentity:
         first_name="Profile Athlete",
         language_code="en",
     )
+
+
+@pytest.mark.asyncio
+async def test_cycling_goal_collects_structured_targets(
+    profile_database: async_sessionmaker[AsyncSession],
+) -> None:
+    identity = _identity()
+    async with profile_database.begin() as session:
+        user, _ = await UserRepository(session).get_or_create(
+            telegram_user_id=identity.telegram_user_id,
+            telegram_username=identity.telegram_username,
+            first_name=identity.first_name,
+        )
+        user.status = UserStatus.ONBOARDING_IN_PROGRESS
+        await OnboardingRepository(session).get_or_create(
+            user_id=user.id,
+            current_step=OnboardingStep.GOAL_INTAKE,
+        )
+
+    service = OnboardingService(
+        session_factory=profile_database,
+        settings=Settings(llm_mode="mock"),
+    )
+
+    result = await service.choose_goal_sport(identity, "CYCLING")
+
+    assert result.current_step is OnboardingStep.GOAL_METRIC_INTAKE
+    assert result.answers["goal_metric_fields"] == [
+        "cycling_distance",
+        "cycling_average_speed",
+    ]
+    speed = await service.submit_goal_metric(identity, "100")
+    assert speed.current_step is OnboardingStep.GOAL_METRIC_INTAKE
+    completed = await service.submit_goal_metric(identity, "28.5")
+    assert completed.current_step is OnboardingStep.GOAL_EVENT_DATE
+    async with profile_database() as session:
+        goal = await ProfileRepository(session).get_training_goal(user_id=user.id)
+    assert goal is not None
+    assert goal.target_outcome == "Road cycling event"
+    assert goal.target_distance_km == 100.0
+    assert goal.target_average_speed_kph == 28.5
+
+
+@pytest.mark.asyncio
+async def test_supporting_goal_options_exclude_the_current_main_goal(
+    profile_database: async_sessionmaker[AsyncSession],
+) -> None:
+    identity = _identity()
+    async with profile_database.begin() as session:
+        user, _ = await UserRepository(session).get_or_create(
+            telegram_user_id=identity.telegram_user_id,
+            telegram_username=identity.telegram_username,
+            first_name=identity.first_name,
+        )
+        await ProfileRepository(session).upsert_training_goal(
+            user_id=user.id,
+            main_goal="Maintain strength",
+            event_date=None,
+            target_outcome="Maintain strength",
+            secondary_priority=None,
+            original_description="Maintain strength",
+            goal_template_id=catalog_id("goal", "ROAD_CYCLING_EVENT"),
+        )
+
+    service = OnboardingService(
+        session_factory=profile_database,
+        settings=Settings(llm_mode="mock"),
+    )
+
+    options = await service.supporting_goal_options(identity)
+
+    assert ("STRENGTH_MAINTENANCE", "Maintain strength") not in options
 
 
 @pytest.mark.asyncio
@@ -300,3 +374,76 @@ async def test_context_text_outside_length_bounds_is_rejected_without_a_model_ca
         await service.handle_text(identity, "  ok  ")
     with pytest.raises(OnboardingApplicationError, match="invalid_action"):
         await service.handle_text(identity, "x" * 2001)
+
+
+@pytest.mark.asyncio
+async def test_web_app_baseline_is_goal_adaptive_and_persisted(
+    profile_database: async_sessionmaker[AsyncSession],
+) -> None:
+    identity = _identity()
+    async with profile_database.begin() as session:
+        user, _ = await UserRepository(session).get_or_create(
+            telegram_user_id=identity.telegram_user_id,
+            telegram_username=identity.telegram_username,
+            first_name=identity.first_name,
+        )
+        user.status = UserStatus.ONBOARDING_IN_PROGRESS
+        await OnboardingRepository(session).get_or_create(
+            user_id=user.id,
+            current_step=OnboardingStep.HEALTH_LIMITATIONS_INTAKE,
+        )
+        profiles = ProfileRepository(session)
+        await profiles.upsert_mandatory_athlete_profile(
+            user_id=user.id,
+            birth_year=1990,
+            gender=AthleteGender.FEMALE,
+            weight_kg=70,
+            height_cm=175,
+        )
+        await profiles.upsert_training_goal(
+            user_id=user.id,
+            main_goal="10K race",
+            event_date=None,
+            target_outcome="Finish comfortably",
+            secondary_priority=None,
+            original_description="10K race",
+            goal_template_id=catalog_id("goal", "RUNNING_10K"),
+        )
+
+    service = OnboardingService(
+        session_factory=profile_database,
+        settings=Settings(llm_mode="mock"),
+    )
+
+    started = await service.choose_health_limitations(identity, "none")
+
+    assert started.current_step is OnboardingStep.BASELINE_INTAKE
+    assert started.answers["baseline_fields"] == [
+        "running.typical_weekly_sessions",
+        "running.typical_weekly_duration_minutes",
+        "running.longest_recent_run_minutes",
+        "running.recent_race_result",
+    ]
+
+    completed = await service.submit_baseline_form(
+        identity,
+        {
+            "running.typical_weekly_sessions": "3",
+            "running.typical_weekly_duration_minutes": "150",
+            "running.longest_recent_run_minutes": "55",
+            "running.recent_race_result": "",
+        },
+    )
+
+    assert completed.onboarding_status is OnboardingStatus.COMPLETED
+    async with profile_database() as session:
+        saved = await AthleteBaselineRepository(session).get(athlete_id=user.id)
+    assert saved is not None
+    assert saved.form_version == 2
+    assert saved.baseline_jsonb == {
+        "running": {
+            "typical_weekly_sessions": 3,
+            "typical_weekly_duration_minutes": 150,
+            "longest_recent_run_minutes": 55,
+        }
+    }

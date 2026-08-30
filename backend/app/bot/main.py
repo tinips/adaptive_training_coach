@@ -80,6 +80,7 @@ def build_runtime(
         onboarding=OnboardingService(
             session_factory=session_factory,
             settings=runtime_settings,
+            model=create_goal_extraction_model(runtime_settings),
         ),
         profiles=ProfileService(session_factory),
         account_queries=AccountQueryService(session_factory),
@@ -89,6 +90,7 @@ def build_runtime(
         tcx_enabled=runtime_settings.tcx_import_enabled,
         mobile_sync=mobile_sync,
         mobile_sync_enabled=runtime_settings.mobile_sync_enabled,
+        telegram_web_app_url=runtime_settings.telegram_web_app_url,
         planning=WeeklyPlanningService(
             session_factory=session_factory,
             settings=runtime_settings,
@@ -138,9 +140,7 @@ def create_application(
             # Construction never calls out to DeepSeek - safe to build lazily
             # here for a test/injection path that supplied its own `service`.
             workout_screenshot = WorkoutScreenshotService(
-                session_factory=create_session_factory(
-                    create_engine(runtime_settings)
-                ),
+                session_factory=create_session_factory(create_engine(runtime_settings)),
                 settings=runtime_settings,
                 extractor=DeepSeekWorkoutScreenshotExtractor(
                     api_key=runtime_settings.llm_api_key,

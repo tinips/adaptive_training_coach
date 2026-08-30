@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.db.models import AthleteBaselineAssessment, SwimmingWorkoutDetails, Workout
+from app.db.models import SwimmingWorkoutDetails, Workout
 from app.domain.enums import Discipline
 
 
@@ -55,22 +55,6 @@ class FitnessRepository:
             .order_by(Workout.discipline, Workout.started_at, Workout.id)
         )
         return tuple(result.unique().all())
-
-    async def baseline_for_discipline(
-        self,
-        *,
-        athlete_id: uuid.UUID,
-        discipline: Discipline,
-    ) -> AthleteBaselineAssessment | None:
-        return cast(
-            AthleteBaselineAssessment | None,
-            await self._session.scalar(
-                select(AthleteBaselineAssessment).where(
-                    AthleteBaselineAssessment.athlete_id == athlete_id,
-                    AthleteBaselineAssessment.discipline == discipline,
-                )
-            ),
-        )
 
     async def latest_workout_started_at(
         self,

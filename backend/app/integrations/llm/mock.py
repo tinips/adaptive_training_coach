@@ -54,7 +54,6 @@ class DeterministicFakeOnboardingModel:
         messages: list[BaseMessage],
         config: RunnableConfig,
     ) -> StructuredModelResponse:
-        del step
         user_text = _last_user_text(messages)
         scenario, _ = self._resolve_scenario(user_text)
 
@@ -65,7 +64,12 @@ class DeterministicFakeOnboardingModel:
                 return StructuredModelResponse(
                     output={"confidence": "not-a-number"},
                 )
-            output = schema.model_validate(_fake_weekly_plan(user_text))
+            payload = (
+                _fake_availability()
+                if step is OnboardingStep.AVAILABILITY_INTAKE
+                else _fake_weekly_plan(user_text)
+            )
+            output = schema.model_validate(payload)
             return StructuredModelResponse(
                 output=output,
                 prompt_tokens=8,
@@ -148,3 +152,28 @@ def _fake_weekly_plan(request_json: str) -> dict[str, object]:
                 }
             )
     return {"week_start": week_start.isoformat(), "days": days}
+
+
+def _fake_availability() -> dict[str, object]:
+    days: dict[str, object] = {}
+    for day in (
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+        "sunday",
+    ):
+        days[day] = {"available": False, "disciplines": [], "time_windows": []}
+    days["tuesday"] = {
+        "available": True,
+        "disciplines": ["running"],
+        "time_windows": [{"time_of_day": None, "duration_minutes": 60}],
+    }
+    return {
+        "parse_status": "complete",
+        "clarification_reason": None,
+        "missing_details": [],
+        "days": days,
+    }

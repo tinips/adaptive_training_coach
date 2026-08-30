@@ -6,8 +6,8 @@ import hashlib
 import json
 from datetime import date, datetime
 
-from app.db.models import AthleteBaselineAssessment
 from app.domain.enums import Discipline, DisciplineEvidenceState
+from app.schemas.baseline import AthleteBaselineData
 from app.schemas.fitness import BaselineCalculation
 from app.schemas.weekly_plans import PlanReadiness, PlanReadinessDiscipline
 
@@ -17,9 +17,15 @@ MINIMUM_SESSIONS = 3
 
 def _evidence_state(
     calculation: BaselineCalculation | None,
+    *,
+    self_reported: bool,
 ) -> DisciplineEvidenceState:
     if calculation is None or calculation.session_count == 0:
-        return DisciplineEvidenceState.NONE
+        return (
+            DisciplineEvidenceState.SELF_REPORTED
+            if self_reported
+            else DisciplineEvidenceState.NONE
+        )
     if (
         calculation.session_count >= MINIMUM_SESSIONS
         and calculation.active_day_count >= MINIMUM_ACTIVE_DAYS
@@ -34,6 +40,7 @@ def build_plan_readiness(
     window_started_at: datetime,
     window_ended_at: datetime,
     calculations: dict[Discipline, BaselineCalculation | None],
+    self_reported_disciplines: frozenset[Discipline] = frozenset(),
 ) -> PlanReadiness:
     """Build the planner gate, judged on the athlete rather than per sport.
 
@@ -47,7 +54,10 @@ def build_plan_readiness(
             discipline=discipline,
             session_count=calculation.session_count if calculation else 0,
             active_day_count=calculation.active_day_count if calculation else 0,
-            state=_evidence_state(calculation),
+            state=_evidence_state(
+                calculation,
+                self_reported=discipline in self_reported_disciplines,
+            ),
             quality_flags=tuple(calculation.quality_flags_jsonb) if calculation else (),
         )
         for discipline, calculation in sorted(
@@ -69,8 +79,13 @@ def build_plan_readiness(
         total_active_day_count=total_active_day_count,
         ready=(
             bool(rows)
-            and total_session_count >= MINIMUM_SESSIONS
-            and total_active_day_count >= MINIMUM_ACTIVE_DAYS
+            and (
+                (
+                    total_session_count >= MINIMUM_SESSIONS
+                    and total_active_day_count >= MINIMUM_ACTIVE_DAYS
+                )
+                or bool(self_reported_disciplines)
+            )
         ),
     )
 
@@ -79,7 +94,7 @@ def build_evidence_snapshot(
     *,
     readiness: PlanReadiness,
     calculations: dict[Discipline, BaselineCalculation | None],
-    baselines: tuple[AthleteBaselineAssessment, ...],
+    self_reported_baseline: AthleteBaselineData | None = None,
 ) -> dict[str, object]:
     """Return aggregate evidence only, excluding free text and workout names."""
 
@@ -98,23 +113,11 @@ def build_evidence_snapshot(
             )
             if calculation is not None
         },
-        "baselines": [
-            {
-                "discipline": item.discipline.value,
-                "analysis_started_at": item.analysis_started_at.isoformat(),
-                "analysis_ended_at": item.analysis_ended_at.isoformat(),
-                "calculated_at": item.calculated_at.isoformat(),
-                "session_count": item.session_count,
-                "active_day_count": item.active_day_count,
-                "total_duration_seconds": item.total_duration_seconds,
-                "known_distance_meters": item.known_distance_meters,
-                "confidence": item.confidence,
-                "discipline_metrics": item.discipline_metrics_jsonb,
-                "quality_flags": item.quality_flags_jsonb,
-                "input_digest": item.input_digest,
-            }
-            for item in sorted(baselines, key=lambda item: item.discipline.value)
-        ],
+        "self_reported_baseline": (
+            self_reported_baseline.model_dump(mode="json", exclude_none=True)
+            if self_reported_baseline is not None
+            else None
+        ),
     }
 
 
