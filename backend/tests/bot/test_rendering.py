@@ -165,6 +165,17 @@ def test_lifecycle_reply_keyboards_expose_exact_account_actions() -> None:
     )
 
 
+def test_completed_keyboard_adds_history_mini_app_for_configured_public_url() -> None:
+    completed = keyboards.completed_onboarding_keyboard(
+        workout_history_url="https://coach.example/webapp/workout-history"
+    )
+
+    history = completed.keyboard[1][1]
+    assert history.text == "Workout history"
+    assert history.web_app is not None
+    assert history.web_app.url == "https://coach.example/webapp/workout-history"
+
+
 def test_equipment_messages_render_escaped_bounded_tables() -> None:
     item_id = uuid.uuid4()
     review = CapabilityReview(

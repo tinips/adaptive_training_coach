@@ -3,17 +3,15 @@
 
 from __future__ import annotations
 
-import hashlib
-import hmac
-import json
-from urllib.parse import parse_qsl
-
 import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
+from app.api.routes.telegram_web_app import (
+    telegram_web_app_identity,
+    workout_history_web_app_url,
+)
 from app.bot import keyboards
-from app.schemas.common import TelegramIdentity
 from app.services.onboarding.service import OnboardingService
 
 router = APIRouter(tags=["telegram-web-app"])
@@ -74,24 +72,10 @@ async def submit_baseline(request: Request) -> dict[str, bool]:
     if not isinstance(init_data, str) or not isinstance(values, dict):
         raise HTTPException(status_code=400, detail="invalid payload")
     settings = request.app.state.settings
+    identity = telegram_web_app_identity(settings=settings, init_data=init_data)
     token = settings.telegram_bot_token
     if token is None:
         raise HTTPException(status_code=503, detail="bot unavailable")
-    data = dict(parse_qsl(init_data, keep_blank_values=True))
-    received_hash = data.pop("hash", "")
-    check_string = "\n".join(f"{key}={data[key]}" for key in sorted(data))
-    secret = hmac.new(b"WebAppData", token.get_secret_value().encode(), hashlib.sha256).digest()
-    expected_hash = hmac.new(secret, check_string.encode(), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(received_hash, expected_hash):
-        raise HTTPException(status_code=401, detail="invalid Telegram session")
-    try:
-        user = json.loads(data["user"])
-        identity = TelegramIdentity(
-            telegram_user_id=user["id"], telegram_username=user.get("username"),
-            first_name=user.get("first_name"), language_code=user.get("language_code", "en"),
-        )
-    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
-        raise HTTPException(status_code=400, detail="invalid Telegram user") from error
     service = OnboardingService(session_factory=request.app.state.session_factory, settings=settings)
     await service.submit_baseline_form(identity, values)
     async with httpx.AsyncClient(timeout=10) as client:
@@ -100,7 +84,11 @@ async def submit_baseline(request: Request) -> dict[str, bool]:
             json={
                 "chat_id": identity.telegram_user_id,
                 "text": "Baseline saved. I have your starting point and will use completed workouts to refine your plan.",
-                "reply_markup": keyboards.completed_onboarding_keyboard().to_dict(),
+                "reply_markup": keyboards.completed_onboarding_keyboard(
+                    workout_history_url=workout_history_web_app_url(
+                        settings.telegram_web_app_url
+                    )
+                ).to_dict(),
             },
         )
     return {"ok": True}

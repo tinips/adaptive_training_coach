@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    KeyboardButton,
     ReplyKeyboardMarkup,
     WebAppInfo,
 )
@@ -65,6 +66,7 @@ LABELS = {
     "keep_account": "Keep my account",
     "view_profile": "View profile",
     "add_workout": "Add workout",
+    "workout_history": "Workout history",
     "help": "Help",
     "start": "Start",
     "resume_menu": "Resume",
@@ -271,25 +273,43 @@ def onboarding_keyboard() -> ReplyKeyboardMarkup:
 
 
 def completed_onboarding_keyboard(
-    *, plan_available: bool = False
+    *,
+    plan_available: bool = False,
+    workout_history_url: str | None = None,
 ) -> ReplyKeyboardMarkup:
     """Expose the durable completed-account actions."""
 
+    plan_action = (
+        LABELS["view_weekly_plan"]
+        if plan_available
+        else LABELS["plan_next_week"]
+    )
+    training_rows: list[list[str | KeyboardButton]] = [
+        [LABELS["add_workout"], plan_action]
+    ]
+    if workout_history_url is not None:
+        training_rows = [
+            [
+                LABELS["add_workout"],
+                KeyboardButton(
+                    LABELS["workout_history"],
+                    web_app=WebAppInfo(url=workout_history_url),
+                ),
+            ],
+            [plan_action],
+        ]
     return _reply_rows(
         [
             [LABELS["profile"], LABELS["change_profile"]],
-            [
-                LABELS["add_workout"],
-                LABELS["view_weekly_plan"]
-                if plan_available
-                else LABELS["plan_next_week"],
-            ],
+            *training_rows,
             [LABELS["delete"]],
         ]
     )
 
 
-def _reply_rows(rows: Sequence[Sequence[str]]) -> ReplyKeyboardMarkup:
+def _reply_rows(
+    rows: Sequence[Sequence[str | KeyboardButton]],
+) -> ReplyKeyboardMarkup:
     """Build one persistent Telegram reply keyboard."""
 
     return ReplyKeyboardMarkup(

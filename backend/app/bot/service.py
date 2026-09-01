@@ -13,6 +13,7 @@ from uuid import UUID
 from langchain_core.messages import HumanMessage
 from telegram import ReplyKeyboardMarkup
 
+from app.api.routes.telegram_web_app import workout_history_web_app_url
 from app.bot import keyboards, messages
 from app.bot.rendering import TelegramResponse
 from app.domain.enums import (
@@ -181,7 +182,7 @@ class CoachBotApplicationService:
                 if result is not None
                 else TelegramResponse(
                     messages.PROFILE_SETTINGS_UNPROMPTED,
-                    user_keyboard=keyboards.completed_onboarding_keyboard(),
+                    user_keyboard=self._completed_onboarding_keyboard(),
                 )
             )
         return await self._dispatch(identity, event_type, content)
@@ -333,10 +334,16 @@ class CoachBotApplicationService:
                 if self._planning is not None
                 else False
             )
-            return keyboards.completed_onboarding_keyboard(
-                plan_available=plan_available
-            )
+            return self._completed_onboarding_keyboard(plan_available=plan_available)
         return keyboards.onboarding_keyboard()
+
+    def _completed_onboarding_keyboard(
+        self, *, plan_available: bool = False
+    ) -> ReplyKeyboardMarkup:
+        return keyboards.completed_onboarding_keyboard(
+            plan_available=plan_available,
+            workout_history_url=workout_history_web_app_url(self._telegram_web_app_url),
+        )
 
     @staticmethod
     def _lifecycle_category(lifecycle: dict[str, object] | None) -> str:
@@ -885,7 +892,7 @@ class CoachBotApplicationService:
                     if result.training_history_skipped
                     else messages.ONBOARDING_COMPLETED
                 ),
-                user_keyboard=keyboards.completed_onboarding_keyboard(),
+                user_keyboard=self._completed_onboarding_keyboard(),
             )
         if result.kind in mapping:
             text, keyboard = mapping[result.kind]
