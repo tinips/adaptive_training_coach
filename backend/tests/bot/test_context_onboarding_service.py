@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, timedelta
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock
@@ -31,10 +31,6 @@ from app.schemas.common import TelegramIdentity
 from app.schemas.onboarding_service import OnboardingResultKind, OnboardingServiceResult
 from app.schemas.profile_settings import ProfileSettingsResult, ProfileSettingsStep
 from app.schemas.weekly_plans import PlanDay, PlanSession, WeeklyPlan
-from app.services.mobile_sync import (
-    MobileSyncDisabledError,
-    MobileSyncIdentityNotFoundError,
-)
 from app.services.onboarding import OnboardingApplicationError, OnboardingService
 from app.services.weekly_planning.service import WeeklyPlanningResult
 
@@ -73,8 +69,6 @@ def _facade(
     *,
     account_queries: object | None = None,
     planning: object | None = None,
-    mobile_sync: object | None = None,
-    mobile_sync_enabled: bool = False,
 ) -> CoachBotApplicationService:
     default_queries = SimpleNamespace(
         lifecycle=AsyncMock(
@@ -90,8 +84,6 @@ def _facade(
         account_queries=cast(object, account_queries or default_queries),
         accounts=SimpleNamespace(),
         planning=cast(object, planning),
-        mobile_sync=cast(object, mobile_sync),
-        mobile_sync_enabled=mobile_sync_enabled,
     )
 
 
@@ -212,40 +204,6 @@ async def test_history_skip_renders_suggestion_and_completed_controls() -> None:
 
 
 @pytest.mark.asyncio
-async def test_history_phone_choice_pairs_and_completes_onboarding() -> None:
-    identity = _identity()
-    onboarding = SimpleNamespace(
-        complete_training_history=AsyncMock(
-            return_value=_result(
-                "onboarding_completed",
-                OnboardingStep.TRAINING_HISTORY_IMPORT,
-            )
-        )
-    )
-    mobile_sync = SimpleNamespace(
-        issue_pairing_code=AsyncMock(
-            return_value=SimpleNamespace(
-                code="ABCD2345",
-                expires_at=datetime(2026, 8, 21, 10, 30, tzinfo=UTC),
-            )
-        )
-    )
-
-    response = await _facade(
-        onboarding,
-        mobile_sync=mobile_sync,
-        mobile_sync_enabled=True,
-    ).handle_callback(identity, "ob:v1:history:phone")
-
-    mobile_sync.issue_pairing_code.assert_awaited_once_with(identity)
-    onboarding.complete_training_history.assert_awaited_once_with(identity)
-    assert "<code>ABCD2345</code>" in response.text
-    assert messages.ONBOARDING_COMPLETED in response.text
-    assert response.keyboard == keyboards.phone_pairing_keyboard()
-    assert response.edit_existing is True
-
-
-@pytest.mark.asyncio
 async def test_history_file_choice_prompts_for_a_document() -> None:
     response = await _facade(SimpleNamespace()).handle_callback(
         _identity(), "ob:v1:history:file"
@@ -254,28 +212,6 @@ async def test_history_file_choice_prompts_for_a_document() -> None:
     assert response.text == messages.TRAINING_HISTORY_FILE_PROMPT
     assert response.keyboard == keyboards.training_history_import_keyboard()
     assert response.edit_existing is True
-
-
-@pytest.mark.asyncio
-async def test_phone_pairing_can_resend_code() -> None:
-    mobile_sync = SimpleNamespace(
-        issue_pairing_code=AsyncMock(
-            return_value=SimpleNamespace(
-                code="EFGH5678",
-                expires_at=datetime(2026, 8, 21, 10, 30, tzinfo=UTC),
-            )
-        )
-    )
-
-    response = await _facade(
-        SimpleNamespace(),
-        mobile_sync=mobile_sync,
-        mobile_sync_enabled=True,
-    ).handle_callback(_identity(), "ob:v1:history:phone:resend")
-
-    mobile_sync.issue_pairing_code.assert_awaited_once_with(_identity())
-    assert "<code>EFGH5678</code>" in response.text
-    assert response.keyboard == keyboards.phone_pairing_keyboard()
 
 
 def _weekly_plan() -> WeeklyPlan:
@@ -325,92 +261,6 @@ async def test_plan_next_week_uses_deterministic_route_and_switches_keyboard() -
     assert response.user_keyboard == keyboards.completed_onboarding_keyboard(
         plan_available=True
     )
-
-
-@pytest.mark.asyncio
-async def test_connect_iphone_uses_deterministic_route_without_agent() -> None:
-    identity = _identity()
-    mobile_sync = SimpleNamespace(
-        issue_pairing_code=AsyncMock(
-            return_value=SimpleNamespace(
-                code="ABCD2345",
-                expires_at=datetime(2026, 8, 21, 10, 30, tzinfo=UTC),
-            )
-        ),
-        revoke_device=AsyncMock(),
-    )
-    response = await _facade(
-        SimpleNamespace(),
-        mobile_sync=mobile_sync,
-        mobile_sync_enabled=True,
-    ).handle_agent_input(identity, HumanMessage(content="/connect_iphone"))
-
-    mobile_sync.issue_pairing_code.assert_awaited_once_with(identity)
-    assert "<code>ABCD2345</code>" in response.text
-    assert "10:30 UTC" in response.text
-
-
-@pytest.mark.asyncio
-async def test_connect_iphone_is_unavailable_when_mobile_sync_is_disabled() -> None:
-    mobile_sync = SimpleNamespace(
-        issue_pairing_code=AsyncMock(),
-        revoke_device=AsyncMock(),
-    )
-
-    response = await _facade(
-        SimpleNamespace(), mobile_sync=mobile_sync, mobile_sync_enabled=False
-    ).handle_agent_input(_identity(), HumanMessage(content="/connect_iphone"))
-
-    mobile_sync.issue_pairing_code.assert_not_awaited()
-    assert response.text == messages.MOBILE_SYNC_UNAVAILABLE
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("error", "expected"),
-    [
-        (MobileSyncDisabledError("disabled"), messages.MOBILE_SYNC_UNAVAILABLE),
-        (MobileSyncIdentityNotFoundError("missing"), messages.NOT_FOUND),
-    ],
-)
-async def test_connect_iphone_translates_safe_mobile_service_errors(
-    error: RuntimeError, expected: str
-) -> None:
-    mobile_sync = SimpleNamespace(
-        issue_pairing_code=AsyncMock(side_effect=error),
-        revoke_device=AsyncMock(),
-    )
-
-    response = await _facade(
-        SimpleNamespace(), mobile_sync=mobile_sync, mobile_sync_enabled=True
-    ).handle_agent_input(_identity(), HumanMessage(content="/connect_iphone"))
-
-    assert response.text == expected
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("revoked", "expected"),
-    [
-        (True, messages.IPHONE_DISCONNECTED),
-        (False, messages.IPHONE_NOT_CONNECTED),
-    ],
-)
-async def test_disconnect_iphone_renders_the_durable_revocation_result(
-    revoked: bool, expected: str
-) -> None:
-    identity = _identity()
-    mobile_sync = SimpleNamespace(
-        issue_pairing_code=AsyncMock(),
-        revoke_device=AsyncMock(return_value=revoked),
-    )
-
-    response = await _facade(
-        SimpleNamespace(), mobile_sync=mobile_sync, mobile_sync_enabled=True
-    ).handle_agent_input(identity, HumanMessage(content="/disconnect_iphone"))
-
-    mobile_sync.revoke_device.assert_awaited_once_with(identity)
-    assert response.text == expected
 
 
 @pytest.mark.asyncio

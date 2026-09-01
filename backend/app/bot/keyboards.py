@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from telegram import (
     InlineKeyboardButton,
@@ -312,13 +312,44 @@ def profile_settings_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def profile_goal_keyboard() -> InlineKeyboardMarkup:
+def profile_goal_keyboard(
+    current: Mapping[str, object] | None = None,
+) -> InlineKeyboardMarkup:
+    current = current or {}
+
+    def label(name: str, key: str, fallback: str = "Not set") -> str:
+        value = current.get(key)
+        if value is None or value == "":
+            return f"{name}: {fallback}"
+        return f"{name}: {value}"
+
+    has_targets = any(
+        current.get(key) is not None
+        for key in (
+            "target_distance_km",
+            "target_elevation_m",
+            "target_pace_seconds_per_km",
+            "target_swim_pace_seconds_per_100m",
+            "target_average_speed_kph",
+            "target_finish_time_seconds",
+        )
+    )
     return _rows(
         [
-            [("Main goal", "ps:v1:goal:main")],
-            [("Performance targets", "ps:v1:goal:metrics")],
-            [("Event date", "ps:v1:goal:date")],
-            [("Secondary priority", "ps:v1:goal:secondary")],
+            [(label("Main goal", "main_goal"), "ps:v1:goal:main")],
+            [
+                (
+                    f"Performance targets: {'Set' if has_targets else 'Not set'}",
+                    "ps:v1:goal:metrics",
+                )
+            ],
+            [(label("Event date", "event_date"), "ps:v1:goal:date")],
+            [
+                (
+                    label("Supporting goal", "secondary_priority"),
+                    "ps:v1:goal:secondary",
+                )
+            ],
             [("Back", "ps:v1:goal:back")],
         ]
     )
@@ -405,13 +436,22 @@ def profile_health_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def profile_personal_keyboard() -> InlineKeyboardMarkup:
+def profile_personal_keyboard(
+    current: Mapping[str, object] | None = None,
+) -> InlineKeyboardMarkup:
+    current = current or {}
+
+    def label(name: str, key: str) -> str:
+        value = current.get(key)
+        return f"{name}: {value if value is not None and value != '' else 'Not set'}"
+
     return _rows(
         [
-            [("Birth year", "ps:v1:personal:birth_year")],
-            [("Category", "ps:v1:personal:gender")],
-            [("Weight", "ps:v1:personal:weight")],
-            [("Height", "ps:v1:personal:height")],
+            [(label("Birth year", "birth_year"), "ps:v1:personal:birth_year")],
+            [(label("Category", "gender"), "ps:v1:personal:gender")],
+            [(label("Weight", "weight_kg"), "ps:v1:personal:weight")],
+            [(label("Height", "height_cm"), "ps:v1:personal:height")],
+            [(label("Timezone", "timezone"), "ps:v1:personal:timezone")],
             [("Back / Done", "ps:v1:back")],
         ]
     )
@@ -455,15 +495,10 @@ def training_history_import_keyboard() -> InlineKeyboardMarkup:
     return _rows(
         [
             [("Upload a workout file", "ob:v1:history:file")],
-            [("Connect my phone", "ob:v1:history:phone")],
             [("Skip for now", "ob:v1:history:skip")],
             [(LABELS["cancel"], "ob:v1:cancel")],
         ]
     )
-
-
-def phone_pairing_keyboard() -> InlineKeyboardMarkup:
-    return _rows([[("Resend code", "ob:v1:history:phone:resend")]])
 
 
 def resume_keyboard(*, cancelled: bool = False) -> InlineKeyboardMarkup:

@@ -65,7 +65,6 @@ class PoolSwimmingDetailsData(_StrictSchema):
     pool_length_meters: float = Field(gt=0)
     total_lengths: int | None = Field(default=None, ge=0)
     primary_stroke: SwimmingStroke | None = None
-    average_swolf: float | None = Field(default=None, ge=0)
     total_strokes: int | None = Field(default=None, ge=0)
 
 
@@ -129,7 +128,6 @@ class HikingWorkoutDetailsData(_StrictSchema):
     elevation_loss_meters: float | None = Field(default=None, ge=0)
     average_heart_rate: float | None = Field(default=None, ge=0)
     max_heart_rate: float | None = Field(default=None, ge=0)
-    pack_weight_kg: float | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def derive_canonical_pace(self) -> HikingWorkoutDetailsData:
@@ -488,8 +486,7 @@ def workout_metrics(workout: Workout) -> WorkoutMetricsProjection:
     moving_duration = getattr(detail, "moving_duration_seconds", None)
     average_hr = getattr(detail, "average_heart_rate", None)
     max_hr = getattr(detail, "max_heart_rate", None)
-    active_links = [link for link in workout.source_links if link.deleted_at is None]
-    raw_link = next((link for link in active_links if link.raw_sport), None)
+    raw_link = next((link for link in workout.source_links if link.raw_sport), None)
     detail_raw_sport = (
         detail.raw_sport if isinstance(detail, OtherWorkoutDetails) else None
     )

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from html import escape
 from typing import Any
 
@@ -32,11 +32,6 @@ SETUP_INTRODUCTION = (
 GOAL_INTAKE = "Which sport is your goal in?"
 GOAL_TEMPLATE_PROMPT = "Which goal best matches what you're training for?"
 GOAL_SWIMMING_TYPE_PROMPT = "Where will your main swim goal take place?"
-GOAL_MANUAL_TARGETS_PROMPT = (
-    "Describe your custom target in one line: distance in km, elevation gain in m, "
-    "and target pace in min/km. Example: 100, 1200, 5:30. Use 0 for a value that "
-    "does not apply."
-)
 GOAL_EVENT_DATE_PROMPT = (
     "When is your race? Send the date as YYYY-MM-DD (e.g. 2027-07-11) or "
     "DD/MM/YYYY (e.g. 11/07/2027), or tap below if you don't have a date yet."
@@ -71,8 +66,8 @@ def goal_metric_prompt(field: str) -> str:
             "or tap Skip."
         ),
         "triathlon_finish_time": (
-            "What total finish time are you targeting? Send H:MM:SS, for example "
-            "2:45:00, or tap Skip."
+            "What total finish time are you targeting? Send hours and minutes as "
+            "H:MM, for example 2:45, or tap Skip."
         ),
     }
     return prompts[field]
@@ -130,11 +125,6 @@ ADD_WORKOUT_REQUEST = (
     "I will read the visible metrics, show you what I found, and only save it "
     "after you confirm."
 )
-MOBILE_SYNC_UNAVAILABLE = "iPhone workout sync is not enabled right now."
-IPHONE_DISCONNECTED = (
-    "Your iPhone connection has been disconnected. The app can no longer sync workouts."
-)
-IPHONE_NOT_CONNECTED = "There is no active iPhone connection to disconnect."
 WEEKLY_PLAN_UNAVAILABLE = (
     "I could not create a weekly plan right now. No plan was saved. Please try again "
     "in a moment."
@@ -148,22 +138,11 @@ _ONBOARDING_FIELD_LABELS = {
     "gender": "category",
     "weight_kg": "weight",
     "height_cm": "height",
+    "timezone": "timezone",
     "availability_text": "availability",
     "health_limitations_text": "training limitations",
 }
 ONBOARDING_MODIFICATION_FALLBACK = "Your athlete data has been updated."
-
-
-def iphone_pairing_code(code: str, expires_at: datetime) -> str:
-    """Render a short-lived pairing code without logging or persisting it here."""
-
-    expires_utc = expires_at.astimezone(UTC).strftime("%H:%M UTC")
-    return (
-        "Open Coach Health Sync on your iPhone and enter this one-time pairing "
-        "code:\n\n"
-        f"<code>{escape(code)}</code>\n\n"
-        f"It expires at {expires_utc}. Keep this code private."
-    )
 
 
 def onboarding_modification_response(confirmation: str | None) -> str:
@@ -200,6 +179,10 @@ PROFILE_WEIGHT_INTAKE = (
 )
 PROFILE_HEIGHT_INTAKE = (
     "What is your height in centimeters? Send a whole number from 120 to 230."
+)
+PROFILE_TIMEZONE_INTAKE = (
+    "What is your IANA timezone? Send a value such as Europe/Madrid. This lets "
+    "the coach use your local Monday when it plans your week."
 )
 AVAILABILITY_INTAKE = (
     "Tell me about your weekly training availability in your own words.\n\n"
@@ -244,8 +227,8 @@ HEALTH_LIMITATIONS_INTAKE = (
 )
 TRAINING_HISTORY_IMPORT = (
     "Optional: add your workouts from the last 3 months so future coaching can "
-    "use your actual training data. Choose whether to upload a workout file, "
-    "connect your phone, or skip for now. Only workout data is imported."
+    "use your actual training data. Upload a workout file or skip for now. "
+    "Only workout data is imported."
 )
 TRAINING_HISTORY_FILE_PROMPT = (
     "Send an Apple Health export ZIP or a TCX workout file containing workouts "
@@ -326,8 +309,7 @@ def weekly_plan_readiness(readiness: PlanReadiness) -> str:
         f"session{'' if readiness.total_session_count == 1 else 's'} on "
         f"{readiness.total_active_day_count} "
         f"day{'' if readiness.total_active_day_count == 1 else 's'}.\n\n"
-        "Sync your iPhone, or import an Apple Health export or TCX file, then "
-        "try again."
+        "Import an Apple Health export or TCX file, then try again."
     )
 
 
@@ -370,6 +352,7 @@ PROFILE_PERSONAL = "Choose the personal detail to change."
 PROFILE_BIRTH_YEAR = "Send your birth year."
 PROFILE_WEIGHT = "Send your weight in kilograms."
 PROFILE_HEIGHT = "Send your height in centimeters."
+PROFILE_TIMEZONE = "Send your IANA timezone, for example Europe/Madrid."
 PROFILE_CATEGORY = "Choose your category."
 PROFILE_SAVED = "Saved: {field}."
 GOAL_CATALOG_EXPANSION_PROGRESS = (
@@ -398,6 +381,7 @@ VALIDATION_ERRORS: dict[str, str] = {
     "invalid_height_cm": (
         "Enter your height in centimeters as a whole number from 120 to 230."
     ),
+    "invalid_timezone": "Send a valid IANA timezone, for example Europe/Madrid.",
     "invalid_event_date": ("Enter a future race date as YYYY-MM-DD or DD/MM/YYYY."),
     "apple_health_import_disabled": ("Apple Health import is currently unavailable."),
     "import_already_active": ("An Apple Health import is already in progress."),
@@ -627,6 +611,7 @@ def persisted_profile(profile: Mapping[str, Any]) -> str:
             f"Category: {_display(profile.get('gender'))}",
             f"Weight: {_optional_metric(profile.get('weight_kg'), 'kg')}",
             f"Height: {_optional_metric(profile.get('height_cm'), 'cm')}",
+            f"Timezone: {_display(profile.get('timezone'))}",
         ]
         for label, key in (
             ("Availability", "availability_text"),
@@ -656,7 +641,6 @@ def persisted_profile(profile: Mapping[str, Any]) -> str:
             lines.append(
                 f"Event date: {_readable_date(training_goal.get('event_date'))}"
             )
-            lines.append(f"Status: {_plain_display(training_goal.get('status'))}")
         if isinstance(equipment, (list, tuple)) and equipment:
             rows: list[tuple[str, str, str]] = []
             for item in equipment:
@@ -737,7 +721,6 @@ def profile_setting_prompt(
     """Add the saved value to an edit prompt without changing stored data."""
 
     labels = {
-        ProfileSettingsStep.GOAL_OUTCOME: "Current outcome",
         ProfileSettingsStep.GOAL_DATE: "Current event date",
         ProfileSettingsStep.AVAILABILITY: "Current availability",
         ProfileSettingsStep.HEALTH: "Current training limitations",

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import logging
 import hashlib
 import json
+import logging
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -63,7 +63,12 @@ class WeeklyPlanningResult:
     """Safe service outcome consumed by the deterministic Telegram layer."""
 
     kind: Literal[
-        "created", "existing", "insufficient", "unavailable", "availability_conflict"
+        "created",
+        "existing",
+        "insufficient",
+        "unavailable",
+        "availability_conflict",
+        "timezone_required",
     ]
     plan: WeeklyPlan | None = None
     readiness: PlanReadiness | None = None
@@ -91,6 +96,10 @@ def _confirmed_availability(profile: object) -> dict[str, object] | None:
     raw = getattr(profile, "weekly_availability_jsonb", None)
     if not isinstance(raw, dict):
         return None
+    try:
+        return ConfirmedWeeklyAvailability.model_validate(raw).model_dump(mode="json")
+    except ValidationError:
+        return None
 
 
 def _planning_input_digest(
@@ -101,6 +110,7 @@ def _planning_input_digest(
 ) -> str:
     """Digest all structured planner inputs, never raw profile text."""
 
+    raw_event_date = getattr(goal, "event_date", None)
     payload = {
         "evidence": evidence_snapshot,
         "goal": {
@@ -109,9 +119,7 @@ def _planning_input_digest(
                 getattr(goal, "supporting_goal_template_id", None)
             ),
             "event_date": (
-                getattr(goal, "event_date", None).isoformat()
-                if getattr(goal, "event_date", None) is not None
-                else None
+                raw_event_date.isoformat() if isinstance(raw_event_date, date) else None
             ),
             "targets": {
                 name: getattr(goal, name, None)
@@ -130,10 +138,6 @@ def _planning_input_digest(
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
-    try:
-        return ConfirmedWeeklyAvailability.model_validate(raw).model_dump(mode="json")
-    except ValidationError:
-        return None
 
 
 def _plan_fits_availability(plan: WeeklyPlan, availability: dict[str, object]) -> bool:
@@ -290,6 +294,8 @@ class WeeklyPlanningService:
             )
             if user is None:
                 return WeeklyPlanningResult(kind="unavailable")
+            if not user.timezone:
+                return WeeklyPlanningResult(kind="timezone_required")
 
             week_start = next_week_start(now, user.timezone)
             profiles = ProfileRepository(session)
@@ -376,7 +382,6 @@ class WeeklyPlanningService:
                 "week_start": week_start.isoformat(),
                 "goal": {
                     "main_goal": goal.main_goal if goal is not None else None,
-                    "target_outcome": goal.target_outcome if goal is not None else None,
                     "event_date": (
                         goal.event_date.isoformat()
                         if goal is not None and goal.event_date is not None
@@ -427,7 +432,6 @@ class WeeklyPlanningService:
                     for capability in capabilities
                 ],
                 "recent_evidence": evidence_snapshot["recent_evidence"],
-                "baselines": evidence_snapshot["baselines"],
                 "self_reported_baseline": (
                     self_reported_baseline.model_dump(mode="json", exclude_none=True)
                     if self_reported_baseline is not None
@@ -447,7 +451,9 @@ class WeeklyPlanningService:
                 athlete_id=user.id, week_start=week_start
             )
             if existing is not None and existing.input_digest == input_digest:
-                return WeeklyPlanningResult(kind="existing", plan=_plan_schema(existing))
+                return WeeklyPlanningResult(
+                    kind="existing", plan=_plan_schema(existing)
+                )
             return _PlanningInput(
                 athlete_id=user.id,
                 week_start=week_start,

@@ -82,10 +82,6 @@ def test_workout_create_requires_positive_duration_and_matching_details() -> Non
             {"cycling_type": CyclingType.ROAD, "max_speed_kph": -1},
         ),
         (
-            HikingWorkoutDetailsData,
-            {"hiking_type": HikingType.HIKING, "pack_weight_kg": -1},
-        ),
-        (
             SwimmingWorkoutDetailsData,
             {
                 "swimming_environment": SwimmingEnvironment.OPEN_WATER,

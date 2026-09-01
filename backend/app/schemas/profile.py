@@ -4,7 +4,7 @@ from datetime import date
 
 from pydantic import BaseModel
 
-from app.domain.enums import AthleteGender, TrainingGoalStatus
+from app.domain.enums import AthleteGender
 from app.schemas.capabilities import CapabilityAccessItem
 
 
@@ -14,7 +14,6 @@ class PersistedTrainingGoalData(BaseModel):
     secondary_priority: str | None = None
     primary_template: str | None = None
     supporting_template: str | None = None
-    status: TrainingGoalStatus
     target_distance_km: float | None = None
     target_elevation_m: float | None = None
     target_pace_seconds_per_km: float | None = None
@@ -28,6 +27,7 @@ class PersistedMandatoryProfileData(BaseModel):
     gender: AthleteGender
     weight_kg: float
     height_cm: float
+    timezone: str | None = None
     availability_text: str | None = None
     equipment_access: tuple[CapabilityAccessItem, ...] = ()
     health_limitations_text: str | None = None

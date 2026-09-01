@@ -25,7 +25,8 @@ class WeeklyTrainingPlanRepository:
         return cast(
             WeeklyTrainingPlan | None,
             await self._session.scalar(
-                select(WeeklyTrainingPlan).where(
+                select(WeeklyTrainingPlan)
+                .where(
                     WeeklyTrainingPlan.athlete_id == athlete_id,
                     WeeklyTrainingPlan.week_start == week_start,
                     WeeklyTrainingPlan.superseded_at.is_(None),

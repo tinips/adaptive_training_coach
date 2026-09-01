@@ -12,6 +12,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
+from app.bot import keyboards
 from app.schemas.common import TelegramIdentity
 from app.services.onboarding.service import OnboardingService
 
@@ -99,6 +100,7 @@ async def submit_baseline(request: Request) -> dict[str, bool]:
             json={
                 "chat_id": identity.telegram_user_id,
                 "text": "Baseline saved. I have your starting point and will use completed workouts to refine your plan.",
+                "reply_markup": keyboards.completed_onboarding_keyboard().to_dict(),
             },
         )
     return {"ok": True}

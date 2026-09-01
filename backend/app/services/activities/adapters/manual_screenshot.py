@@ -1,10 +1,8 @@
 """Manual (AI-assisted screenshot) payload to canonical activity import mapping.
 
-Companion to ``adapters/healthkit.py``. This path exists because a source
-app can keep a more accurate number privately (real training time, an
-active/total calorie split, pool lap and stroke detail, true per-workout
-heart rate) than it ever exports through HealthKit. See the HealthKit
-adapter's ``_heart_rate_summary`` for the matching gap on that path.
+This path exists because a source app can display more workout detail than
+it includes in a standard export: real training time, active/total calories,
+pool lap and stroke detail, and per-workout heart rate.
 """
 
 from __future__ import annotations
@@ -21,10 +19,8 @@ from app.services.activities.normalization import workout_title
 def from_manual_screenshot(payload: ManualWorkoutImportRequest) -> ActivityImportData:
     """Map one AI-extracted screenshot workout to the canonical import shape.
 
-    ``calories_kcal`` prefers active-only calories to match what HealthKit
-    sync stores for the same field (active energy burned), so the two
-    sources stay comparable; total calories are not currently persisted
-    anywhere the app can read them back.
+    ``calories_kcal`` prefers active-only calories. Total calories are not
+    currently persisted anywhere the app can read them back.
     """
 
     discipline = Discipline(payload.discipline)

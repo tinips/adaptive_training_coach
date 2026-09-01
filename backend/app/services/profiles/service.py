@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.repositories.athlete_capabilities import AthleteCapabilityRepository
 from app.repositories.profiles import ProfileRepository
 from app.repositories.training_catalog import TrainingCatalogRepository
+from app.repositories.users import UserRepository
 from app.schemas.capabilities import CapabilityAccessItem
 from app.schemas.profile import PersistedMandatoryProfileData, PersistedTrainingGoalData
 
@@ -35,6 +36,7 @@ class ProfileService:
             capabilities = await AthleteCapabilityRepository(session).available(
                 athlete_id=user_id
             )
+            user = await UserRepository(session).get_by_id(user_id)
             goal = await ProfileRepository(session).get_training_goal(user_id=user_id)
             catalog = TrainingCatalogRepository(session)
             primary_template = (
@@ -54,6 +56,7 @@ class ProfileService:
                 gender=profile.gender,
                 weight_kg=profile.weight_kg,
                 height_cm=profile.height_cm,
+                timezone=user.timezone if user is not None else None,
                 availability_text=profile.availability_text,
                 equipment_access=tuple(
                     CapabilityAccessItem(
@@ -79,7 +82,6 @@ class ProfileService:
                             if supporting_template is not None
                             else None
                         ),
-                        status=goal.status,
                         target_distance_km=goal.target_distance_km,
                         target_elevation_m=goal.target_elevation_m,
                         target_pace_seconds_per_km=goal.target_pace_seconds_per_km,

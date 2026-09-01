@@ -61,10 +61,8 @@ from app.domain.enums import (
     SwimmingEnvironment,
     SwimmingStroke,
     TrainingFileFormat,
-    TrainingGoalStatus,
     TrainingImportContext,
     UserStatus,
-    WorkoutFlowStep,
 )
 
 
@@ -203,25 +201,11 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         passive_deletes=True,
         lazy="raise",
     )
-    workout_flow_session: Mapped[WorkoutFlowSession | None] = relationship(
-        back_populates="user",
-        cascade="all, delete-orphan",
-        passive_deletes=True,
-        lazy="raise",
-        uselist=False,
-    )
     llm_usage: Mapped[list[LLMUsage]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
         passive_deletes=True,
         lazy="raise",
-    )
-    mobile_sync_credential: Mapped[MobileSyncCredential | None] = relationship(
-        back_populates="user",
-        cascade="all, delete-orphan",
-        passive_deletes=True,
-        lazy="raise",
-        uselist=False,
     )
 
 
@@ -301,7 +285,6 @@ class AthleteProfile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "athlete_profiles"
     __table_args__ = (
         UniqueConstraint("user_id", name="uq_athlete_profiles_user_id"),
-        CheckConstraint("age >= 16 AND age <= 100", name="age_range"),
         CheckConstraint(
             "birth_year IS NULL OR (birth_year >= 1940 AND birth_year <= 2008)",
             name="birth_year_range",
@@ -325,7 +308,6 @@ class AthleteProfile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
     )
-    age: Mapped[int] = mapped_column(SmallInteger, nullable=False)
     birth_year: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
     gender: Mapped[AthleteGender | None] = mapped_column(
         persisted_enum(AthleteGender, name="athlete_gender", length=24),
@@ -358,7 +340,6 @@ class TrainingGoal(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     event_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     main_goal: Mapped[str] = mapped_column(String(500), nullable=False)
-    target_outcome: Mapped[str] = mapped_column(String(500), nullable=False)
     target_distance_km: Mapped[float | None] = mapped_column(Float, nullable=True)
     target_elevation_m: Mapped[float | None] = mapped_column(Float, nullable=True)
     target_pace_seconds_per_km: Mapped[float | None] = mapped_column(
@@ -387,17 +368,6 @@ class TrainingGoal(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         Uuid(as_uuid=True),
         ForeignKey("goal_templates.id", ondelete="RESTRICT"),
         nullable=True,
-    )
-    original_description: Mapped[str] = mapped_column(Text, nullable=False)
-    status: Mapped[TrainingGoalStatus] = mapped_column(
-        persisted_enum(
-            TrainingGoalStatus,
-            name="training_goal_status",
-            length=16,
-        ),
-        default=TrainingGoalStatus.CONFIRMED,
-        server_default=TrainingGoalStatus.CONFIRMED.value,
-        nullable=False,
     )
     user: Mapped[User] = relationship(
         back_populates="training_goal",
@@ -703,11 +673,6 @@ class Workout(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
         lazy="selectin",
-    )
-    workout_flow_sessions: Mapped[list[WorkoutFlowSession]] = relationship(
-        back_populates="workout",
-        passive_deletes=True,
-        lazy="raise",
     )
     import_jobs: Mapped[list[AppleHealthImportJob]] = relationship(
         back_populates="workout",
@@ -1047,10 +1012,6 @@ class HikingWorkoutDetails(Base):
             "max_heart_rate IS NULL OR max_heart_rate >= 0",
             name="max_heart_rate_nonnegative",
         ),
-        CheckConstraint(
-            "pack_weight_kg IS NULL OR pack_weight_kg >= 0",
-            name="pack_weight_nonnegative",
-        ),
     )
 
     workout_id: Mapped[uuid.UUID] = mapped_column(
@@ -1082,7 +1043,6 @@ class HikingWorkoutDetails(Base):
     )
     average_heart_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
     max_heart_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
-    pack_weight_kg: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     workout: Mapped[Workout] = relationship(
         back_populates="hiking_details",
@@ -1175,10 +1135,6 @@ class PoolSwimmingDetails(Base):
             name="total_lengths_nonnegative",
         ),
         CheckConstraint(
-            "average_swolf IS NULL OR average_swolf >= 0",
-            name="average_swolf_nonnegative",
-        ),
-        CheckConstraint(
             "total_strokes IS NULL OR total_strokes >= 0",
             name="total_strokes_nonnegative",
         ),
@@ -1196,7 +1152,6 @@ class PoolSwimmingDetails(Base):
         persisted_enum(SwimmingStroke, name="swimming_stroke", length=16),
         nullable=True,
     )
-    average_swolf: Mapped[float | None] = mapped_column(Float, nullable=True)
     total_strokes: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     swimming_details: Mapped[SwimmingWorkoutDetails] = relationship(
@@ -1493,10 +1448,6 @@ class ActivitySourceLink(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         json_document(),
         nullable=True,
     )
-    deleted_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
-    )
     file_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     import_job_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True),
@@ -1599,121 +1550,6 @@ class WorkoutHeartRateObservation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
 
 
-class WorkoutFlowSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
-    """Durable state for one user's resumable workout flow."""
-
-    __tablename__ = "workout_flow_sessions"
-    __table_args__ = (
-        UniqueConstraint(
-            "user_id",
-            name="uq_workout_flow_sessions_user_id",
-        ),
-        CheckConstraint(
-            "pending_manual_average_heart_rate IS NULL "
-            "OR (pending_manual_average_heart_rate >= 30 "
-            "AND pending_manual_average_heart_rate <= 250)",
-            name="pending_manual_average_heart_rate_range",
-        ),
-    )
-
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid(as_uuid=True),
-        ForeignKey("users.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    workout_id: Mapped[uuid.UUID | None] = mapped_column(
-        Uuid(as_uuid=True),
-        ForeignKey("workouts.id", ondelete="SET NULL"),
-        nullable=True,
-    )
-    state: Mapped[WorkoutFlowStep] = mapped_column(
-        persisted_enum(
-            WorkoutFlowStep,
-            name="workout_flow_step",
-            length=32,
-        ),
-        default=WorkoutFlowStep.WAITING_FOR_FILE,
-        server_default=WorkoutFlowStep.WAITING_FOR_FILE.value,
-        nullable=False,
-    )
-    pending_manual_average_heart_rate: Mapped[int | None] = mapped_column(
-        Integer,
-        nullable=True,
-    )
-    pending_discomfort_description: Mapped[str | None] = mapped_column(
-        Text,
-        nullable=True,
-    )
-    completed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
-    )
-
-    user: Mapped[User] = relationship(
-        back_populates="workout_flow_session",
-        lazy="raise",
-    )
-    workout: Mapped[Workout | None] = relationship(
-        back_populates="workout_flow_sessions",
-        lazy="raise",
-    )
-
-    @property
-    def activity_id(self) -> uuid.UUID | None:
-        return self.workout_id
-
-    @activity_id.setter
-    def activity_id(self, value: uuid.UUID | None) -> None:
-        self.workout_id = value
-
-
-class MobileSyncCredential(UUIDPrimaryKeyMixin, TimestampMixin, Base):
-    """One revocable iPhone companion credential for an owned athlete."""
-
-    __tablename__ = "mobile_sync_credentials"
-    __table_args__ = (
-        UniqueConstraint("user_id", name="uq_mobile_sync_credentials_user_id"),
-        UniqueConstraint(
-            "pairing_code_hash",
-            name="uq_mobile_sync_credentials_pairing_code_hash",
-        ),
-        Index(
-            "ix_mobile_sync_credentials_device_token_hash",
-            "device_token_hash",
-        ),
-        CheckConstraint(
-            "pairing_code_hash IS NULL OR pairing_code_expires_at IS NOT NULL",
-            name="pairing_code_requires_expiry",
-        ),
-    )
-
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid(as_uuid=True),
-        ForeignKey("users.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    pairing_code_hash: Mapped[str | None] = mapped_column(CHAR(64), nullable=True)
-    pairing_code_expires_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
-    )
-    device_token_hash: Mapped[str | None] = mapped_column(CHAR(64), nullable=True)
-    installation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
-    revoked_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
-    )
-    last_used_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
-    )
-
-    user: Mapped[User] = relationship(
-        back_populates="mobile_sync_credential",
-        lazy="raise",
-    )
-
-
 class LLMUsage(UUIDPrimaryKeyMixin, Base):
     """Safe rate-limit and usage metadata; never raw prompts or answers."""
 
@@ -1784,7 +1620,7 @@ WorkoutSourceLink = ActivitySourceLink
 __all__ = [
     "Activity",
     "ActivitySourceLink",
-    "AppleHealthImportJob",
+    "AppleHealthImportJob",
     "AthleteCapability",
     "AthleteProfile",
     "AthleteSelfReportedBaseline",
@@ -1797,7 +1633,6 @@ __all__ = [
     "HikingWorkoutDetails",
     "LLMProviderMode",
     "LLMUsage",
-    "MobileSyncCredential",
     "OnboardingSession",
     "OtherWorkoutDetails",
     "PoolSwimmingDetails",
@@ -1809,7 +1644,6 @@ __all__ = [
     "User",
     "WeeklyTrainingPlan",
     "Workout",
-    "WorkoutFlowSession",
     "WorkoutHeartRateObservation",
     "WorkoutSourceLink",
 ]

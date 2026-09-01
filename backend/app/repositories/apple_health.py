@@ -175,7 +175,6 @@ class AppleHealthRepository:
                 Workout.athlete_id == user_id,
                 ActivitySourceLink.user_id == user_id,
                 ActivitySourceLink.source == ActivitySource.APPLE_HEALTH,
-                ActivitySourceLink.deleted_at.is_(None),
             )
             .group_by(Workout.discipline)
         )
@@ -192,7 +191,6 @@ class AppleHealthRepository:
             select(ActivitySourceLink.id).where(
                 ActivitySourceLink.workout_id == Workout.id,
                 ActivitySourceLink.user_id == user_id,
-                ActivitySourceLink.deleted_at.is_(None),
             )
         )
         rows = await self._session.execute(
@@ -230,7 +228,6 @@ class AppleHealthRepository:
                 ActivitySourceLink.user_id == user_id,
                 AppleHealthImportJob.user_id == user_id,
                 AppleHealthImportJob.status == AppleHealthImportStatus.SUCCEEDED,
-                ActivitySourceLink.deleted_at.is_(None),
             )
         )
         result = await self._session.scalars(
@@ -276,7 +273,6 @@ class AppleHealthRepository:
                 Workout.athlete_id == user_id,
                 ActivitySourceLink.user_id == user_id,
                 ActivitySourceLink.file_sha256 == file_sha256,
-                ActivitySourceLink.deleted_at.is_(None),
             )
         )
         return int(count or 0)

@@ -19,7 +19,6 @@ from sqlalchemy.ext.asyncio import (
 from app.config import Settings
 from app.db.base import Base
 from app.db.models import (
-    AthleteBaselineAssessment,
     GoalTemplate,
     GoalTemplateContext,
     LLMUsage,
@@ -135,9 +134,7 @@ async def _seed_target_goal(
         TrainingGoal(
             user_id=user.id,
             main_goal="A synthetic target goal",
-            target_outcome="Finish well",
             secondary_priority=None,
-            original_description="Synthetic goal",
             goal_template_id=primary.id,
             supporting_goal_template_id=supporting_goal_template_id,
         )
@@ -244,11 +241,10 @@ async def test_preflight_blocks_insufficient_recent_target_evidence(
     )
     async with factory() as session:
         assert (await session.scalars(select(WeeklyTrainingPlan))).all() == []
-        assert (await session.scalars(select(AthleteBaselineAssessment))).all() == []
 
 
 @pytest.mark.asyncio
-async def test_planner_saves_one_plan_and_creates_missing_target_baseline(
+async def test_planner_saves_one_plan_for_the_target_disciplines(
     database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -278,12 +274,10 @@ async def test_planner_saves_one_plan_and_creates_missing_target_baseline(
     assert await planner.has_plan_for_next_week(_identity()) is True
     async with factory() as session:
         plans = (await session.scalars(select(WeeklyTrainingPlan))).all()
-        baselines = (await session.scalars(select(AthleteBaselineAssessment))).all()
         usages = (await session.scalars(select(LLMUsage))).all()
     assert len(plans) == 1
     assert plans[0].week_start == date(2026, 8, 24)
     assert "Private workout title" not in str(plans[0].evidence_snapshot_jsonb)
-    assert [item.discipline for item in baselines] == [Discipline.RUNNING]
     assert len(usages) == 1
     assert usages[0].feature == "WEEKLY_PLAN"
 
@@ -334,15 +328,11 @@ async def test_planner_accepts_sessions_from_the_full_30_day_window(
     assert result.kind == "created"
     async with factory() as session:
         plan = await session.scalar(select(WeeklyTrainingPlan))
-        baseline = await session.scalar(select(AthleteBaselineAssessment))
     assert plan is not None
     assert (
         plan.evidence_snapshot_jsonb["window"]["started_at"]
         == (NOW - timedelta(days=30)).isoformat()
     )
-    assert baseline is not None
-    assert baseline.analysis_started_at.replace(tzinfo=UTC) == NOW - timedelta(days=30)
-    assert baseline.analysis_ended_at.replace(tzinfo=UTC) == NOW
 
 
 @pytest.mark.asyncio
@@ -433,16 +423,11 @@ async def test_an_outage_is_logged_as_a_provider_error(
 
 
 @pytest.mark.asyncio
-async def test_the_frozen_baseline_uses_the_window_the_gate_evaluated(
+async def test_planner_uses_the_full_evidence_window(
     database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Three runs spread across the 30 day window must all reach the baseline.
-
-    Under the old 14-days-before-the-latest-workout window only the most
-    recent run fell inside, so a permanent number was frozen from one session
-    after a check that had seen three.
-    """
+    """Three runs spread across the 30-day window are all planning evidence."""
 
     _, factory = database
     monkeypatch.setattr("app.services.weekly_planning.service.utc_now", lambda: NOW)
@@ -459,14 +444,10 @@ async def test_the_frozen_baseline_uses_the_window_the_gate_evaluated(
 
     assert result.kind == "created"
     async with factory() as session:
-        baseline = await session.scalar(
-            select(AthleteBaselineAssessment).where(
-                AthleteBaselineAssessment.athlete_id == athlete_id
-            )
-        )
-    assert baseline is not None
-    assert baseline.session_count == 3
-    assert baseline.analysis_started_at is not None
+        plan = await session.scalar(select(WeeklyTrainingPlan))
+    assert plan is not None
+    evidence = plan.evidence_snapshot_jsonb["recent_evidence"]
+    assert evidence["RUNNING"]["session_count"] == 3
 
 
 @pytest.mark.asyncio

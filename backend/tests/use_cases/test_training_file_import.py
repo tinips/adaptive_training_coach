@@ -114,23 +114,6 @@ def service(
     )
 
 
-class BaselineAssessmentRecorder:
-    def __init__(self) -> None:
-        self.calls: list[tuple[uuid.UUID, datetime]] = []
-
-    async def create_missing_baselines_for_goal_disciplines_in_session(
-        self,
-        session: AsyncSession,
-        *,
-        athlete_id: uuid.UUID,
-        calculated_at: datetime | None = None,
-    ) -> tuple[object, ...]:
-        del session
-        assert calculated_at is not None
-        self.calls.append((athlete_id, calculated_at))
-        return ()
-
-
 def write_tcx(
     path: Path,
     *,
@@ -486,16 +469,14 @@ async def test_exact_apple_reimport_keeps_workout_and_observation_counts_stable(
 
 
 @pytest.mark.asyncio
-async def test_successful_imports_assess_missing_baselines_but_duplicates_do_not(
+async def test_successful_imports_do_not_duplicate_existing_workouts(
     persistence: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
     tmp_path: Path,
 ) -> None:
     _, factory = persistence
     owner = identity(9114)
-    user_id = await stage_user(factory, owner=owner)
+    await stage_user(factory, owner=owner)
     import_service = service(factory, temp_dir=tmp_path / "temporary")
-    recorder = BaselineAssessmentRecorder()
-    import_service._baseline_assessments = recorder
 
     tcx = write_tcx(tmp_path / "baseline.tcx", activity_id="2026-07-28T11:00:00Z")
     first_tcx, _ = await upload(
@@ -531,12 +512,11 @@ async def test_successful_imports_assess_missing_baselines_but_duplicates_do_not
     assert duplicate_tcx.exact_file_duplicate is True
     assert unchanged_tcx.exact_file_duplicate is False
     assert unchanged_tcx.activities_imported == 0
-    # A new file hash updates provenance, but it must not be treated as new
-    # workout evidence or create/recalculate a baseline.
+    # A new file hash updates provenance, but it must not be treated as a new
+    # workout.
     assert unchanged_tcx.activities_updated == 1
     assert unchanged_tcx.activities_skipped == 0
     assert apple.exact_file_duplicate is False
-    assert recorder.calls == [(user_id, NOW), (user_id, NOW)]
 
 
 @pytest.mark.asyncio

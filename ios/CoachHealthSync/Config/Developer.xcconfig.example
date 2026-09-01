@@ -1,7 +1,0 @@
-// Copy this file to Developer.xcconfig before building locally.
-// Use an HTTPS tunnel URL that reaches your local Coach API. Do not commit the
-// copied Developer.xcconfig file.
-// NOTE: .xcconfig files treat `//` as a comment delimiter, so a bare
-// "https://host" value is silently truncated to "https:". Insert an empty
-// macro between the two slashes to escape it, as shown below.
-COACH_API_BASE_URL = https:/$()/maturity-founder-exemplary.ngrok-free.dev

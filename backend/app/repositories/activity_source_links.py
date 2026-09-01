@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping
-from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -17,7 +16,7 @@ from app.services.activities.contracts import (
     ActivityImportData,
     ActivitySourceConflictError,
 )
-from app.services.activities.normalization import as_utc, json_safe
+from app.services.activities.normalization import json_safe
 
 
 class ActivitySourceLinkRepository:
@@ -140,27 +139,6 @@ class ActivitySourceLinkRepository:
         if job is not None and job.workout_id != workout.id:
             job.workout_id = workout.id
 
-    async def mark_deleted(
-        self,
-        *,
-        user_id: uuid.UUID,
-        source: ActivitySource,
-        external_id: str,
-        deleted_at: datetime,
-    ) -> bool:
-        """Soft-delete one exact source identity."""
-
-        link = await self._get(
-            user_id=user_id,
-            source=source,
-            external_id=external_id,
-        )
-        if link is None or link.deleted_at is not None:
-            return False
-        link.deleted_at = as_utc(deleted_at)
-        await self._session.flush()
-        return True
-
     async def _get(
         self,
         *,
@@ -206,7 +184,6 @@ def _source_link_values(
         "raw_sport": incoming.raw_sport,
         "raw_sub_sport": incoming.raw_sub_sport,
         "source_metadata_jsonb": json_safe(incoming.source_metadata),
-        "deleted_at": None,
         "file_sha256": file_sha256,
         "import_job_id": import_job_id,
     }

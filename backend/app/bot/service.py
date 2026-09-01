@@ -27,11 +27,6 @@ from app.schemas.onboarding_service import OnboardingServiceResult
 from app.schemas.profile_settings import ProfileSettingsResult
 from app.schemas.training_import import TelegramDocumentUpload
 from app.services.accounts import AccountQueryService, AccountService
-from app.services.mobile_sync import (
-    MobileSyncDisabledError,
-    MobileSyncIdentityNotFoundError,
-    PairingCodeIssue,
-)
 from app.services.onboarding import OnboardingApplicationError, OnboardingService
 from app.services.profiles import ProfileService
 from app.services.training_import import TrainingFileImportOutcome
@@ -74,16 +69,6 @@ class WeeklyPlanningBotPort(Protocol):
     ) -> WeeklyPlanningResult: ...
 
 
-class MobileHealthSyncBotPort(Protocol):
-    """Mobile sync boundary consumed by deterministic Telegram commands."""
-
-    async def issue_pairing_code(
-        self, identity: TelegramIdentity
-    ) -> PairingCodeIssue: ...
-
-    async def revoke_device(self, identity: TelegramIdentity) -> bool: ...
-
-
 class CoachBotApplicationService:
     def __init__(
         self,
@@ -96,8 +81,6 @@ class CoachBotApplicationService:
         apple_health_enabled: bool = True,
         tcx_enabled: bool = True,
         planning: WeeklyPlanningBotPort | None = None,
-        mobile_sync: MobileHealthSyncBotPort | None = None,
-        mobile_sync_enabled: bool = False,
         telegram_web_app_url: str | None = None,
     ) -> None:
         self._onboarding = onboarding
@@ -108,8 +91,6 @@ class CoachBotApplicationService:
         self._apple_health_enabled = apple_health_enabled
         self._tcx_enabled = tcx_enabled
         self._planning = planning
-        self._mobile_sync = mobile_sync
-        self._mobile_sync_enabled = mobile_sync_enabled
         self._telegram_web_app_url = telegram_web_app_url
 
     async def handle_agent_input(
@@ -169,8 +150,6 @@ class CoachBotApplicationService:
             "/help",
             "/profile",
             "/add_workout",
-            "/connect_iphone",
-            "/disconnect_iphone",
             "/plan_next_week",
             "/view_weekly_plan",
             "/cancel",
@@ -217,8 +196,6 @@ class CoachBotApplicationService:
             "/help": self._help,
             "/profile": self.profile,
             "/add_workout": self.add_workout,
-            "/connect_iphone": self.connect_iphone,
-            "/disconnect_iphone": self.disconnect_iphone,
             "/plan_next_week": self.plan_next_week,
             "/view_weekly_plan": self.view_weekly_plan,
             "/cancel": self.cancel,
@@ -462,9 +439,6 @@ class CoachBotApplicationService:
                 identity, callback_data.removeprefix("ob:v1:goal:template:")
             )
             return await self._render_onboarding(identity, result)
-        if callback_data == "ob:v1:goal:manual":
-            result = await self._onboarding.choose_manual_goal(identity)
-            return await self._render_onboarding(identity, result)
         if callback_data == "ob:v1:goal:metric:skip":
             return await self._render_onboarding(
                 identity, await self._onboarding.skip_goal_metric(identity)
@@ -508,27 +482,6 @@ class CoachBotApplicationService:
                 messages.TRAINING_HISTORY_FILE_PROMPT,
                 keyboards.training_history_import_keyboard(),
             )
-        if callback_data == "ob:v1:history:phone":
-            response = await self.connect_iphone(identity)
-            if response.text in {
-                messages.MOBILE_SYNC_UNAVAILABLE,
-                messages.NOT_FOUND,
-            }:
-                return TelegramResponse(
-                    f"{response.text}\n\n{messages.TRAINING_HISTORY_IMPORT}",
-                    keyboards.training_history_import_keyboard(),
-                )
-            await self._onboarding.complete_training_history(identity)
-            return TelegramResponse(
-                f"{response.text}\n\n{messages.ONBOARDING_COMPLETED}",
-                keyboards.phone_pairing_keyboard(),
-            )
-        if callback_data == "ob:v1:history:phone:resend":
-            response = await self.connect_iphone(identity)
-            return replace(response, keyboard=keyboards.phone_pairing_keyboard())
-        if callback_data == "ob:v1:phone:connect":
-            response = await self.connect_iphone(identity)
-            return replace(response, keyboard=keyboards.phone_pairing_keyboard())
         if callback_data == "ob:v1:cancel":
             return TelegramResponse(
                 messages.CANCEL_CONFIRM, keyboards.cancel_confirmation_keyboard()
@@ -554,38 +507,24 @@ class CoachBotApplicationService:
             messages.ADD_WORKOUT_REQUEST, keyboards.add_workout_keyboard()
         )
 
-    async def connect_iphone(self, identity: TelegramIdentity) -> TelegramResponse:
-        """Issue a short-lived, one-time code for the companion iPhone app."""
-
-        if not self._mobile_sync_enabled or self._mobile_sync is None:
-            return TelegramResponse(messages.MOBILE_SYNC_UNAVAILABLE)
-        try:
-            pairing = await self._mobile_sync.issue_pairing_code(identity)
-        except MobileSyncDisabledError:
-            return TelegramResponse(messages.MOBILE_SYNC_UNAVAILABLE)
-        except MobileSyncIdentityNotFoundError:
-            return TelegramResponse(messages.NOT_FOUND)
-        return TelegramResponse(
-            messages.iphone_pairing_code(pairing.code, pairing.expires_at)
-        )
-
-    async def disconnect_iphone(self, identity: TelegramIdentity) -> TelegramResponse:
-        """Revoke the paired iPhone's opaque bearer token."""
-
-        if not self._mobile_sync_enabled or self._mobile_sync is None:
-            return TelegramResponse(messages.MOBILE_SYNC_UNAVAILABLE)
-        try:
-            revoked = await self._mobile_sync.revoke_device(identity)
-        except MobileSyncDisabledError:
-            return TelegramResponse(messages.MOBILE_SYNC_UNAVAILABLE)
-        return TelegramResponse(
-            messages.IPHONE_DISCONNECTED if revoked else messages.IPHONE_NOT_CONNECTED
-        )
-
     async def plan_next_week(self, identity: TelegramIdentity) -> TelegramResponse:
         if self._planning is None:
             return TelegramResponse(messages.WEEKLY_PLAN_UNAVAILABLE)
         result = await self._planning.generate_next_week(identity)
+        if result.kind == "timezone_required":
+            await self._onboarding.open_profile_settings(identity)
+            await self._onboarding.choose_profile_settings(identity, "section:personal")
+            settings = await self._onboarding.choose_profile_settings(
+                identity, "personal:timezone"
+            )
+            response = await self._render_profile_settings(settings, identity)
+            return replace(
+                response,
+                text=(
+                    "Set your timezone before creating a weekly plan.\n\n"
+                    f"{response.text}"
+                ),
+            )
         return self._render_planning(result, viewing=False)
 
     async def view_weekly_plan(self, identity: TelegramIdentity) -> TelegramResponse:
@@ -662,7 +601,7 @@ class CoachBotApplicationService:
                 and isinstance(fields[index], str)
             ):
                 return TelegramResponse(
-                    messages.goal_metric_prompt(fields[index]),
+                    messages.goal_metric_prompt(cast(str, fields[index])),
                     keyboards.profile_goal_metric_keyboard(),
                 )
             return TelegramResponse(messages.GENERIC_ERROR)
@@ -709,9 +648,10 @@ class CoachBotApplicationService:
             "PERSONAL_GENDER": messages.PROFILE_CATEGORY,
             "PERSONAL_WEIGHT": messages.PROFILE_WEIGHT,
             "PERSONAL_HEIGHT": messages.PROFILE_HEIGHT,
+            "PERSONAL_TIMEZONE": messages.PROFILE_TIMEZONE,
         }
         keyboard = (
-            keyboards.profile_goal_keyboard()
+            keyboards.profile_goal_keyboard(result.pending)
             if result.step.value == "GOAL_MENU"
             else (
                 keyboards.profile_goal_date_keyboard()
@@ -720,7 +660,7 @@ class CoachBotApplicationService:
                     keyboards.profile_health_keyboard()
                     if result.step.value == "HEALTH"
                     else (
-                        keyboards.profile_personal_keyboard()
+                        keyboards.profile_personal_keyboard(result.pending)
                         if result.step.value == "PERSONAL_MENU"
                         else (
                             keyboards.profile_settings_gender_keyboard()
@@ -769,6 +709,10 @@ class CoachBotApplicationService:
             ),
             "profile_height_intake": (
                 messages.PROFILE_HEIGHT_INTAKE,
+                keyboards.profile_text_input_keyboard(),
+            ),
+            "profile_timezone_intake": (
+                messages.PROFILE_TIMEZONE_INTAKE,
                 keyboards.profile_text_input_keyboard(),
             ),
             "availability_intake": (
@@ -825,11 +769,6 @@ class CoachBotApplicationService:
             return TelegramResponse(
                 messages.goal_metric_prompt(cast(str, fields[index])),
                 keyboards.goal_metric_keyboard(),
-            )
-        if result.kind == "goal_manual_targets":
-            return TelegramResponse(
-                messages.GOAL_MANUAL_TARGETS_PROMPT,
-                keyboards.profile_text_input_keyboard(),
             )
         if result.kind == "goal_confirmed":
             supporting_options = await self._onboarding.supporting_goal_options(
@@ -961,12 +900,6 @@ class CoachBotApplicationService:
                 keyboards.goal_event_date_keyboard(),
             )
         if result.kind == "profile_validation_error":
-            if result.error_code == "invalid_manual_goal_targets":
-                return TelegramResponse(
-                    "That format is not valid.\n\n"
-                    f"{messages.GOAL_MANUAL_TARGETS_PROMPT}",
-                    keyboards.profile_text_input_keyboard(),
-                )
             return TelegramResponse(
                 messages.validation_error(result.error_code or "invalid_action"),
                 keyboards.profile_text_input_keyboard(),

@@ -43,10 +43,9 @@ class Settings(BaseSettings):
     llm_other_requests_per_hour: int = Field(default=10, ge=1, le=100)
 
     # Send a workout summary screenshot to the bot; a vision model reads the
-    # numbers a source app never exports through HealthKit (see the mobile
-    # HealthKit sync path's known gaps) and the athlete confirms before it is
-    # saved. Uses the same DeepSeek credentials as `llm_api_key`/`llm_base_url`
-    # above, with its own vision-capable model.
+    # visible source-app metrics and the athlete confirms before it is saved.
+    # Uses the same DeepSeek credentials as `llm_api_key`/`llm_base_url` above,
+    # with its own vision-capable model.
     screenshot_import_enabled: bool = False
     llm_vision_model: str = "deepseek-v4-flash-vision-exp"
 
@@ -71,10 +70,6 @@ class Settings(BaseSettings):
     apple_health_import_keep_original_files: bool = False
     tcx_import_enabled: bool = True
     tcx_import_max_size_mb: int = Field(default=25, ge=1, le=100)
-
-    # The iPhone companion proof of concept is deliberately opt-in while the
-    # mobile client and its public HTTPS endpoint are still under development.
-    mobile_sync_enabled: bool = False
 
     fitness_window_days: int = Field(default=14, ge=1, le=90)
     planner_window_days: int = Field(default=30, ge=1, le=90)
@@ -138,7 +133,6 @@ class Settings(BaseSettings):
             "llm_model": self.llm_model,
             "apple_health_import_enabled": self.apple_health_import_enabled,
             "tcx_import_enabled": self.tcx_import_enabled,
-            "mobile_sync_enabled": self.mobile_sync_enabled,
             "fitness_window_days": self.fitness_window_days,
             "planner_window_days": self.planner_window_days,
         }

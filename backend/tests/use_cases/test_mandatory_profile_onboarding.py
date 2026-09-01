@@ -29,7 +29,15 @@ from app.repositories.profiles import ProfileRepository
 from app.repositories.users import UserRepository
 from app.schemas.common import TelegramIdentity
 from app.services.onboarding import OnboardingApplicationError, OnboardingService
+from app.services.onboarding.service import _parse_goal_metric
 from app.training_catalog_seed import catalog_id
+
+
+def test_triathlon_finish_time_uses_hours_and_minutes_only() -> None:
+    assert _parse_goal_metric("triathlon_finish_time", "5:30") == 19_800
+
+    with pytest.raises(ValueError):
+        _parse_goal_metric("triathlon_finish_time", "5:30:00")
 
 
 @pytest_asyncio.fixture
@@ -80,17 +88,20 @@ async def test_cycling_goal_collects_structured_targets(
     assert result.current_step is OnboardingStep.GOAL_METRIC_INTAKE
     assert result.answers["goal_metric_fields"] == [
         "cycling_distance",
+        "elevation",
         "cycling_average_speed",
     ]
-    speed = await service.submit_goal_metric(identity, "100")
+    elevation = await service.submit_goal_metric(identity, "100")
+    assert elevation.current_step is OnboardingStep.GOAL_METRIC_INTAKE
+    speed = await service.submit_goal_metric(identity, "850")
     assert speed.current_step is OnboardingStep.GOAL_METRIC_INTAKE
     completed = await service.submit_goal_metric(identity, "28.5")
     assert completed.current_step is OnboardingStep.GOAL_EVENT_DATE
     async with profile_database() as session:
         goal = await ProfileRepository(session).get_training_goal(user_id=user.id)
     assert goal is not None
-    assert goal.target_outcome == "Road cycling event"
     assert goal.target_distance_km == 100.0
+    assert goal.target_elevation_m == 850.0
     assert goal.target_average_speed_kph == 28.5
 
 
@@ -109,9 +120,7 @@ async def test_supporting_goal_options_exclude_the_current_main_goal(
             user_id=user.id,
             main_goal="Maintain strength",
             event_date=None,
-            target_outcome="Maintain strength",
             secondary_priority=None,
-            original_description="Maintain strength",
             goal_template_id=catalog_id("goal", "ROAD_CYCLING_EVENT"),
         )
 
@@ -181,7 +190,10 @@ async def test_profile_inputs_validate_deterministically_and_then_begin_goal_int
         assert invalid_height.kind == "profile_validation_error"
         assert invalid_height.current_step is OnboardingStep.PROFILE_HEIGHT_INTAKE
 
-    goal_intake = await service.handle_text(identity, "178")
+    timezone = await service.handle_text(identity, "178")
+    assert timezone.kind == "profile_timezone_intake"
+    assert timezone.current_step is OnboardingStep.PROFILE_TIMEZONE_INTAKE
+    goal_intake = await service.handle_text(identity, "Europe/Madrid")
     assert goal_intake.kind == "goal_intake"
     assert goal_intake.current_step is OnboardingStep.GOAL_INTAKE
     assert goal_intake.user_status is UserStatus.ONBOARDING_IN_PROGRESS
@@ -198,6 +210,7 @@ async def test_profile_inputs_validate_deterministically_and_then_begin_goal_int
         assert profile.gender is AthleteGender.FEMALE
         assert profile.weight_kg == 72.5
         assert profile.height_cm == 178.0
+        assert persisted_user.timezone == "Europe/Madrid"
         assert persisted_user.status is UserStatus.ONBOARDING_IN_PROGRESS
         assert onboarding.status is OnboardingStatus.ACTIVE
         assert onboarding.current_step is OnboardingStep.GOAL_INTAKE
@@ -404,9 +417,7 @@ async def test_web_app_baseline_is_goal_adaptive_and_persisted(
             user_id=user.id,
             main_goal="10K race",
             event_date=None,
-            target_outcome="Finish comfortably",
             secondary_priority=None,
-            original_description="10K race",
             goal_template_id=catalog_id("goal", "RUNNING_10K"),
         )
 

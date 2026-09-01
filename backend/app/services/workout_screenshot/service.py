@@ -8,6 +8,7 @@ bot's handlers directly (see ``app/bot/handlers.py``).
 
 from __future__ import annotations
 
+import re
 import secrets
 import time
 import uuid
@@ -59,6 +60,7 @@ class ScreenshotDraft:
 class _PendingDraft:
     telegram_user_id: int
     request: ManualWorkoutImportRequest
+    awaiting_heart_rate: bool = False
     created_at: float = field(default_factory=time.monotonic)
 
 
@@ -116,17 +118,16 @@ class WorkoutScreenshotService:
         if draft is None or draft.telegram_user_id != telegram_user_id:
             raise WorkoutScreenshotNotFoundError("draft not found or expired")
 
-        async with self._session_factory() as session:
+        async with self._session_factory() as session, session.begin():
             user = await UserRepository(session).get_by_telegram_id(telegram_user_id)
             if user is None:
                 raise WorkoutScreenshotNotFoundError("athlete not recognized")
 
             incoming = from_manual_screenshot(draft.request)
-            async with session.begin():
-                result = await TrainingActivityRepository(session).import_activity(
-                    user_id=user.id,
-                    incoming=incoming,
-                )
+            result = await TrainingActivityRepository(session).import_activity(
+                user_id=user.id,
+                incoming=incoming,
+            )
         self._pending.pop(token, None)
         return result
 
@@ -138,6 +139,43 @@ class WorkoutScreenshotService:
             return False
         self._pending.pop(token, None)
         return True
+
+    def request_heart_rate(self, *, telegram_user_id: int, token: str) -> bool:
+        draft = self._pending.get(token)
+        if draft is None or draft.telegram_user_id != telegram_user_id:
+            return False
+        for pending_draft in self._pending.values():
+            if pending_draft.telegram_user_id == telegram_user_id:
+                pending_draft.awaiting_heart_rate = False
+        draft.awaiting_heart_rate = True
+        return True
+
+    def provide_heart_rate(
+        self, *, telegram_user_id: int, text: str
+    ) -> ScreenshotDraft | None:
+        draft = next(
+            (
+                item
+                for item in self._pending.values()
+                if item.telegram_user_id == telegram_user_id
+                and item.awaiting_heart_rate
+            ),
+            None,
+        )
+        if draft is None:
+            return None
+        match = re.fullmatch(r"\s*(\d{2,3})\s*[/,]\s*(\d{2,3})\s*", text)
+        if match is None:
+            raise ValueError("invalid heart rate")
+        average, maximum = (int(match.group(1)), int(match.group(2)))
+        if average > maximum or maximum > 300:
+            raise ValueError("invalid heart rate")
+        draft.request = draft.request.model_copy(
+            update={"average_heart_rate": average, "max_heart_rate": maximum}
+        )
+        draft.awaiting_heart_rate = False
+        token = next(key for key, item in self._pending.items() if item is draft)
+        return ScreenshotDraft(token=token, request=draft.request)
 
     def _require_enabled(self) -> None:
         if not self._settings.screenshot_import_enabled:

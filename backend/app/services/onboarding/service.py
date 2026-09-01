@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import cast
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -100,9 +101,9 @@ _CONTEXT_RETRY_ERROR_KEY = "_context_retry_error"
 _INTEGER_PATTERN = re.compile(r"[0-9]+")
 _WEIGHT_PATTERN = re.compile(r"[0-9]+(?:\.[0-9]+)?")
 _ATHLETE_PROFILE_UPDATE_FIELDS = frozenset(
-    {"age", "birth_year", "gender", "weight_kg", "height_cm"}
+    {"birth_year", "gender", "weight_kg", "height_cm"}
 )
-_TRAINING_GOAL_UPDATE_FIELDS = frozenset({"target_outcome", "event_date"})
+_TRAINING_GOAL_UPDATE_FIELDS = frozenset({"event_date"})
 _ATHLETE_PROFILE_CONTEXT_UPDATE_FIELDS = frozenset(
     {"availability_text", "health_limitations_text"}
 )
@@ -124,27 +125,6 @@ _FREE_TEXT_CONTEXT_STEPS = frozenset(
 _CONTEXT_TEXT_MIN_LENGTH = 3
 _CONTEXT_TEXT_MAX_LENGTH = 2000
 _EVENT_DATE_FORMATS = ("%Y-%m-%d", "%d/%m/%Y")
-
-
-def _parse_manual_targets(text: str) -> tuple[Decimal, Decimal, int] | None:
-    """Parse `distance km, elevation m, pace min/km` supplied by an athlete."""
-
-    parts = [part.strip() for part in text.split(",")]
-    if len(parts) != 3:
-        return None
-    try:
-        distance = Decimal(parts[0])
-        elevation = Decimal(parts[1])
-        if ":" in parts[2]:
-            minutes, seconds = parts[2].split(":", 1)
-            pace_seconds = int(minutes) * 60 + int(seconds)
-        else:
-            pace_seconds = int(Decimal(parts[2]) * 60)
-    except (InvalidOperation, ValueError):
-        return None
-    if distance <= 0 or elevation < 0 or pace_seconds <= 0 or pace_seconds >= 3600:
-        return None
-    return distance, elevation, pace_seconds
 
 
 def _parse_event_date(text: str) -> date | None:
@@ -184,20 +164,22 @@ def _parse_goal_metric(field: str, text: str) -> JsonValue:
         if distance_m <= 0:
             raise ValueError
         return distance_m
-    if field in {"running_pace", "swimming_pace", "triathlon_finish_time"}:
+    if field == "triathlon_finish_time":
         parts = cleaned.split(":")
-        if len(parts) not in {2, 3} or not all(part.isdigit() for part in parts):
+        if len(parts) != 2 or not all(part.isdigit() for part in parts):
             raise ValueError
-        components = [int(part) for part in parts]
-        if len(components) == 2:
-            minutes, seconds = components
-            total = minutes * 60 + seconds
-        else:
-            hours, minutes, seconds = components
-            total = hours * 3600 + minutes * 60 + seconds
-        if seconds >= 60 or (len(components) == 3 and minutes >= 60) or total <= 0:
+        hours, minutes = (int(part) for part in parts)
+        total = hours * 3600 + minutes * 60
+        if minutes >= 60 or total <= 0:
             raise ValueError
-        if field != "triathlon_finish_time" and total >= 3600:
+        return total
+    if field in {"running_pace", "swimming_pace"}:
+        parts = cleaned.split(":")
+        if len(parts) != 2 or not all(part.isdigit() for part in parts):
+            raise ValueError
+        minutes, seconds = (int(part) for part in parts)
+        total = minutes * 60 + seconds
+        if seconds >= 60 or total <= 0 or total >= 3600:
             raise ValueError
         return total
     raise ValueError
@@ -211,10 +193,28 @@ def _goal_metric_fields(*, sport: str, code: str) -> tuple[str, ...]:
     if sport == GoalSport.SWIMMING.value:
         return ("swimming_distance", "swimming_pace")
     if sport == GoalSport.TRIATHLON.value:
-        return ("triathlon_finish_time", "running_pace", "elevation")
+        return ("triathlon_finish_time",)
     if code in _FIXED_RUNNING_DISTANCES:
         return ("running_pace",)
     return ("running_distance", "elevation", "running_pace")
+
+
+def _goal_sport_from_template_code(code: str) -> str | None:
+    """Infer a goal sport for legacy rows that predate goal metadata."""
+
+    if code in _TRIATHLON_CODES:
+        return GoalSport.TRIATHLON.value
+    if code == "ROAD_CYCLING_EVENT":
+        return GoalSport.CYCLING.value
+    if code in {"POOL_SWIMMING_EVENT", "OPEN_WATER_SWIM"}:
+        return GoalSport.SWIMMING.value
+    if code in set(_FIXED_RUNNING_DISTANCES) | {
+        "GENERAL_RUNNING",
+        "TRAIL_RACE",
+        "ULTRA_MARATHON",
+    }:
+        return GoalSport.RUNNING.value
+    return None
 
 
 def _target_payload_from_metric_values(
@@ -273,17 +273,6 @@ def _target_payload_from_metric_values(
             }
         },
     }
-
-
-def _target_outcome_summary(template_name: str, values: Mapping[str, JsonValue]) -> str:
-    """Keep the legacy non-null field meaningful without exposing it as UI."""
-
-    distance = values.get("running_distance", values.get("cycling_distance"))
-    if isinstance(distance, (int, float)):
-        return f"{template_name}: {distance:g} km"
-    if isinstance(values.get("swimming_distance"), int):
-        return f"{template_name}: {values['swimming_distance']} m"
-    return template_name
 
 
 class OnboardingApplicationError(RuntimeError):
@@ -391,8 +380,7 @@ class OnboardingService:
             discipline
             for discipline in disciplines_in_order
             if any(
-                field.startswith(f"{discipline.value}.")
-                for field in existing_fields
+                field.startswith(f"{discipline.value}.") for field in existing_fields
             )
         )
         fields = fields_for_disciplines(disciplines)
@@ -457,9 +445,7 @@ class OnboardingService:
                 user_id=user.id,
                 main_goal="Complete an Ironman 70.3",
                 event_date=None,
-                target_outcome="Finish comfortably",
                 secondary_priority=None,
-                original_description="Development test goal",
                 goal_template_id=development_template.id,
             )
             context: dict[str, str | None] = {
@@ -586,7 +572,7 @@ class OnboardingService:
         identity: TelegramIdentity,
         choice: str,
     ) -> OnboardingServiceResult:
-        """Choose a goal sport before selecting an active catalog goal."""
+        """Choose a goal sport, skipping a redundant one-item goal menu."""
 
         try:
             sport = GoalSport(choice)
@@ -599,6 +585,20 @@ class OnboardingService:
                 raise OnboardingApplicationError("stale_action")
             answers = self._answers(onboarding)
             answers[_GOAL_SPORT_KEY] = sport.value
+            if sport is GoalSport.CYCLING:
+                template = await TrainingCatalogRepository(session).active_goal_by_code(
+                    code="ROAD_CYCLING_EVENT", kind=GoalTemplateKind.PRIMARY
+                )
+                if template is None:
+                    raise OnboardingApplicationError("goal_template_not_found")
+                return await self._start_goal_metrics(
+                    session=session,
+                    user=user,
+                    onboarding=onboarding,
+                    answers=answers,
+                    template=template,
+                    fields=_goal_metric_fields(sport=sport.value, code=template.code),
+                )
             if sport is GoalSport.SWIMMING:
                 onboarding = await OnboardingRepository(session).save_progress(
                     user_id=user.id,
@@ -643,9 +643,7 @@ class OnboardingService:
                 onboarding=onboarding,
                 answers=answers,
                 template=template,
-                fields=_goal_metric_fields(
-                    sport=GoalSport.SWIMMING.value, code=code
-                ),
+                fields=_goal_metric_fields(sport=GoalSport.SWIMMING.value, code=code),
             )
 
     async def reopen_goal_sports(
@@ -686,7 +684,8 @@ class OnboardingService:
             if not isinstance(sport, str):
                 raise OnboardingApplicationError("stale_action")
             allowed_codes = {
-                option_code for option_code, _ in await self.goal_template_options(sport)
+                option_code
+                for option_code, _ in await self.goal_template_options(sport)
             }
             if code not in allowed_codes:
                 raise OnboardingApplicationError("invalid_action")
@@ -730,9 +729,7 @@ class OnboardingService:
             user_id=user.id,
             main_goal=display_name,
             event_date=None,
-            target_outcome=display_name,
             secondary_priority=None,
-            original_description=display_name,
             goal_template_id=template_id,
             supporting_goal_template_id=None,
             target_distance_km=fixed_distance,
@@ -844,112 +841,31 @@ class OnboardingService:
             "swimming_type": answers.get("swimming_type"),
         }
         await ProfileRepository(session).upsert_training_goal(
-            user_id=user.id,
-            main_goal=template.display_name,
-            event_date=None,
-            target_outcome=_target_outcome_summary(template.display_name, values),
-            secondary_priority=None,
-            original_description=template.display_name,
+                user_id=user.id,
+                main_goal=template.display_name,
+                event_date=None,
+                secondary_priority=None,
             goal_template_id=template.id,
             supporting_goal_template_id=None,
-            **target_payload,
+            target_distance_km=cast(float | None, target_payload["target_distance_km"]),
+            target_elevation_m=cast(float | None, target_payload["target_elevation_m"]),
+            target_pace_seconds_per_km=cast(
+                float | None, target_payload["target_pace_seconds_per_km"]
+            ),
+            target_swim_pace_seconds_per_100m=cast(
+                float | None,
+                target_payload["target_swim_pace_seconds_per_100m"],
+            ),
+            target_average_speed_kph=cast(
+                float | None, target_payload["target_average_speed_kph"]
+            ),
+            target_finish_time_seconds=cast(
+                int | None, target_payload["target_finish_time_seconds"]
+            ),
+            goal_metadata_jsonb=cast(
+                dict[str, object] | None, target_payload["goal_metadata_jsonb"]
+            ),
         )
-
-    async def choose_manual_goal(
-        self, identity: TelegramIdentity
-    ) -> OnboardingServiceResult:
-        """Start a custom target while retaining the selected sport context."""
-
-        async with self._session_factory.begin() as session:
-            user, onboarding = await self._locked_state(session, identity)
-            self._require_active(onboarding)
-            if onboarding.current_step is not OnboardingStep.GOAL_INTAKE:
-                raise OnboardingApplicationError("stale_action")
-            answers = self._answers(onboarding)
-            raw_sport = answers.get(_GOAL_SPORT_KEY)
-            if not isinstance(raw_sport, str):
-                raise OnboardingApplicationError("stale_action")
-            try:
-                sport = GoalSport(raw_sport)
-            except ValueError as exc:
-                raise OnboardingApplicationError("stale_action") from exc
-            rows = await TrainingCatalogRepository(
-                session
-            ).active_primary_goal_target_disciplines()
-            options = group_goals_by_sport(
-                tuple(
-                    GoalOption(
-                        code=code,
-                        display_name=display_name,
-                        disciplines=disciplines,
-                    )
-                    for code, display_name, disciplines in rows
-                )
-            ).get(sport, ())
-            if not options:
-                raise OnboardingApplicationError("invalid_action")
-            answers["manual_goal_sport"] = sport.value
-            answers["manual_goal_template"] = options[0].code
-            onboarding = await OnboardingRepository(session).save_progress(
-                user_id=user.id,
-                current_step=OnboardingStep.GOAL_MANUAL_TARGETS,
-                answers=cast(dict[str, object], answers),
-            )
-            return self._result(user, onboarding)
-
-    async def submit_manual_goal_targets(
-        self, identity: TelegramIdentity, text: str
-    ) -> OnboardingServiceResult:
-        """Persist a custom target before asking for its optional event date."""
-
-        parsed = _parse_manual_targets(text)
-        async with self._session_factory.begin() as session:
-            user, onboarding = await self._locked_state(session, identity)
-            self._require_active(onboarding)
-            if onboarding.current_step is not OnboardingStep.GOAL_MANUAL_TARGETS:
-                raise OnboardingApplicationError("stale_action")
-            if parsed is None:
-                return self._result(
-                    user,
-                    onboarding,
-                    kind="profile_validation_error",
-                    error_code="invalid_manual_goal_targets",
-                )
-            answers = self._answers(onboarding)
-            code = answers.get("manual_goal_template")
-            sport = answers.get("manual_goal_sport")
-            if not isinstance(code, str) or not isinstance(sport, str):
-                raise OnboardingApplicationError("stale_action")
-            template = await TrainingCatalogRepository(session).active_goal_by_code(
-                code=code, kind=GoalTemplateKind.PRIMARY
-            )
-            if template is None:
-                raise OnboardingApplicationError("stale_action")
-            distance, elevation, pace_seconds = parsed
-            pace = f"{pace_seconds // 60}:{pace_seconds % 60:02d} min/km"
-            target = (
-                f"Custom target: {distance:g} km, {elevation:g} m elevation, "
-                f"{pace} pace"
-            )
-            await ProfileRepository(session).upsert_training_goal(
-                user_id=user.id,
-                main_goal=f"Custom {sport.title()} goal",
-                event_date=None,
-                target_outcome=target,
-                secondary_priority=None,
-                original_description=target,
-                goal_template_id=template.id,
-                supporting_goal_template_id=None,
-                target_distance_km=float(distance),
-                target_elevation_m=float(elevation),
-                target_pace_seconds_per_km=float(pace_seconds),
-            )
-            onboarding = await OnboardingRepository(session).save_progress(
-                user_id=user.id,
-                current_step=OnboardingStep.GOAL_EVENT_DATE,
-                answers=cast(dict[str, object], answers),
-            )
-            return self._result(user, onboarding)
 
     async def submit_event_date(
         self,
@@ -1009,9 +925,7 @@ class OnboardingService:
                 user_id=user.id,
                 main_goal=goal.main_goal,
                 event_date=event_date,
-                target_outcome=goal.target_outcome,
                 secondary_priority=goal.secondary_priority,
-                original_description=goal.original_description,
                 goal_template_id=goal.goal_template_id,
                 supporting_goal_template_id=goal.supporting_goal_template_id,
                 target_distance_km=goal.target_distance_km,
@@ -1046,9 +960,6 @@ class OnboardingService:
             if goal is None:
                 raise OnboardingApplicationError("stale_action")
             supporting_id: uuid.UUID | None = None
-            # Mirrors the primary goal's own display, which is stored as
-            # main_goal/target_outcome above: the profile view has nothing
-            # else to show for a supporting goal chosen from a fixed menu.
             secondary_priority: str | None = None
             if code is not None:
                 template = await TrainingCatalogRepository(session).active_goal_by_code(
@@ -1062,9 +973,7 @@ class OnboardingService:
                 user_id=user.id,
                 main_goal=goal.main_goal,
                 event_date=goal.event_date,
-                target_outcome=goal.target_outcome,
                 secondary_priority=secondary_priority,
-                original_description=goal.original_description,
                 goal_template_id=goal.goal_template_id,
                 supporting_goal_template_id=supporting_id,
                 target_distance_km=goal.target_distance_km,
@@ -1480,9 +1389,7 @@ class OnboardingService:
         self, identity: TelegramIdentity
     ) -> ProfileSettingsResult:
         async with self._session_factory.begin() as session:
-            user, onboarding = await self._locked_state(session, identity)
-            if onboarding.status is not OnboardingStatus.COMPLETED:
-                raise OnboardingApplicationError("stale_action")
+            user = await self._profile_settings_user(session, identity)
             state = await ProfileSettingsRepository(session).save(
                 user_id=user.id, step=ProfileSettingsStep.MENU, pending={}
             )
@@ -1494,9 +1401,7 @@ class OnboardingService:
         """Apply a stable ps:v1 callback. It never calls a model."""
 
         async with self._session_factory.begin() as session:
-            user, onboarding = await self._locked_state(session, identity)
-            if onboarding.status is not OnboardingStatus.COMPLETED:
-                raise OnboardingApplicationError("stale_action")
+            user = await self._profile_settings_user(session, identity)
             settings_repo = ProfileSettingsRepository(session)
             state = await settings_repo.get_or_create(user_id=user.id)
             step = state.current_step
@@ -1509,6 +1414,7 @@ class OnboardingService:
                 "personal:birth_year": ProfileSettingsStep.PERSONAL_BIRTH_YEAR,
                 "personal:weight": ProfileSettingsStep.PERSONAL_WEIGHT,
                 "personal:height": ProfileSettingsStep.PERSONAL_HEIGHT,
+                "personal:timezone": ProfileSettingsStep.PERSONAL_TIMEZONE,
             }.get(action)
             if action == "done":
                 state = await settings_repo.save(
@@ -1525,6 +1431,15 @@ class OnboardingService:
                     step=state.current_step, saved_field="__closed__"
                 )
             if target is not None:
+                if target is ProfileSettingsStep.GOAL_MENU:
+                    goal = await ProfileRepository(session).get_training_goal(
+                        user_id=user.id
+                    )
+                    if goal is None:
+                        raise OnboardingApplicationError("stale_action")
+                    pending = self._profile_goal_pending(goal)
+                elif target is ProfileSettingsStep.PERSONAL_MENU:
+                    pending = await self._profile_personal_pending(session, user)
                 state = await settings_repo.save(
                     user_id=user.id,
                     step=target,
@@ -1532,6 +1447,7 @@ class OnboardingService:
                 )
                 return ProfileSettingsResult(
                     step=state.current_step,
+                    pending=cast(dict[str, JsonValue], state.pending_answers),
                     current_value=await self._profile_setting_current_value(
                         session=session,
                         user_id=user.id,
@@ -1544,38 +1460,6 @@ class OnboardingService:
                     raise OnboardingApplicationError("stale_action")
                 goal = await ProfileRepository(session).get_training_goal(
                     user_id=user.id
-                )
-            if action == "goal:metrics":
-                if step is not ProfileSettingsStep.GOAL_MENU:
-                    raise OnboardingApplicationError("stale_action")
-                goal = await ProfileRepository(session).get_training_goal(
-                    user_id=user.id
-                )
-                if goal is None or goal.goal_template_id is None:
-                    raise OnboardingApplicationError("stale_action")
-                template = await TrainingCatalogRepository(session).active_goal_by_id(
-                    goal_template_id=goal.goal_template_id
-                )
-                sport = self._goal_sport_from_metadata(goal)
-                if template is None or sport is None:
-                    raise OnboardingApplicationError("stale_action")
-                values = self._metric_values_from_goal(goal)
-                fields = _goal_metric_fields(sport=sport, code=template.code)
-                state = await settings_repo.save(
-                    user_id=user.id,
-                    step=ProfileSettingsStep.GOAL_METRICS,
-                    pending={
-                        _GOAL_SPORT_KEY: sport,
-                        "goal_template_code": template.code,
-                        _GOAL_METRIC_FIELDS_KEY: list(fields),
-                        _GOAL_METRIC_INDEX_KEY: 0,
-                        _GOAL_METRIC_VALUES_KEY: values,
-                        _MAIN_GOAL_CHANGED_KEY: False,
-                    },
-                )
-                return ProfileSettingsResult(
-                    step=state.current_step,
-                    pending=cast(dict[str, JsonValue], state.pending_answers),
                 )
                 if goal is None:
                     raise OnboardingApplicationError("stale_action")
@@ -1593,6 +1477,42 @@ class OnboardingService:
                         user_id=user.id,
                         step=state.current_step,
                     ),
+                )
+            if action == "goal:metrics":
+                if step is not ProfileSettingsStep.GOAL_MENU:
+                    raise OnboardingApplicationError("stale_action")
+                goal = await ProfileRepository(session).get_training_goal(
+                    user_id=user.id
+                )
+                if goal is None or goal.goal_template_id is None:
+                    raise OnboardingApplicationError("stale_action")
+                template = await TrainingCatalogRepository(session).active_goal_by_id(
+                    goal_template_id=goal.goal_template_id
+                )
+                if template is None:
+                    raise OnboardingApplicationError("stale_action")
+                sport = _goal_sport_from_template_code(
+                    template.code
+                ) or self._goal_sport_from_metadata(goal)
+                if sport is None:
+                    raise OnboardingApplicationError("stale_action")
+                values = self._metric_values_from_goal(goal, sport=sport)
+                fields = _goal_metric_fields(sport=sport, code=template.code)
+                state = await settings_repo.save(
+                    user_id=user.id,
+                    step=ProfileSettingsStep.GOAL_METRICS,
+                    pending={
+                        _GOAL_SPORT_KEY: sport,
+                        "goal_template_code": template.code,
+                        _GOAL_METRIC_FIELDS_KEY: list(fields),
+                        _GOAL_METRIC_INDEX_KEY: 0,
+                        _GOAL_METRIC_VALUES_KEY: values,
+                        _MAIN_GOAL_CHANGED_KEY: False,
+                    },
+                )
+                return ProfileSettingsResult(
+                    step=state.current_step,
+                    pending=cast(dict[str, JsonValue], state.pending_answers),
                 )
             if action in {"goal:main", "goal:secondary"}:
                 # Both open the deterministic catalog menu fresh (no prefilled
@@ -1677,7 +1597,6 @@ class OnboardingService:
                     user_id=user.id,
                     payload={
                         "main_goal": template.display_name,
-                        "target_outcome": template.display_name,
                         "goal_template_id": template.id,
                         "target_distance_km": None,
                         "target_elevation_m": None,
@@ -1685,29 +1604,22 @@ class OnboardingService:
                         "target_swim_pace_seconds_per_100m": None,
                         "target_average_speed_kph": None,
                         "target_finish_time_seconds": None,
-                        "goal_metadata_jsonb": None,
+                        "goal_metadata_jsonb": {},
                     },
                 )
+                updated_goal = await ProfileRepository(session).get_training_goal(
+                    user_id=user.id
+                )
+                if updated_goal is None:
+                    raise OnboardingApplicationError("stale_action")
                 state = await settings_repo.save(
                     user_id=user.id,
-                    step=ProfileSettingsStep.GOAL_METRICS,
-                    pending={
-                        _GOAL_SPORT_KEY: raw_sport,
-                        "goal_template_code": template.code,
-                        _GOAL_METRIC_FIELDS_KEY: list(
-                            _goal_metric_fields(sport=raw_sport, code=template.code)
-                        ),
-                        _GOAL_METRIC_INDEX_KEY: 0,
-                        _GOAL_METRIC_VALUES_KEY: (
-                            {"running_distance": _FIXED_RUNNING_DISTANCES[template.code]}
-                            if template.code in _FIXED_RUNNING_DISTANCES
-                            else {}
-                        ),
-                        _MAIN_GOAL_CHANGED_KEY: main_changed,
-                    },
+                    step=ProfileSettingsStep.GOAL_MENU,
+                    pending=self._profile_goal_pending(updated_goal),
                 )
                 return ProfileSettingsResult(
                     step=state.current_step,
+                    pending=cast(dict[str, JsonValue], state.pending_answers),
                     saved_field="Main goal" if main_changed else None,
                 )
             if action.startswith("goal:support:"):
@@ -1736,7 +1648,6 @@ class OnboardingService:
                 # Carried from goal:template: above: the primary goal may
                 # already have changed earlier in this same session, even if
                 # the supporting goal picked here is the same as before.
-                main_changed = bool(pending.get(_MAIN_GOAL_CHANGED_KEY, False))
                 await ProfileRepository(session).update_training_goal_fields(
                     user_id=user.id,
                     payload={
@@ -1744,33 +1655,24 @@ class OnboardingService:
                         "supporting_goal_template_id": supporting_id,
                     },
                 )
-                if support_changed or main_changed:
-                    # Training contexts may have changed (new sport, new
-                    # template, or a supporting goal added/removed), so the
-                    # equipment & access review needs to reopen, mirroring
-                    # the deleted _save_profile_classification's behavior.
-                    updated_goal = await ProfileRepository(session).get_training_goal(
-                        user_id=user.id
-                    )
-                    return await self._open_profile_equipment(
-                        session,
-                        user.id,
-                        settings_repo,
-                        goal=updated_goal,
-                        saved_field=(
-                            "Secondary priority" if support_changed else "Main goal"
-                        ),
-                    )
+                updated_goal = await ProfileRepository(session).get_training_goal(
+                    user_id=user.id
+                )
+                if updated_goal is None:
+                    raise OnboardingApplicationError("stale_action")
                 state = await settings_repo.save(
                     user_id=user.id,
                     step=ProfileSettingsStep.GOAL_MENU,
-                    pending={},
+                    pending=self._profile_goal_pending(updated_goal),
                 )
-                return ProfileSettingsResult(step=state.current_step, saved_field=None)
+                return ProfileSettingsResult(
+                    step=state.current_step,
+                    pending=cast(dict[str, JsonValue], state.pending_answers),
+                    saved_field="Secondary priority" if support_changed else None,
+                )
             if action == "goal:back":
                 if step not in {
                     ProfileSettingsStep.GOAL_MENU,
-                    ProfileSettingsStep.GOAL_OUTCOME,
                     ProfileSettingsStep.GOAL_METRICS,
                     ProfileSettingsStep.GOAL_DATE,
                     ProfileSettingsStep.GOAL_MAIN,
@@ -1782,12 +1684,23 @@ class OnboardingService:
                     if step is ProfileSettingsStep.GOAL_MENU
                     else ProfileSettingsStep.GOAL_MENU
                 )
+                next_pending: dict[str, object] = {}
+                if next_step is ProfileSettingsStep.GOAL_MENU:
+                    goal = await ProfileRepository(session).get_training_goal(
+                        user_id=user.id
+                    )
+                    if goal is None:
+                        raise OnboardingApplicationError("stale_action")
+                    next_pending = self._profile_goal_pending(goal)
                 state = await settings_repo.save(
                     user_id=user.id,
                     step=next_step,
-                    pending={},
+                    pending=next_pending,
                 )
-                return ProfileSettingsResult(step=state.current_step)
+                return ProfileSettingsResult(
+                    step=state.current_step,
+                    pending=cast(dict[str, JsonValue], state.pending_answers),
+                )
             if action == "personal:gender":
                 if step is not ProfileSettingsStep.PERSONAL_MENU:
                     raise OnboardingApplicationError("stale_action")
@@ -1815,7 +1728,9 @@ class OnboardingService:
                     user_id=user.id, payload={"gender": gender}
                 )
                 state = await settings_repo.save(
-                    user_id=user.id, step=ProfileSettingsStep.PERSONAL_MENU, pending={}
+                    user_id=user.id,
+                    step=ProfileSettingsStep.PERSONAL_MENU,
+                    pending=await self._profile_personal_pending(session, user),
                 )
                 return ProfileSettingsResult(
                     step=state.current_step, saved_field="Category"
@@ -1886,7 +1801,9 @@ class OnboardingService:
                         source_text=source, days=draft["days"]
                     )
                 except (KeyError, ValueError):
-                    raise OnboardingApplicationError("invalid_availability_draft") from None
+                    raise OnboardingApplicationError(
+                        "invalid_availability_draft"
+                    ) from None
                 await ProfileRepository(session).update_athlete_profile_context_fields(
                     user_id=user.id,
                     payload={
@@ -1908,8 +1825,9 @@ class OnboardingService:
         """Persist text only when the athlete selected the matching mini-flow."""
 
         async with self._session_factory.begin() as session:
-            user, onboarding = await self._locked_state(session, identity)
-            if onboarding.status is not OnboardingStatus.COMPLETED:
+            try:
+                user = await self._profile_settings_user(session, identity)
+            except OnboardingApplicationError:
                 return None
             repo = ProfileSettingsRepository(session)
             state = await repo.get_or_create(user_id=user.id)
@@ -1946,13 +1864,15 @@ class OnboardingService:
             if step is ProfileSettingsStep.AVAILABILITY:
                 cleaned = text.strip()
                 if not (
-                    _CONTEXT_TEXT_MIN_LENGTH
-                    <= len(cleaned)
-                    <= _CONTEXT_TEXT_MAX_LENGTH
+                    _CONTEXT_TEXT_MIN_LENGTH <= len(cleaned) <= _CONTEXT_TEXT_MAX_LENGTH
                 ):
                     raise OnboardingApplicationError("invalid_action")
-                goal = await ProfileRepository(session).get_training_goal(user_id=user.id)
-                sport = self._goal_sport_from_metadata(goal) if goal is not None else None
+                goal = await ProfileRepository(session).get_training_goal(
+                    user_id=user.id
+                )
+                sport = (
+                    self._goal_sport_from_metadata(goal) if goal is not None else None
+                )
                 disciplines_by_sport = {
                     GoalSport.RUNNING.value: ("running",),
                     GoalSport.CYCLING.value: ("cycling",),
@@ -1965,7 +1885,9 @@ class OnboardingService:
                         goal_disciplines=disciplines_by_sport.get(sport or "", ()),
                     )
                 except AvailabilityExtractionError:
-                    raise OnboardingApplicationError("availability_extraction_failed") from None
+                    raise OnboardingApplicationError(
+                        "availability_extraction_failed"
+                    ) from None
                 next_step = (
                     ProfileSettingsStep.AVAILABILITY_REVIEW
                     if extraction.parse_status == "complete"
@@ -1993,6 +1915,21 @@ class OnboardingService:
                 return ProfileSettingsResult(
                     step=state.current_step, saved_field="Health limitations"
                 )
+            if step is ProfileSettingsStep.PERSONAL_TIMEZONE:
+                timezone = self._parse_timezone(text)
+                if timezone is None:
+                    raise OnboardingApplicationError("invalid_timezone")
+                await UserRepository(session).update_timezone(
+                    user_id=user.id, timezone=timezone
+                )
+                state = await repo.save(
+                    user_id=user.id,
+                    step=ProfileSettingsStep.PERSONAL_MENU,
+                    pending=await self._profile_personal_pending(session, user),
+                )
+                return ProfileSettingsResult(
+                    step=state.current_step, saved_field="Timezone"
+                )
             numeric = {
                 ProfileSettingsStep.PERSONAL_BIRTH_YEAR: (
                     "birth_year",
@@ -2012,17 +1949,50 @@ class OnboardingService:
                 )
                 if value is None:
                     raise OnboardingApplicationError("invalid_action")
-                payload: dict[str, object] = {field: value}
-                if field == "birth_year":
-                    payload["age"] = utc_now().year - int(value)
                 await ProfileRepository(session).update_athlete_profile_fields(
-                    user_id=user.id, payload=payload
+                    user_id=user.id, payload={field: value}
                 )
                 state = await repo.save(
-                    user_id=user.id, step=ProfileSettingsStep.PERSONAL_MENU, pending={}
+                    user_id=user.id,
+                    step=ProfileSettingsStep.PERSONAL_MENU,
+                    pending=await self._profile_personal_pending(session, user),
                 )
                 return ProfileSettingsResult(step=state.current_step, saved_field=label)
             raise OnboardingApplicationError("stale_action")
+
+    @staticmethod
+    def _parse_timezone(value: str) -> str | None:
+        candidate = value.strip()
+        if not candidate or len(candidate) > 64:
+            return None
+        try:
+            return ZoneInfo(candidate).key
+        except ZoneInfoNotFoundError:
+            return None
+
+    async def _profile_settings_user(
+        self, session: AsyncSession, identity: TelegramIdentity
+    ) -> User:
+        """Authorize profile edits for every completed account lifecycle.
+
+        Some existing accounts were marked ``PROFILE_COMPLETED`` before their
+        onboarding checkpoint was normalized. The bot correctly exposes Change
+        profile to those athletes, so the settings service must not reject them
+        merely because that historical checkpoint remains active or is absent.
+        """
+
+        user = await self._require_user(session, identity)
+        onboarding = await OnboardingRepository(session).get_for_user(
+            user_id=user.id, for_update=True
+        )
+        if user.status in {
+            UserStatus.ONBOARDING_COMPLETED,
+            UserStatus.PROFILE_COMPLETED,
+        }:
+            return user
+        if onboarding is not None and onboarding.status is OnboardingStatus.COMPLETED:
+            return user
+        raise OnboardingApplicationError("stale_action")
 
     @staticmethod
     def _goal_sport_from_metadata(goal: TrainingGoal) -> str | None:
@@ -2034,10 +2004,17 @@ class OnboardingService:
         return None
 
     @staticmethod
-    def _metric_values_from_goal(goal: TrainingGoal) -> dict[str, JsonValue]:
+    def _metric_values_from_goal(
+        goal: TrainingGoal, *, sport: str
+    ) -> dict[str, JsonValue]:
         values: dict[str, JsonValue] = {}
         if goal.target_distance_km is not None:
-            values["running_distance"] = goal.target_distance_km
+            distance_key = (
+                "cycling_distance"
+                if sport == GoalSport.CYCLING.value
+                else "running_distance"
+            )
+            values[distance_key] = goal.target_distance_km
         if goal.target_elevation_m is not None:
             values["elevation"] = goal.target_elevation_m
         if goal.target_pace_seconds_per_km is not None:
@@ -2053,7 +2030,9 @@ class OnboardingService:
             if isinstance(goal.goal_metadata_jsonb, dict)
             else None
         )
-        target_distance = primary.get("target_distance") if isinstance(primary, dict) else None
+        target_distance = (
+            primary.get("target_distance") if isinstance(primary, dict) else None
+        )
         if isinstance(target_distance, dict) and target_distance.get("unit") == "m":
             value = target_distance.get("value")
             if isinstance(value, int):
@@ -2072,7 +2051,7 @@ class OnboardingService:
             or not 0 <= index < len(fields)
         ):
             raise OnboardingApplicationError("stale_action")
-        return fields[index]
+        return cast(str, fields[index])
 
     async def _save_profile_goal_metric(
         self,
@@ -2116,27 +2095,23 @@ class OnboardingService:
         payload = _target_payload_from_metric_values(
             sport=sport, code=code, values=values
         )
-        payload["target_outcome"] = _target_outcome_summary(template.display_name, values)
         await ProfileRepository(session).update_training_goal_fields(
             user_id=user_id, payload=payload
         )
-        main_changed = bool(pending.get(_MAIN_GOAL_CHANGED_KEY, False))
-        if main_changed:
-            updated_goal = await ProfileRepository(session).get_training_goal(
-                user_id=user_id
-            )
-            return await self._open_profile_equipment(
-                session,
-                user_id,
-                repo,
-                goal=updated_goal,
-                saved_field="Main goal",
-            )
+        updated_goal = await ProfileRepository(session).get_training_goal(
+            user_id=user_id
+        )
+        if updated_goal is None:
+            raise OnboardingApplicationError("stale_action")
         state = await repo.save(
-            user_id=user_id, step=ProfileSettingsStep.GOAL_MENU, pending={}
+            user_id=user_id,
+            step=ProfileSettingsStep.GOAL_MENU,
+            pending=self._profile_goal_pending(updated_goal),
         )
         return ProfileSettingsResult(
-            step=state.current_step, saved_field="Performance targets"
+            step=state.current_step,
+            pending=cast(dict[str, JsonValue], state.pending_answers),
+            saved_field="Performance targets",
         )
 
     @staticmethod
@@ -2147,19 +2122,14 @@ class OnboardingService:
         step: ProfileSettingsStep,
     ) -> str | int | float | None:
         profiles = ProfileRepository(session)
-        if step in {
-            ProfileSettingsStep.GOAL_OUTCOME,
-            ProfileSettingsStep.GOAL_DATE,
-        }:
+        if step is ProfileSettingsStep.PERSONAL_TIMEZONE:
+            user = await UserRepository(session).get_by_id(user_id)
+            return user.timezone if user is not None else None
+        if step is ProfileSettingsStep.GOAL_DATE:
             goal = await profiles.get_training_goal(user_id=user_id)
             if goal is None:
                 return None
-            if step is ProfileSettingsStep.GOAL_OUTCOME:
-                return goal.target_outcome
-            if step is ProfileSettingsStep.GOAL_DATE:
-                return (
-                    goal.event_date.isoformat() if goal.event_date is not None else None
-                )
+            return goal.event_date.isoformat() if goal.event_date is not None else None
         profile = await profiles.get_athlete_profile(user_id=user_id)
         if profile is None:
             return None
@@ -2180,14 +2150,38 @@ class OnboardingService:
         return values.get(step)
 
     @staticmethod
+    async def _profile_personal_pending(
+        session: AsyncSession, user: User
+    ) -> dict[str, object]:
+        profile = await ProfileRepository(session).get_athlete_profile(user_id=user.id)
+        return {
+            "birth_year": profile.birth_year if profile else None,
+            "gender": (
+                profile.gender.value
+                if profile is not None and profile.gender is not None
+                else None
+            ),
+            "weight_kg": profile.weight_kg if profile else None,
+            "height_cm": profile.height_cm if profile else None,
+            "timezone": user.timezone,
+        }
+
+    @staticmethod
     def _profile_goal_pending(goal: TrainingGoal) -> dict[str, object]:
         return {
             "main_goal": goal.main_goal,
-            "target_outcome": goal.target_outcome,
             "event_date": (
                 goal.event_date.isoformat() if goal.event_date is not None else None
             ),
             "secondary_priority": goal.secondary_priority,
+            "target_distance_km": goal.target_distance_km,
+            "target_elevation_m": goal.target_elevation_m,
+            "target_pace_seconds_per_km": goal.target_pace_seconds_per_km,
+            "target_swim_pace_seconds_per_100m": (
+                goal.target_swim_pace_seconds_per_100m
+            ),
+            "target_average_speed_kph": goal.target_average_speed_kph,
+            "target_finish_time_seconds": goal.target_finish_time_seconds,
         }
 
     async def _save_profile_goal(
@@ -2198,7 +2192,7 @@ class OnboardingService:
         repo: ProfileSettingsRepository,
         pending: dict[str, object],
     ) -> ProfileSettingsResult:
-        main_goal, outcome = pending.get("main_goal"), pending.get("target_outcome")
+        main_goal = pending.get("main_goal")
         secondary = pending.get("secondary_priority")
         raw_event_date = pending.get("event_date")
         event_date = (
@@ -2206,10 +2200,8 @@ class OnboardingService:
             if isinstance(raw_event_date, str)
             else None
         )
-        if (
-            not isinstance(main_goal, str)
-            or not isinstance(outcome, str)
-            or (secondary is not None and not isinstance(secondary, str))
+        if not isinstance(main_goal, str) or (
+            secondary is not None and not isinstance(secondary, str)
         ):
             raise OnboardingApplicationError("stale_action")
         profiles = ProfileRepository(session)
@@ -2218,15 +2210,13 @@ class OnboardingService:
             raise OnboardingApplicationError("stale_action")
         changed = (
             previous.main_goal,
-            previous.target_outcome,
             previous.event_date,
             previous.secondary_priority,
-        ) != (main_goal, outcome, event_date, secondary)
+        ) != (main_goal, event_date, secondary)
         await profiles.update_training_goal_fields(
             user_id=user_id,
             payload={
                 "main_goal": main_goal,
-                "target_outcome": outcome,
                 "event_date": event_date,
                 "secondary_priority": secondary,
             },
@@ -2359,6 +2349,7 @@ class OnboardingService:
             OnboardingStep.PROFILE_BIRTH_YEAR_INTAKE,
             OnboardingStep.PROFILE_WEIGHT_INTAKE,
             OnboardingStep.PROFILE_HEIGHT_INTAKE,
+            OnboardingStep.PROFILE_TIMEZONE_INTAKE,
         }:
             return await self._handle_profile_text(identity, text)
         if (
@@ -2371,11 +2362,6 @@ class OnboardingService:
             and onboarding.current_step is OnboardingStep.GOAL_METRIC_INTAKE
         ):
             return await self.submit_goal_metric(identity, text)
-        if (
-            onboarding.status is OnboardingStatus.ACTIVE
-            and onboarding.current_step is OnboardingStep.GOAL_MANUAL_TARGETS
-        ):
-            return await self.submit_manual_goal_targets(identity, text)
         if (
             onboarding.status is OnboardingStatus.ACTIVE
             and onboarding.current_step in _FREE_TEXT_CONTEXT_STEPS
@@ -2495,11 +2481,6 @@ class OnboardingService:
                     repository_profile_payload: dict[str, object] = dict(
                         athlete_profile_payload
                     )
-                    birth_year_value = repository_profile_payload.get("birth_year")
-                    if isinstance(birth_year_value, int):
-                        repository_profile_payload["age"] = (
-                            utc_now().year - birth_year_value
-                        )
                     gender_value = repository_profile_payload.get("gender")
                     if isinstance(gender_value, str):
                         repository_profile_payload["gender"] = AthleteGender(
@@ -2565,22 +2546,7 @@ class OnboardingService:
         for key, value in payload.items():
             if value is None:
                 continue
-            if key == "target_outcome":
-                if not isinstance(value, str):
-                    raise OnboardingApplicationError("invalid_onboarding_update")
-                clean_payload[key] = cls._normalize_update_text(
-                    value,
-                    maximum=500,
-                )
-            elif key == "age":
-                if (
-                    not isinstance(value, int)
-                    or isinstance(value, bool)
-                    or not 16 <= value <= 100
-                ):
-                    raise OnboardingApplicationError("invalid_onboarding_update")
-                clean_payload[key] = value
-            elif key == "birth_year":
+            if key == "birth_year":
                 if (
                     not isinstance(value, int)
                     or isinstance(value, bool)
@@ -2745,15 +2711,33 @@ class OnboardingService:
                     weight_kg=float(staged_weight_kg),
                     height_cm=float(height_cm),
                 )
+                onboarding = await OnboardingRepository(session).save_progress(
+                    user_id=user.id,
+                    current_step=OnboardingStep.PROFILE_TIMEZONE_INTAKE,
+                    answers=cast(dict[str, object], answers),
+                )
+                return self._result(user, onboarding)
+
+            if step is OnboardingStep.PROFILE_TIMEZONE_INTAKE:
+                timezone = self._parse_timezone(text)
+                if timezone is None:
+                    return self._result(
+                        user,
+                        onboarding,
+                        kind="profile_validation_error",
+                        error_code="invalid_timezone",
+                    )
+                await UserRepository(session).update_timezone(
+                    user_id=user.id, timezone=timezone
+                )
                 goal = await ProfileRepository(session).get_training_goal(
                     user_id=user.id
                 )
-                has_confirmed_goal = goal is not None
                 onboarding = await OnboardingRepository(session).save_progress(
                     user_id=user.id,
                     current_step=(
                         OnboardingStep.AVAILABILITY_INTAKE
-                        if has_confirmed_goal
+                        if goal is not None
                         else OnboardingStep.GOAL_INTAKE
                     ),
                     answers=cast(dict[str, object], answers),
@@ -3150,8 +3134,6 @@ class OnboardingService:
                 kind = "goal_swimming_type"
             elif onboarding.current_step is OnboardingStep.GOAL_METRIC_INTAKE:
                 kind = "goal_metric_intake"
-            elif onboarding.current_step is OnboardingStep.GOAL_MANUAL_TARGETS:
-                kind = "goal_manual_targets"
             elif onboarding.current_step is OnboardingStep.GOAL_CONFIRMED:
                 kind = "goal_confirmed"
             elif onboarding.current_step is OnboardingStep.PROFILE_BIRTH_YEAR_INTAKE:
@@ -3162,6 +3144,8 @@ class OnboardingService:
                 kind = "profile_weight_intake"
             elif onboarding.current_step is OnboardingStep.PROFILE_HEIGHT_INTAKE:
                 kind = "profile_height_intake"
+            elif onboarding.current_step is OnboardingStep.PROFILE_TIMEZONE_INTAKE:
+                kind = "profile_timezone_intake"
             elif onboarding.current_step is OnboardingStep.AVAILABILITY_INTAKE:
                 kind = "availability_intake"
             elif onboarding.current_step is OnboardingStep.AVAILABILITY_REVIEW:

@@ -273,10 +273,8 @@ def test_profile_equipment_table_and_long_context_fit_telegram() -> None:
             "health_limitations_text": "NONE_REPORTED",
             "training_goal": {
                 "main_goal": "Run a marathon <safely>",
-                "target_outcome": "Finish comfortably",
                 "event_date": date(2027, 4, 18),
                 "secondary_priority": None,
-                "status": "CONFIRMED",
             },
             "equipment_access": (
                 {
@@ -297,7 +295,6 @@ def test_profile_equipment_table_and_long_context_fit_telegram() -> None:
     assert "Run a marathon &lt;safely&gt;" in profile
     assert "April 18, 2027 (2027-04-18)" in profile
     assert "Secondary priority: Not set" in profile
-    assert "Status: Confirmed" in profile
     assert "[truncated for Telegram]" in profile
     assert len(profile) <= messages.TELEGRAM_MESSAGE_LIMIT
 
@@ -307,9 +304,9 @@ def test_goal_settings_menu_exposes_every_editable_goal_field() -> None:
     # catalog menu as onboarding (ps:v1:goal:main / ps:v1:goal:secondary),
     # not typed as free text.
     assert _button_pairs(keyboards.profile_goal_keyboard()) == [
-        ("Main goal", "ps:v1:goal:main"),
-        ("Target outcome", "ps:v1:goal:outcome"),
-        ("Event date", "ps:v1:goal:date"),
-        ("Secondary priority", "ps:v1:goal:secondary"),
+        ("Main goal: Not set", "ps:v1:goal:main"),
+        ("Performance targets: Not set", "ps:v1:goal:metrics"),
+        ("Event date: Not set", "ps:v1:goal:date"),
+        ("Supporting goal: Not set", "ps:v1:goal:secondary"),
         ("Back", "ps:v1:goal:back"),
     ]

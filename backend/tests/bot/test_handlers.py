@@ -17,10 +17,18 @@ from app.bot.rendering import TelegramResponse
 from app.schemas.common import TelegramIdentity
 
 
-def _context(service: object, *, error: Exception | None = None) -> Any:
+def _context(
+    service: object,
+    *,
+    screenshot_service: object | None = None,
+    error: Exception | None = None,
+) -> Any:
+    bot_data = {handlers.BOT_SERVICE_KEY: service}
+    if screenshot_service is not None:
+        bot_data[handlers.WORKOUT_SCREENSHOT_SERVICE_KEY] = screenshot_service
     return SimpleNamespace(
         application=SimpleNamespace(
-            bot_data={handlers.BOT_SERVICE_KEY: service},
+            bot_data=bot_data,
         ),
         error=error,
     )
@@ -34,6 +42,7 @@ def _update(*, callback_data: str | None = None) -> Any:
             data=callback_data,
             answer=AsyncMock(),
             edit_message_text=AsyncMock(),
+            message=message,
         )
     return SimpleNamespace(
         effective_user=SimpleNamespace(
@@ -135,33 +144,6 @@ async def test_add_workout_handler_delegates_identity_to_service() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("handler", "command"),
-    [
-        (handlers.connect_iphone_handler, "/connect_iphone"),
-        (handlers.disconnect_iphone_handler, "/disconnect_iphone"),
-    ],
-)
-async def test_iphone_command_handlers_delegate_identity_to_service(
-    handler: object, command: str
-) -> None:
-    service = SimpleNamespace(
-        handle_agent_input=AsyncMock(return_value=TelegramResponse("done")),
-    )
-    update = _update()
-
-    await handler(  # type: ignore[operator]
-        cast(Update, update),
-        cast(ContextTypes.DEFAULT_TYPE, _context(service)),
-    )
-
-    identity, message = service.handle_agent_input.await_args.args
-    assert identity.telegram_user_id == 8172
-    assert message.content == command
-    assert message.additional_kwargs["telegram_event_type"] == "text"
-
-
-@pytest.mark.asyncio
 async def test_callback_handler_acknowledges_and_delegates_action() -> None:
     service = SimpleNamespace(
         handle_agent_input=AsyncMock(
@@ -247,6 +229,71 @@ async def test_callback_edit_failure_falls_back_to_one_new_message() -> None:
     update.effective_message.reply_text.assert_awaited_once_with(
         "replacement",
         reply_markup=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_screenshot_save_callback_confirms_and_reports_success() -> None:
+    screenshot_service = SimpleNamespace(
+        confirm=AsyncMock(return_value=(SimpleNamespace(), "inserted")),
+    )
+    update = _update(callback_data="screenshot:confirm:draft-token")
+
+    await handlers.callback_handler(
+        cast(Update, update),
+        cast(
+            ContextTypes.DEFAULT_TYPE,
+            _context(SimpleNamespace(), screenshot_service=screenshot_service),
+        ),
+    )
+
+    screenshot_service.confirm.assert_awaited_once_with(
+        telegram_user_id=8172,
+        token="draft-token",
+    )
+    update.callback_query.edit_message_text.assert_awaited_once_with(
+        messages.SCREENSHOT_SAVED
+    )
+
+
+@pytest.mark.asyncio
+async def test_screenshot_heart_rate_callback_prompts_for_a_reply() -> None:
+    screenshot_service = SimpleNamespace(request_heart_rate=lambda **_: True)
+    update = _update(callback_data="screenshot:heart_rate:draft-token")
+
+    await handlers.callback_handler(
+        cast(Update, update),
+        cast(
+            ContextTypes.DEFAULT_TYPE,
+            _context(SimpleNamespace(), screenshot_service=screenshot_service),
+        ),
+    )
+
+    update.callback_query.edit_message_text.assert_awaited_once_with(
+        "Heart rate was not visible. Reply with average / maximum HR, "
+        "for example: 142 / 168."
+    )
+
+
+@pytest.mark.asyncio
+async def test_screenshot_callback_edit_failure_replies_to_the_chat() -> None:
+    screenshot_service = SimpleNamespace(request_heart_rate=lambda **_: True)
+    update = _update(callback_data="screenshot:heart_rate:draft-token")
+    update.callback_query.edit_message_text.side_effect = BadRequest(
+        "Message can't be edited"
+    )
+
+    await handlers.callback_handler(
+        cast(Update, update),
+        cast(
+            ContextTypes.DEFAULT_TYPE,
+            _context(SimpleNamespace(), screenshot_service=screenshot_service),
+        ),
+    )
+
+    update.effective_message.reply_text.assert_awaited_once_with(
+        "Heart rate was not visible. Reply with average / maximum HR, "
+        "for example: 142 / 168."
     )
 
 

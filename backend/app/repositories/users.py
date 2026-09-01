@@ -103,6 +103,14 @@ class UserRepository:
         await self._session.flush()
         return user
 
+    async def update_timezone(self, *, user_id: uuid.UUID, timezone: str) -> User:
+        """Persist an IANA timezone without changing profile lifecycle state."""
+
+        user = await self.require_by_id(user_id)
+        user.timezone = timezone
+        await self._session.flush()
+        return user
+
     async def delete(self, *, user_id: uuid.UUID) -> bool:
         """Delete the authenticated user and database-cascaded personal data."""
 

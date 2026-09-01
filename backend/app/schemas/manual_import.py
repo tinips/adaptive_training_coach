@@ -4,11 +4,8 @@ This is a deliberately separate, minimal path: a screenshot of a workout
 summary (for example, from a source app's own detail screen) gets read by
 an AI assistant, which extracts the metrics visible there and calls this
 endpoint directly. It exists because some source apps keep more accurate
-numbers privately than they ever export through HealthKit or a similar
-platform integration (see the swimming/heart-rate gaps documented in the
-mobile HealthKit sync path). Authentication is a single shared secret, not
-the per-installation mobile device pairing used by ``mobile_sync`` — this
-path is not tied to one phone.
+numbers privately than they expose in standard exports. Authentication is a
+single shared secret; this path is not tied to a particular phone.
 """
 
 from __future__ import annotations
@@ -51,7 +48,7 @@ class ManualSwimmingDetails(_StrictManualImportSchema):
 class ManualWorkoutImportRequest(_StrictManualImportSchema):
     """One workout, extracted from a screenshot rather than a device sync."""
 
-    discipline: Literal["RUNNING", "CYCLING", "SWIMMING"]
+    discipline: Literal["RUNNING", "CYCLING", "SWIMMING", "STRENGTH"]
     source_app_name: NonEmptyText
     started_at: datetime
     duration_seconds: int = Field(gt=0, le=7 * 24 * 60 * 60)

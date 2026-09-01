@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.base import utc_now
 from app.db.models import AthleteProfile, TrainingGoal, User
-from app.domain.enums import AthleteGender, TrainingGoalStatus
+from app.domain.enums import AthleteGender
 from app.repositories.errors import OwnedRecordNotFoundError
 
 
@@ -77,9 +77,7 @@ class ProfileRepository:
         user_id: uuid.UUID,
         main_goal: str,
         event_date: date | None,
-        target_outcome: str,
         secondary_priority: str | None,
-        original_description: str,
         goal_template_id: uuid.UUID | None = None,
         supporting_goal_template_id: uuid.UUID | None = None,
         target_distance_km: float | None = None,
@@ -100,7 +98,6 @@ class ProfileRepository:
             self._session.add(goal)
         goal.main_goal = main_goal
         goal.event_date = event_date
-        goal.target_outcome = target_outcome
         goal.secondary_priority = secondary_priority
         goal.goal_template_id = goal_template_id
         goal.supporting_goal_template_id = supporting_goal_template_id
@@ -111,8 +108,6 @@ class ProfileRepository:
         goal.target_average_speed_kph = target_average_speed_kph
         goal.target_finish_time_seconds = target_finish_time_seconds
         goal.goal_metadata_jsonb = goal_metadata_jsonb
-        goal.original_description = original_description
-        goal.status = TrainingGoalStatus.CONFIRMED
         await self._session.flush()
         return goal
 
@@ -120,7 +115,7 @@ class ProfileRepository:
         self, *, user_id: uuid.UUID, payload: Mapping[str, object]
     ) -> AthleteProfile:
         return await self._update_profile(
-            user_id, payload, {"age", "birth_year", "gender", "weight_kg", "height_cm"}
+            user_id, payload, {"birth_year", "gender", "weight_kg", "height_cm"}
         )
 
     async def update_athlete_profile_context_fields(
@@ -158,7 +153,6 @@ class ProfileRepository:
         if not payload or not set(payload).issubset(
             {
                 "main_goal",
-                "target_outcome",
                 "event_date",
                 "secondary_priority",
                 "goal_template_id",
@@ -198,13 +192,12 @@ class ProfileRepository:
         await self._require_user(user_id)
         profile = await self.get_athlete_profile(user_id=user_id)
         if profile is None:
-            profile = AthleteProfile(user_id=user_id, age=utc_now().year - birth_year)
+            profile = AthleteProfile(user_id=user_id)
             self._session.add(profile)
         profile.birth_year = birth_year
         profile.gender = gender
         profile.weight_kg = weight_kg
         profile.height_cm = height_cm
-        profile.age = utc_now().year - birth_year
         await self._session.flush()
         return profile
 

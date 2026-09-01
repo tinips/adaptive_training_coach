@@ -104,7 +104,6 @@ DISCIPLINE_CASES: tuple[
             hiking_type=HikingType.HIKING,
             distance_meters=8000,
             moving_duration_seconds=7200,
-            pack_weight_kg=6,
         ),
         HikingWorkoutDetailsRead,
     ),

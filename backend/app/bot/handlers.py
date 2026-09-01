@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import cast
 
@@ -65,24 +66,6 @@ async def add_workout_handler(
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
     await _agent_delegate(update, context, "/add_workout")
-
-
-async def connect_iphone_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-    """Start the deterministic iPhone pairing flow."""
-
-    await _agent_delegate(update, context, "/connect_iphone")
-
-
-async def disconnect_iphone_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-    """Revoke the deterministic iPhone pairing flow."""
-
-    await _agent_delegate(update, context, "/disconnect_iphone")
 
 
 async def cancel_handler(
@@ -166,6 +149,21 @@ async def text_handler(
         or identity is None
         or not _authorized(update, context)
     ):
+        return
+    try:
+        draft = _workout_screenshot_service(context).provide_heart_rate(
+            telegram_user_id=identity.telegram_user_id,
+            text=message.text,
+        )
+    except ValueError:
+        await message.reply_text(
+            "Reply with average / maximum HR, for example: 142 / 168."
+        )
+        return
+    if draft is not None:
+        await message.reply_text(
+            _format_draft_summary(draft), reply_markup=_screenshot_keyboard(draft)
+        )
         return
     response = await _service(context).handle_agent_input(
         identity,
@@ -292,23 +290,9 @@ async def workout_screenshot_handler(
         await status_message.edit_text(messages.SCREENSHOT_EXTRACTION_FAILED)
         return
 
-    keyboard = InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(
-                    messages.SCREENSHOT_CONFIRM_BUTTON,
-                    callback_data=f"screenshot:confirm:{draft.token}",
-                ),
-                InlineKeyboardButton(
-                    messages.SCREENSHOT_CANCEL_BUTTON,
-                    callback_data=f"screenshot:cancel:{draft.token}",
-                ),
-            ]
-        ]
-    )
     await status_message.edit_text(
         _format_draft_summary(draft),
-        reply_markup=keyboard,
+        reply_markup=_screenshot_keyboard(draft),
     )
 
 
@@ -329,6 +313,17 @@ async def _handle_screenshot_callback(
     if action == "cancel":
         service.cancel(telegram_user_id=user.id, token=token)
         await _edit_or_reply(query, messages.SCREENSHOT_DISCARDED)
+        return
+
+    if action == "heart_rate":
+        if not service.request_heart_rate(telegram_user_id=user.id, token=token):
+            await _edit_or_reply(query, messages.SCREENSHOT_DRAFT_EXPIRED)
+            return
+        await _edit_or_reply(
+            query,
+            "Heart rate was not visible. Reply with average / maximum HR, "
+            "for example: 142 / 168.",
+        )
         return
 
     if action != "confirm":
@@ -359,8 +354,12 @@ async def _edit_or_reply(query: CallbackQuery, text: str) -> None:
     try:
         await query.edit_message_text(text)
     except BadRequest as exc:
-        if "message is not modified" not in str(exc).lower():
-            logger.info("telegram_screenshot_message_edit_unavailable")
+        if "message is not modified" in str(exc).lower():
+            return
+        logger.info("telegram_screenshot_message_edit_unavailable")
+        reply_text = getattr(query.message, "reply_text", None)
+        if callable(reply_text):
+            await cast(Callable[[str], Awaitable[object]], reply_text)(text)
 
 
 def _format_draft_summary(draft: ScreenshotDraft) -> str:
@@ -378,6 +377,8 @@ def _format_draft_summary(draft: ScreenshotDraft) -> str:
         lines.append(f"Active calories: {request.calories_active_kcal:.0f} kcal")
     if request.average_heart_rate is not None:
         lines.append(f"Avg heart rate: {request.average_heart_rate:.0f} bpm")
+    if request.max_heart_rate is not None:
+        lines.append(f"Max heart rate: {request.max_heart_rate:.0f} bpm")
     if request.swimming is not None:
         swim = request.swimming
         if swim.total_lengths is not None:
@@ -389,6 +390,28 @@ def _format_draft_summary(draft: ScreenshotDraft) -> str:
     lines.append("")
     lines.append(messages.SCREENSHOT_CONFIRM_PROMPT)
     return "\n".join(lines)
+
+
+def _screenshot_keyboard(draft: ScreenshotDraft) -> InlineKeyboardMarkup:
+    buttons = [
+        InlineKeyboardButton(
+            messages.SCREENSHOT_CONFIRM_BUTTON,
+            callback_data=f"screenshot:confirm:{draft.token}",
+        )
+    ]
+    if draft.request.average_heart_rate is None or draft.request.max_heart_rate is None:
+        buttons.append(
+            InlineKeyboardButton(
+                "Add heart rate", callback_data=f"screenshot:heart_rate:{draft.token}"
+            )
+        )
+    buttons.append(
+        InlineKeyboardButton(
+            messages.SCREENSHOT_CANCEL_BUTTON,
+            callback_data=f"screenshot:cancel:{draft.token}",
+        )
+    )
+    return InlineKeyboardMarkup([buttons])
 
 
 def _workout_screenshot_service(

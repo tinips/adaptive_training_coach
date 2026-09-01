@@ -13,8 +13,6 @@ from app.bot.handlers import (
     BOT_SERVICE_KEY,
     DEV_USER_IDS_KEY,
     add_workout_handler,
-    connect_iphone_handler,
-    disconnect_iphone_handler,
     document_handler,
     web_app_data_handler,
 )
@@ -36,7 +34,7 @@ def test_create_application_registers_handlers_and_injects_facade() -> None:
     application = create_application(settings, service=service)
 
     assert application.bot_data[BOT_SERVICE_KEY] is service
-    assert len(application.handlers[0]) == 13
+    assert len(application.handlers[0]) == 11
     registered = [
         handler
         for handler in application.handlers[0]
@@ -45,17 +43,6 @@ def test_create_application_registers_handlers_and_injects_facade() -> None:
     ]
     assert len(registered) == 1
     assert registered[0].callback is add_workout_handler
-    mobile_commands = {
-        command: handler.callback
-        for handler in application.handlers[0]
-        if isinstance(handler, CommandHandler)
-        for command in handler.commands
-        if command in {"connect_iphone", "disconnect_iphone"}
-    }
-    assert mobile_commands == {
-        "connect_iphone": connect_iphone_handler,
-        "disconnect_iphone": disconnect_iphone_handler,
-    }
     web_app_handlers = [
         handler
         for handler in application.handlers[0]
