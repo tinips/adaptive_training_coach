@@ -10,6 +10,7 @@ from app.repositories.athlete_capabilities import AthleteCapabilityRepository
 from app.repositories.profiles import ProfileRepository
 from app.repositories.training_catalog import TrainingCatalogRepository
 from app.repositories.users import UserRepository
+from app.schemas.availability import ConfirmedWeeklyAvailability
 from app.schemas.capabilities import CapabilityAccessItem
 from app.schemas.profile import PersistedMandatoryProfileData, PersistedTrainingGoalData
 
@@ -57,7 +58,13 @@ class ProfileService:
                 weight_kg=profile.weight_kg,
                 height_cm=profile.height_cm,
                 timezone=user.timezone if user is not None else None,
-                availability_text=profile.availability_text,
+                weekly_availability=(
+                    ConfirmedWeeklyAvailability.model_validate(
+                        profile.weekly_availability_jsonb
+                    )
+                    if profile.weekly_availability_jsonb is not None
+                    else None
+                ),
                 equipment_access=tuple(
                     CapabilityAccessItem(
                         code=item.code,

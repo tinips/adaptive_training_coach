@@ -86,7 +86,9 @@ async def submit_baseline(request: Request) -> dict[str, bool]:
                 "text": "Baseline saved. I have your starting point and will use completed workouts to refine your plan.",
                 "reply_markup": keyboards.completed_onboarding_keyboard(
                     workout_history_url=workout_history_web_app_url(
-                        settings.telegram_web_app_url
+                        settings.telegram_web_app_url,
+                        telegram_user_id=identity.telegram_user_id,
+                        bot_token=settings.telegram_bot_token,
                     )
                 ).to_dict(),
             },

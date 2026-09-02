@@ -11,6 +11,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import UUID
 
 from langchain_core.messages import HumanMessage
+from pydantic import SecretStr
 from telegram import ReplyKeyboardMarkup
 
 from app.api.routes.telegram_web_app import workout_history_web_app_url
@@ -83,6 +84,7 @@ class CoachBotApplicationService:
         tcx_enabled: bool = True,
         planning: WeeklyPlanningBotPort | None = None,
         telegram_web_app_url: str | None = None,
+        telegram_web_app_token: SecretStr | None = None,
     ) -> None:
         self._onboarding = onboarding
         self._profiles = profiles
@@ -93,6 +95,7 @@ class CoachBotApplicationService:
         self._tcx_enabled = tcx_enabled
         self._planning = planning
         self._telegram_web_app_url = telegram_web_app_url
+        self._telegram_web_app_token = telegram_web_app_token
 
     async def handle_agent_input(
         self, identity: TelegramIdentity, message: HumanMessage
@@ -135,7 +138,6 @@ class CoachBotApplicationService:
                 keyboards.LABELS["start"]: "/start",
                 keyboards.LABELS["resume_menu"]: "/start",
                 keyboards.LABELS["profile"]: "/profile",
-                keyboards.LABELS["add_workout"]: "/add_workout",
                 keyboards.LABELS["plan_next_week"]: "/plan_next_week",
                 keyboards.LABELS["view_weekly_plan"]: "/view_weekly_plan",
                 keyboards.LABELS["delete"]: "/delete_me",
@@ -150,7 +152,6 @@ class CoachBotApplicationService:
             "/start",
             "/help",
             "/profile",
-            "/add_workout",
             "/plan_next_week",
             "/view_weekly_plan",
             "/cancel",
@@ -182,7 +183,7 @@ class CoachBotApplicationService:
                 if result is not None
                 else TelegramResponse(
                     messages.PROFILE_SETTINGS_UNPROMPTED,
-                    user_keyboard=self._completed_onboarding_keyboard(),
+                    user_keyboard=self._completed_onboarding_keyboard(identity),
                 )
             )
         return await self._dispatch(identity, event_type, content)
@@ -196,7 +197,6 @@ class CoachBotApplicationService:
             "/start": self.start,
             "/help": self._help,
             "/profile": self.profile,
-            "/add_workout": self.add_workout,
             "/plan_next_week": self.plan_next_week,
             "/view_weekly_plan": self.view_weekly_plan,
             "/cancel": self.cancel,
@@ -334,15 +334,26 @@ class CoachBotApplicationService:
                 if self._planning is not None
                 else False
             )
-            return self._completed_onboarding_keyboard(plan_available=plan_available)
+            return self._completed_onboarding_keyboard(
+                identity, plan_available=plan_available
+            )
         return keyboards.onboarding_keyboard()
 
     def _completed_onboarding_keyboard(
-        self, *, plan_available: bool = False
+        self,
+        identity: TelegramIdentity | None = None,
+        *,
+        plan_available: bool = False,
     ) -> ReplyKeyboardMarkup:
         return keyboards.completed_onboarding_keyboard(
             plan_available=plan_available,
-            workout_history_url=workout_history_web_app_url(self._telegram_web_app_url),
+            workout_history_url=workout_history_web_app_url(
+                self._telegram_web_app_url,
+                telegram_user_id=(
+                    identity.telegram_user_id if identity is not None else None
+                ),
+                bot_token=self._telegram_web_app_token,
+            ),
         )
 
     @staticmethod
@@ -509,11 +520,6 @@ class CoachBotApplicationService:
             else TelegramResponse(messages.NOT_FOUND)
         )
 
-    async def add_workout(self, _: TelegramIdentity) -> TelegramResponse:
-        return TelegramResponse(
-            messages.ADD_WORKOUT_REQUEST, keyboards.add_workout_keyboard()
-        )
-
     async def plan_next_week(self, identity: TelegramIdentity) -> TelegramResponse:
         if self._planning is None:
             return TelegramResponse(messages.WEEKLY_PLAN_UNAVAILABLE)
@@ -571,6 +577,11 @@ class CoachBotApplicationService:
     async def _render_profile_settings(
         self, result: ProfileSettingsResult, identity: TelegramIdentity
     ) -> TelegramResponse:
+        if result.confirm_discard:
+            return TelegramResponse(
+                messages.PROFILE_DISCARD_CHANGES,
+                keyboards.profile_discard_changes_keyboard(),
+            )
         if result.step.value == "GOAL_MAIN":
             sport = result.pending.get(_GOAL_SPORT_ANSWER_KEY)
             if isinstance(sport, str) and sport:
@@ -616,6 +627,13 @@ class CoachBotApplicationService:
             return TelegramResponse(
                 messages.availability_review(result.pending.get("availability_draft")),
                 keyboards.profile_availability_review_keyboard(),
+            )
+        if result.step.value == "AVAILABILITY":
+            return TelegramResponse(
+                messages.profile_availability_prompt(
+                    result.pending.get("current_availability")
+                ),
+                keyboards.profile_settings_text_keyboard(),
             )
         if result.step.value == "EQUIPMENT" and result.capability_review is not None:
             review = result.capability_review
@@ -892,7 +910,7 @@ class CoachBotApplicationService:
                     if result.training_history_skipped
                     else messages.ONBOARDING_COMPLETED
                 ),
-                user_keyboard=self._completed_onboarding_keyboard(),
+                user_keyboard=self._completed_onboarding_keyboard(identity),
             )
         if result.kind in mapping:
             text, keyboard = mapping[result.kind]

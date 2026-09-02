@@ -123,11 +123,18 @@ class WorkoutScreenshotService:
             if user is None:
                 raise WorkoutScreenshotNotFoundError("athlete not recognized")
 
-            incoming = from_manual_screenshot(draft.request)
-            result = await TrainingActivityRepository(session).import_activity(
-                user_id=user.id,
-                incoming=incoming,
-            )
+            try:
+                incoming = from_manual_screenshot(draft.request)
+                result = await TrainingActivityRepository(session).import_activity(
+                    user_id=user.id,
+                    incoming=incoming,
+                )
+            except ActivityImportValidationError:
+                raise
+            except ValueError as error:
+                raise ActivityImportValidationError(
+                    "screenshot draft could not be normalized"
+                ) from error
         self._pending.pop(token, None)
         return result
 

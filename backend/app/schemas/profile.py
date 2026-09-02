@@ -5,6 +5,7 @@ from datetime import date
 from pydantic import BaseModel
 
 from app.domain.enums import AthleteGender
+from app.schemas.availability import ConfirmedWeeklyAvailability
 from app.schemas.capabilities import CapabilityAccessItem
 
 
@@ -28,7 +29,7 @@ class PersistedMandatoryProfileData(BaseModel):
     weight_kg: float
     height_cm: float
     timezone: str | None = None
-    availability_text: str | None = None
+    weekly_availability: ConfirmedWeeklyAvailability | None = None
     equipment_access: tuple[CapabilityAccessItem, ...] = ()
     health_limitations_text: str | None = None
     training_goal: PersistedTrainingGoalData | None = None

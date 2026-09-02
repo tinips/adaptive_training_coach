@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import re
 from enum import StrEnum
+from typing import cast
 
 from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig, RunnableLambda
@@ -65,7 +67,7 @@ class DeterministicFakeOnboardingModel:
                     output={"confidence": "not-a-number"},
                 )
             payload = (
-                _fake_availability()
+                _fake_availability(messages)
                 if step is OnboardingStep.AVAILABILITY_INTAKE
                 else _fake_weekly_plan(user_text)
             )
@@ -154,7 +156,31 @@ def _fake_weekly_plan(request_json: str) -> dict[str, object]:
     return {"week_start": week_start.isoformat(), "days": days}
 
 
-def _fake_availability() -> dict[str, object]:
+def _fake_availability(messages: list[BaseMessage]) -> dict[str, object]:
+    current = _current_availability(messages)
+    if current is not None:
+        revised_days = current["days"]
+        request = _last_user_text(messages).casefold()
+        if "tuesday" in request and "swim" in request:
+            duration_match = re.search(r"\b(\d{1,4})\b", request)
+            duration = int(duration_match.group(1)) if duration_match else 60
+            revised_days["tuesday"] = {
+                "available": True,
+                "disciplines": ["swimming"],
+                "time_windows": [
+                    {
+                        "time_of_day": "evening" if "evening" in request else None,
+                        "duration_minutes": duration,
+                    }
+                ],
+            }
+        return {
+            "parse_status": "complete",
+            "clarification_reason": None,
+            "missing_details": [],
+            "days": revised_days,
+        }
+
     days: dict[str, object] = {}
     for day in (
         "monday",
@@ -177,3 +203,26 @@ def _fake_availability() -> dict[str, object]:
         "missing_details": [],
         "days": days,
     }
+
+
+def _current_availability(
+    messages: list[BaseMessage],
+) -> dict[str, dict[str, object]] | None:
+    marker = "weekly schedule:\n"
+    suffix = "\n\nApply only the requested changes."
+    for message in messages:
+        content = message.content
+        if not isinstance(content, str) or marker not in content:
+            continue
+        try:
+            raw = content.split(marker, maxsplit=1)[1].split(suffix, maxsplit=1)[0]
+            schedule = json.loads(raw)
+            days = schedule.get("days")
+            if isinstance(days, dict):
+                return cast(
+                    dict[str, dict[str, object]],
+                    json.loads(json.dumps({"days": days})),
+                )
+        except (IndexError, json.JSONDecodeError):
+            return None
+    return None

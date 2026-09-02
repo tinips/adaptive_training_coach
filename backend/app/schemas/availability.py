@@ -52,9 +52,8 @@ class AvailabilityExtraction(BaseModel):
 class ConfirmedWeeklyAvailability(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     status: Literal["confirmed"] = "confirmed"
-    source_text: str = Field(min_length=3, max_length=2000)
     days: dict[str, AvailabilityDay]
 
     @model_validator(mode="after")

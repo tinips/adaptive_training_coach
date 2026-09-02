@@ -25,6 +25,27 @@ from app.schemas.capabilities import (
 )
 
 
+def _weekly_availability() -> dict[str, object]:
+    days: dict[str, object] = {
+        day: {"available": False, "disciplines": [], "time_windows": []}
+        for day in (
+            "monday",
+            "tuesday",
+            "wednesday",
+            "thursday",
+            "friday",
+            "saturday",
+            "sunday",
+        )
+    }
+    days["saturday"] = {
+        "available": True,
+        "disciplines": ["running", "cycling", "swimming", "strength_training"],
+        "time_windows": [{"time_of_day": "morning", "duration_minutes": 120}],
+    }
+    return {"schema_version": 2, "status": "confirmed", "days": days}
+
+
 def _button_pairs(markup: InlineKeyboardMarkup) -> list[tuple[str, str]]:
     return [
         (button.text, button.callback_data)
@@ -45,11 +66,8 @@ def test_onboarding_keyboards_expose_only_supported_actions() -> None:
         ("Female", "ob:v1:profile:gender:FEMALE"),
         ("Cancel", "ob:v1:cancel"),
     ]
-    assert _button_pairs(keyboards.add_workout_keyboard()) == [
-        ("Cancel", "ob:v1:cancel"),
-    ]
     assert _button_pairs(keyboards.profile_settings_text_keyboard()) == [
-        ("Back / Done", "ps:v1:done"),
+        ("Done", "ps:v1:done"),
     ]
 
 
@@ -135,7 +153,7 @@ def test_callback_values_fit_telegram_limit() -> None:
         keyboards.profile_gender_keyboard(),
         keyboards.equipment_intake_keyboard(),
         keyboards.health_limitations_keyboard(),
-        keyboards.add_workout_keyboard(),
+        keyboards.profile_discard_changes_keyboard(),
     ]
     callbacks = [
         callback for markup in samples for _, callback in _button_pairs(markup)
@@ -157,7 +175,7 @@ def test_lifecycle_reply_keyboards_expose_exact_account_actions() -> None:
     ]
     assert [[button.text for button in row] for row in completed.keyboard] == [
         ["Profile", "Change profile"],
-        ["Add workout", "Plan next week"],
+        ["Plan next week"],
         ["Delete"],
     ]
     assert all(
@@ -170,7 +188,7 @@ def test_completed_keyboard_adds_history_mini_app_for_configured_public_url() ->
         workout_history_url="https://coach.example/webapp/workout-history"
     )
 
-    history = completed.keyboard[1][1]
+    history = completed.keyboard[1][0]
     assert history.text == "Workout history"
     assert history.web_app is not None
     assert history.web_app.url == "https://coach.example/webapp/workout-history"
@@ -264,13 +282,15 @@ def test_import_and_profile_messages_do_not_reference_removed_features() -> None
             "gender": "FEMALE",
             "weight_kg": 62.5,
             "height_cm": 168,
-            "availability_text": "Weekends",
+            "weekly_availability": _weekly_availability(),
         }
     )
 
     assert "Your training history was updated." in imported
     assert "Birth year: 1988" in profile
-    assert "Availability: Weekends" in profile
+    assert "Weekly availability" in profile
+    assert "Sat" in profile
+    assert "Run/Bike/Swim/Str" in profile
 
 
 def test_profile_equipment_table_and_long_context_fit_telegram() -> None:
@@ -280,8 +300,8 @@ def test_profile_equipment_table_and_long_context_fit_telegram() -> None:
             "gender": "FEMALE",
             "weight_kg": 62.5,
             "height_cm": 168,
-            "availability_text": "<weekend> " * 500,
-            "health_limitations_text": "NONE_REPORTED",
+            "weekly_availability": _weekly_availability(),
+            "health_limitations_text": "<weekend> " * 500,
             "training_goal": {
                 "main_goal": "Run a marathon <safely>",
                 "event_date": date(2027, 4, 18),
@@ -300,7 +320,6 @@ def test_profile_equipment_table_and_long_context_fit_telegram() -> None:
     assert "<pre>" in profile
     assert "Resource" in profile
     assert "Running shoes" in profile
-    assert "None reported" in profile
     assert "&lt;weekend&gt;" in profile
     assert "<b>Training goal</b>" in profile
     assert "Run a marathon &lt;safely&gt;" in profile

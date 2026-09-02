@@ -118,32 +118,6 @@ async def test_lifecycle_refresh_preserves_inline_controls_without_extra_message
 
 
 @pytest.mark.asyncio
-async def test_add_workout_handler_delegates_identity_to_service() -> None:
-    service = SimpleNamespace(
-        handle_agent_input=AsyncMock(return_value=TelegramResponse("send a file")),
-    )
-    update = _update()
-
-    await handlers.add_workout_handler(
-        cast(Update, update),
-        cast(ContextTypes.DEFAULT_TYPE, _context(service)),
-    )
-
-    identity, message = service.handle_agent_input.await_args.args
-    assert identity == TelegramIdentity(
-        telegram_user_id=8172,
-        telegram_username="runner",
-        first_name="Ada",
-        language_code="es",
-    )
-    assert message.content == "/add_workout"
-    update.effective_message.reply_text.assert_awaited_once_with(
-        "send a file",
-        reply_markup=None,
-    )
-
-
-@pytest.mark.asyncio
 async def test_callback_handler_acknowledges_and_delegates_action() -> None:
     service = SimpleNamespace(
         handle_agent_input=AsyncMock(

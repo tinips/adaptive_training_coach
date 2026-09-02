@@ -315,7 +315,6 @@ class AthleteProfile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     height_cm: Mapped[float | None] = mapped_column(Float, nullable=True)
     weight_kg: Mapped[float | None] = mapped_column(Float, nullable=True)
-    availability_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     weekly_availability_jsonb: Mapped[dict[str, object] | None] = mapped_column(
         json_document(), nullable=True
     )

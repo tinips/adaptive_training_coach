@@ -61,6 +61,9 @@ async def test_history_web_app_serves_dashboard_and_requires_signed_data() -> No
     assert "Workout history" in page.text
     assert "data-days=\"90\"" in page.text
     assert "data-metric=\"distance\"" in page.text
+    assert "Daily totals" in page.text
+    assert "Loading workout history" in page.text
+    assert "aria-describedby" in page.text
     assert rejected.status_code == 401
     await engine.dispose()
 

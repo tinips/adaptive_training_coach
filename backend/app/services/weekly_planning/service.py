@@ -416,9 +416,6 @@ class WeeklyPlanningService:
                         for item in target_contexts
                     ],
                 },
-                # Raw profile text is intentionally prompt-only. It is not put in
-                # evidence_snapshot, input_digest, LLMUsage, or log messages.
-                "availability": profile.availability_text if profile else None,
                 "confirmed_availability": _confirmed_availability(profile),
                 "health_limitations": (
                     profile.health_limitations_text if profile else None

@@ -22,13 +22,36 @@ from app.db.models import OnboardingSession, ProfileSettingsSession, TrainingGoa
 from app.domain.enums import AthleteGender, OnboardingStatus, OnboardingStep, UserStatus
 from app.repositories.athlete_capabilities import AthleteCapabilityRepository
 from app.repositories.onboarding import OnboardingRepository
+from app.repositories.profile_settings import ProfileSettingsRepository
 from app.repositories.profiles import ProfileRepository
 from app.repositories.training_catalog import TrainingCatalogRepository
 from app.repositories.users import UserRepository
+from app.schemas.availability import ConfirmedWeeklyAvailability
 from app.schemas.common import TelegramIdentity
 from app.services.accounts import AccountQueryService, AccountService
 from app.services.onboarding import OnboardingApplicationError, OnboardingService
 from app.services.profiles import ProfileService
+
+
+def _confirmed_availability() -> dict[str, object]:
+    days: dict[str, object] = {
+        day: {"available": False, "disciplines": [], "time_windows": []}
+        for day in (
+            "monday",
+            "tuesday",
+            "wednesday",
+            "thursday",
+            "friday",
+            "saturday",
+            "sunday",
+        )
+    }
+    days["tuesday"] = {
+        "available": True,
+        "disciplines": ["running"],
+        "time_windows": [{"time_of_day": "evening", "duration_minutes": 60}],
+    }
+    return ConfirmedWeeklyAvailability(days=days).model_dump(mode="json")
 
 
 @pytest_asyncio.fixture
@@ -138,8 +161,7 @@ async def _seed_completed_profile_for_settings(
         assert goal.id is not None
         profile = await profiles.get_athlete_profile(user_id=user.id)
         assert profile is not None
-        profile.availability_text = "Tuesday and Thursday evenings"
-        profile.weekly_availability_jsonb = {"days": {}}
+        profile.weekly_availability_jsonb = _confirmed_availability()
         onboarding = await OnboardingRepository(session).require_for_user(
             user_id=user.id
         )
@@ -218,11 +240,51 @@ async def test_change_profile_main_goal_patches_only_goal_and_shows_current_valu
     assert goal.target_pace_seconds_per_km is None
     assert goal.target_average_speed_kph is None
     assert profile is not None
-    assert profile.availability_text == "Tuesday and Thursday evenings"
+    assert profile.weekly_availability_jsonb == _confirmed_availability()
     assert onboarding.status is OnboardingStatus.ACTIVE
     assert onboarding.current_step is OnboardingStep.TRAINING_HISTORY_IMPORT
     assert settings is not None
     assert settings.current_step.value == "GOAL_MENU"
+
+
+@pytest.mark.asyncio
+async def test_profile_availability_change_revises_and_confirms_structured_week(
+    journey: tuple[
+        CoachBotApplicationService,
+        async_sessionmaker[AsyncSession],
+    ],
+) -> None:
+    bot, factory = journey
+    athlete = _athlete()
+    await _seed_completed_profile_for_settings(bot, factory, athlete)
+
+    await _agent_input(bot, "Change profile")
+    current = await bot.handle_callback(athlete, "ps:v1:section:availability")
+    revised = await _agent_input(
+        bot, "Make Tuesday evening swimming for 45 minutes instead."
+    )
+    saved = await bot.handle_callback(athlete, "ps:v1:availability:confirm")
+
+    assert "Current weekly availability" in current.text
+    assert "Tue" in current.text
+    assert "Swim" in revised.text
+    assert "45m" in revised.text
+    assert "Saved: Availability." in saved.text
+
+    async with factory() as session:
+        user = await UserRepository(session).get_by_telegram_id(
+            athlete.telegram_user_id
+        )
+        assert user is not None
+        profile = await ProfileRepository(session).get_athlete_profile(user_id=user.id)
+        state = await ProfileSettingsRepository(session).get_or_create(user_id=user.id)
+
+    assert profile is not None
+    assert profile.weekly_availability_jsonb is not None
+    tuesday = profile.weekly_availability_jsonb["days"]["tuesday"]
+    assert tuesday["disciplines"] == ["swimming"]
+    assert tuesday["time_windows"][0]["duration_minutes"] == 45
+    assert state.pending_answers == {}
 
 
 @pytest.mark.asyncio
@@ -316,7 +378,7 @@ async def test_journey_collects_profile_goal_and_required_context_before_complet
     assert "Running shoes" in profile_button.text
     assert _reply_buttons(profile_button) == [
         ["Profile", "Change profile"],
-        ["Add workout", "Plan next week"],
+        ["Plan next week"],
         ["Delete"],
     ]
 
@@ -341,9 +403,12 @@ async def test_journey_collects_profile_goal_and_required_context_before_complet
         assert profile.gender is AthleteGender.FEMALE
         assert profile.weight_kg == 62.5
         assert profile.height_cm == 168.0
-        assert profile.availability_text == (
-            "Tuesday and Thursday evenings, plus a longer Saturday run."
-        )
+        assert profile.weekly_availability_jsonb is not None
+        assert profile.weekly_availability_jsonb["schema_version"] == 2
+        assert "source_text" not in profile.weekly_availability_jsonb
+        assert profile.weekly_availability_jsonb["days"]["tuesday"]["available"]
+        assert "availability_source_text" not in state.answers
+        assert "availability_draft" not in state.answers
         assert profile.health_limitations_text == "NONE_REPORTED"
         selected_equipment = await AthleteCapabilityRepository(session).available(
             athlete_id=user.id
@@ -372,9 +437,8 @@ async def test_journey_collects_profile_goal_and_required_context_before_complet
     availability_current = await bot.handle_callback(
         athlete, "ps:v1:section:availability"
     )
-    assert "Tuesday and Thursday evenings, plus a longer Saturday run." in (
-        availability_current.text
-    )
+    assert "Current weekly availability" in availability_current.text
+    assert "Tue" in availability_current.text
     availability_closed = await bot.handle_callback(athlete, "ps:v1:done")
     assert availability_closed.text == messages.PROFILE_SETTINGS_CLOSED
 

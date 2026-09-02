@@ -18,7 +18,6 @@ from app.repositories.errors import OwnedRecordNotFoundError
 
 @dataclass(frozen=True, slots=True)
 class AthleteProfileContext:
-    availability_text: str | None
     weekly_availability_jsonb: dict[str, object] | None
     health_limitations_text: str | None
 
@@ -50,7 +49,6 @@ class ProfileRepository:
         if profile is None:
             return None
         return AthleteProfileContext(
-            availability_text=profile.availability_text,
             weekly_availability_jsonb=profile.weekly_availability_jsonb,
             health_limitations_text=profile.health_limitations_text,
         )
@@ -125,7 +123,6 @@ class ProfileRepository:
             user_id,
             payload,
             {
-                "availability_text",
                 "weekly_availability_jsonb",
                 "health_limitations_text",
             },

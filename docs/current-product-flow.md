@@ -77,9 +77,11 @@ CONSENT
   -> successful Apple Health/TCX import or Skip for now -> COMPLETED
 ```
 
-Availability and training-limitations free text use the compiled stateless
-LangGraph validation boundary and are stored literally. Equipment & access
-callbacks are fully deterministic and never invoke a model.
+Availability is interpreted by the structured extraction boundary, reviewed as a
+seven-day schedule, and persisted only after confirmation. The original request
+text remains transient and is deleted after confirmation. Training limitations
+remain literal free text. Equipment & access callbacks are fully deterministic
+and never invoke a model.
 
 ## Equipment & access
 
@@ -139,9 +141,17 @@ may produce canonical average/max heart rate; coarse observations are retained
 for future recomputation but do not create misleading aggregates. Reimporting
 the same file is idempotent for workouts and observations.
 
+Confirmed workout screenshots use a stable fingerprint of discipline, start
+time, duration, and distance. Retrying confirmation or sending the same
+extracted workout therefore resolves to the existing canonical workout rather
+than creating a second one. Similar-but-not-identical sessions are retained:
+the coach does not guess at possible duplicates.
+
 A successful onboarding import writes workouts, source links, observations,
 the successful job, and onboarding completion atomically. Completed athletes
-can use the same importer through **Add workout**. Baseline calculation,
+can send a completed-workout screenshot directly in the Telegram chat. The
+photo handler reads it, displays the extracted summary, and saves only after
+the athlete confirms. Baseline calculation,
 subjective feedback, and planner adaptation remain future work.
 
 ## Persistence
@@ -182,10 +192,9 @@ must be classified before Equipment & access can open. No generic update path
 can write `main_goal` directly.
 
 `/profile` displays the athlete-facing goal, primary and supporting canonical
-types, and currently available capabilities. Original free text remains useful
-as internal provenance and future planner context.
+types, confirmed weekly availability, and currently available capabilities.
 
-Raw health and availability text, prompts, raw model responses, and full
+Raw health text, prompts, raw model responses, and full
 profiles are not logged or placed in observability metadata. Every personal
 repository operation is constrained by the athlete's user ID. Cancellation
 retains saved data; account deletion remains the explicit destructive path.

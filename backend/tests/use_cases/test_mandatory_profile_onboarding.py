@@ -269,13 +269,12 @@ async def test_development_steps_seed_only_the_requesting_users_onboarding_state
         other_goal = await profiles.get_training_goal(user_id=other_user.id)
 
         assert first_context is not None
-        assert (
-            first_context.availability_text == "Weekdays one hour; weekends two hours."
-        )
+        assert first_context.weekly_availability_jsonb is not None
+        assert first_context.weekly_availability_jsonb["schema_version"] == 2
         assert first_context.health_limitations_text == "NONE_REPORTED"
         assert first_goal is not None
         assert other_context is not None
-        assert other_context.availability_text is None
+        assert other_context.weekly_availability_jsonb is None
         assert other_goal is not None
 
     reset = await service.reset_development_onboarding(identity)
@@ -352,17 +351,14 @@ async def test_history_skip_is_rejected_while_an_import_is_active(
 
 
 @pytest.mark.asyncio
-async def test_availability_text_is_stored_verbatim_with_no_model_call() -> None:
-    """The athlete's exact words are kept; only length is checked."""
+async def test_availability_uses_the_structured_extraction_service() -> None:
+    """Availability is LLM-extracted before its structured draft is reviewed."""
 
     import inspect
 
     from app.services.onboarding.service import OnboardingService
 
-    assert (
-        "context_workflow"
-        not in inspect.signature(OnboardingService.__init__).parameters
-    )
+    assert "model" in inspect.signature(OnboardingService.__init__).parameters
 
 
 @pytest.mark.asyncio

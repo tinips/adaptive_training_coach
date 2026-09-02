@@ -84,6 +84,7 @@ def build_runtime(
         apple_health_enabled=runtime_settings.apple_health_import_enabled,
         tcx_enabled=runtime_settings.tcx_import_enabled,
         telegram_web_app_url=runtime_settings.telegram_web_app_url,
+        telegram_web_app_token=runtime_settings.telegram_bot_token,
         planning=WeeklyPlanningService(
             session_factory=session_factory,
             settings=runtime_settings,

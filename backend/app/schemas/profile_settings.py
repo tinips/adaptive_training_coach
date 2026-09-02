@@ -14,6 +14,7 @@ class ProfileSettingsResult(BaseModel):
     step: ProfileSettingsStep
     pending: dict[str, JsonValue] = {}
     saved_field: str | None = None
+    confirm_discard: bool = False
     current_value: str | int | float | None = None
     capability_review: CapabilityReview | None = None
     execution_assessment: GoalExecutionAssessment | None = None

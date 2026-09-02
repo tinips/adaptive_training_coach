@@ -42,6 +42,7 @@ from app.repositories.profile_settings import ProfileSettingsRepository
 from app.repositories.profiles import ProfileRepository
 from app.repositories.training_catalog import TrainingCatalogRepository
 from app.repositories.users import UserRepository
+from app.schemas.availability import ConfirmedWeeklyAvailability
 from app.schemas.capabilities import CapabilityReview, GoalExecutionAssessment
 from app.schemas.common import TelegramIdentity
 from app.schemas.onboarding_service import (
@@ -105,7 +106,7 @@ _ATHLETE_PROFILE_UPDATE_FIELDS = frozenset(
 )
 _TRAINING_GOAL_UPDATE_FIELDS = frozenset({"event_date"})
 _ATHLETE_PROFILE_CONTEXT_UPDATE_FIELDS = frozenset(
-    {"availability_text", "health_limitations_text"}
+    {"health_limitations_text"}
 )
 _ONBOARDING_UPDATE_FIELDS = (
     _ATHLETE_PROFILE_UPDATE_FIELDS
@@ -118,10 +119,8 @@ _FREE_TEXT_CONTEXT_STEPS = frozenset(
         OnboardingStep.HEALTH_LIMITATIONS_INTAKE,
     }
 )
-# Availability and health text is stored exactly as the athlete typed it, so the
-# only check is that it is neither empty nor absurd. A model was previously asked
-# whether the answer was sensible; it judged nothing that mattered and changed
-# nothing that was stored.
+# Availability is parsed into a confirmed structured schedule. Health text remains
+# literal context, so both inputs use the same bounded text intake guard.
 _CONTEXT_TEXT_MIN_LENGTH = 3
 _CONTEXT_TEXT_MAX_LENGTH = 2000
 _EVENT_DATE_FORMATS = ("%Y-%m-%d", "%d/%m/%Y")
@@ -215,6 +214,27 @@ def _goal_sport_from_template_code(code: str) -> str | None:
     }:
         return GoalSport.RUNNING.value
     return None
+
+
+def _development_weekly_availability() -> dict[str, object]:
+    days: dict[str, object] = {
+        day: {"available": False, "disciplines": [], "time_windows": []}
+        for day in (
+            "monday",
+            "tuesday",
+            "wednesday",
+            "thursday",
+            "friday",
+            "saturday",
+            "sunday",
+        )
+    }
+    days["tuesday"] = {
+        "available": True,
+        "disciplines": ["cycling", "running", "swimming"],
+        "time_windows": [{"time_of_day": None, "duration_minutes": 60}],
+    }
+    return ConfirmedWeeklyAvailability(days=days).model_dump(mode="json")
 
 
 def _target_payload_from_metric_values(
@@ -448,12 +468,14 @@ class OnboardingService:
                 secondary_priority=None,
                 goal_template_id=development_template.id,
             )
-            context: dict[str, str | None] = {
-                "availability_text": None,
+            context: dict[str, object] = {
+                "weekly_availability_jsonb": None,
                 "health_limitations_text": None,
             }
             if step_name in {"equipment", "limitations", "history", "completed"}:
-                context["availability_text"] = "Weekdays one hour; weekends two hours."
+                context["weekly_availability_jsonb"] = (
+                    _development_weekly_availability()
+                )
             if step_name in {"history", "completed"}:
                 context["health_limitations_text"] = "NONE_REPORTED"
             await profiles.update_athlete_profile_context_fields(
@@ -1416,6 +1438,30 @@ class OnboardingService:
                 "personal:height": ProfileSettingsStep.PERSONAL_HEIGHT,
                 "personal:timezone": ProfileSettingsStep.PERSONAL_TIMEZONE,
             }.get(action)
+            if action in {"done", "back"} and (
+                step is ProfileSettingsStep.AVAILABILITY_REVIEW
+                and "availability_draft" in pending
+            ):
+                return ProfileSettingsResult(
+                    step=step,
+                    pending=cast(dict[str, JsonValue], pending),
+                    confirm_discard=True,
+                )
+            if action == "discard":
+                state = await settings_repo.save(
+                    user_id=user.id, step=ProfileSettingsStep.MENU, pending={}
+                )
+                return ProfileSettingsResult(
+                    step=state.current_step, saved_field="__closed__"
+                )
+            if action == "keep_editing":
+                return ProfileSettingsResult(
+                    step=step,
+                    pending=cast(dict[str, JsonValue], pending),
+                    current_value=await self._profile_setting_current_value(
+                        session=session, user_id=user.id, step=step
+                    ),
+                )
             if action == "done":
                 state = await settings_repo.save(
                     user_id=user.id, step=ProfileSettingsStep.MENU, pending={}
@@ -1440,6 +1486,16 @@ class OnboardingService:
                     pending = self._profile_goal_pending(goal)
                 elif target is ProfileSettingsStep.PERSONAL_MENU:
                     pending = await self._profile_personal_pending(session, user)
+                elif target is ProfileSettingsStep.AVAILABILITY:
+                    profile = await ProfileRepository(session).get_athlete_profile(
+                        user_id=user.id
+                    )
+                    confirmed = self._confirmed_profile_availability(profile)
+                    pending = (
+                        {"current_availability": confirmed.model_dump(mode="json")}
+                        if confirmed is not None
+                        else {}
+                    )
                 state = await settings_repo.save(
                     user_id=user.id,
                     step=target,
@@ -1701,6 +1757,18 @@ class OnboardingService:
                     step=state.current_step,
                     pending=cast(dict[str, JsonValue], state.pending_answers),
                 )
+            if action == "personal:back":
+                if step is not ProfileSettingsStep.PERSONAL_GENDER:
+                    raise OnboardingApplicationError("stale_action")
+                state = await settings_repo.save(
+                    user_id=user.id,
+                    step=ProfileSettingsStep.PERSONAL_MENU,
+                    pending=await self._profile_personal_pending(session, user),
+                )
+                return ProfileSettingsResult(
+                    step=state.current_step,
+                    pending=cast(dict[str, JsonValue], state.pending_answers),
+                )
             if action == "personal:gender":
                 if step is not ProfileSettingsStep.PERSONAL_MENU:
                     raise OnboardingApplicationError("stale_action")
@@ -1783,23 +1851,28 @@ class OnboardingService:
             if action == "availability:edit":
                 if step is not ProfileSettingsStep.AVAILABILITY_REVIEW:
                     raise OnboardingApplicationError("stale_action")
+                profile = await ProfileRepository(session).get_athlete_profile(
+                    user_id=user.id
+                )
+                confirmed = self._confirmed_profile_availability(profile)
                 state = await settings_repo.save(
-                    user_id=user.id, step=ProfileSettingsStep.AVAILABILITY, pending={}
+                    user_id=user.id,
+                    step=ProfileSettingsStep.AVAILABILITY,
+                    pending=(
+                        {"current_availability": confirmed.model_dump(mode="json")}
+                        if confirmed is not None
+                        else {}
+                    ),
                 )
                 return ProfileSettingsResult(step=state.current_step)
             if action == "availability:confirm":
                 if step is not ProfileSettingsStep.AVAILABILITY_REVIEW:
                     raise OnboardingApplicationError("stale_action")
-                from app.schemas.availability import ConfirmedWeeklyAvailability
-
                 draft = pending.get(_AVAILABILITY_DRAFT_KEY)
-                source = pending.get(_AVAILABILITY_SOURCE_KEY)
-                if not isinstance(draft, dict) or not isinstance(source, str):
+                if not isinstance(draft, dict):
                     raise OnboardingApplicationError("stale_action")
                 try:
-                    confirmed = ConfirmedWeeklyAvailability(
-                        source_text=source, days=draft["days"]
-                    )
+                    confirmed = ConfirmedWeeklyAvailability(days=draft["days"])
                 except (KeyError, ValueError):
                     raise OnboardingApplicationError(
                         "invalid_availability_draft"
@@ -1807,7 +1880,6 @@ class OnboardingService:
                 await ProfileRepository(session).update_athlete_profile_context_fields(
                     user_id=user.id,
                     payload={
-                        "availability_text": source,
                         "weekly_availability_jsonb": confirmed.model_dump(mode="json"),
                     },
                 )
@@ -1879,10 +1951,26 @@ class OnboardingService:
                     GoalSport.SWIMMING.value: ("swimming",),
                     GoalSport.TRIATHLON.value: ("cycling", "running", "swimming"),
                 }
+                profile = await ProfileRepository(session).get_athlete_profile(
+                    user_id=user.id
+                )
+                confirmed = self._confirmed_profile_availability(profile)
                 try:
-                    extraction = await self._availability.extract(
-                        cleaned,
-                        goal_disciplines=disciplines_by_sport.get(sport or "", ()),
+                    extraction = (
+                        await self._availability.revise(
+                            current=confirmed,
+                            change_request=cleaned,
+                            goal_disciplines=disciplines_by_sport.get(
+                                sport or "", ()
+                            ),
+                        )
+                        if confirmed is not None
+                        else await self._availability.extract(
+                            cleaned,
+                            goal_disciplines=disciplines_by_sport.get(
+                                sport or "", ()
+                            ),
+                        )
                     )
                 except AvailabilityExtractionError:
                     raise OnboardingApplicationError(
@@ -1897,6 +1985,15 @@ class OnboardingService:
                     user_id=user.id,
                     step=next_step,
                     pending={
+                        **(
+                            {
+                                "current_availability": confirmed.model_dump(
+                                    mode="json"
+                                )
+                            }
+                            if confirmed is not None
+                            else {}
+                        ),
                         _AVAILABILITY_SOURCE_KEY: cleaned,
                         _AVAILABILITY_DRAFT_KEY: extraction.model_dump(mode="json"),
                     },
@@ -2134,7 +2231,6 @@ class OnboardingService:
         if profile is None:
             return None
         values: dict[ProfileSettingsStep, str | int | float | None] = {
-            ProfileSettingsStep.AVAILABILITY: profile.availability_text,
             ProfileSettingsStep.HEALTH: profile.health_limitations_text,
             ProfileSettingsStep.PERSONAL_BIRTH_YEAR: profile.birth_year,
             ProfileSettingsStep.PERSONAL_GENDER: (
@@ -2148,6 +2244,18 @@ class OnboardingService:
             ),
         }
         return values.get(step)
+
+    @staticmethod
+    def _confirmed_profile_availability(
+        profile: object | None,
+    ) -> ConfirmedWeeklyAvailability | None:
+        raw = getattr(profile, "weekly_availability_jsonb", None)
+        if not isinstance(raw, dict):
+            return None
+        try:
+            return ConfirmedWeeklyAvailability.model_validate(raw)
+        except ValueError:
+            return None
 
     @staticmethod
     async def _profile_personal_pending(
@@ -2885,8 +2993,6 @@ class OnboardingService:
     ) -> OnboardingServiceResult:
         """Persist only the reviewed, complete availability draft."""
 
-        from app.schemas.availability import ConfirmedWeeklyAvailability
-
         async with self._session_factory.begin() as session:
             user, onboarding = await self._locked_state(session, identity)
             self._require_active(onboarding)
@@ -2894,22 +3000,20 @@ class OnboardingService:
                 raise OnboardingApplicationError("stale_action")
             answers = self._answers(onboarding)
             draft = answers.get(_AVAILABILITY_DRAFT_KEY)
-            source = answers.get(_AVAILABILITY_SOURCE_KEY)
-            if not isinstance(draft, dict) or not isinstance(source, str):
+            if not isinstance(draft, dict):
                 raise OnboardingApplicationError("stale_action")
             try:
-                confirmed = ConfirmedWeeklyAvailability(
-                    source_text=source, days=draft["days"]
-                )
+                confirmed = ConfirmedWeeklyAvailability(days=draft["days"])
             except (KeyError, ValueError):
                 raise OnboardingApplicationError("invalid_availability_draft") from None
             await ProfileRepository(session).update_athlete_profile_context_fields(
                 user_id=user.id,
                 payload={
-                    "availability_text": source,
                     "weekly_availability_jsonb": confirmed.model_dump(mode="json"),
                 },
             )
+            answers.pop(_AVAILABILITY_SOURCE_KEY, None)
+            answers.pop(_AVAILABILITY_DRAFT_KEY, None)
             onboarding = await OnboardingRepository(session).save_progress(
                 user_id=user.id,
                 current_step=OnboardingStep.EQUIPMENT_RECOMMENDATION,
@@ -2925,10 +3029,13 @@ class OnboardingService:
             self._require_active(onboarding)
             if onboarding.current_step is not OnboardingStep.AVAILABILITY_REVIEW:
                 raise OnboardingApplicationError("stale_action")
+            answers = self._answers(onboarding)
+            answers.pop(_AVAILABILITY_SOURCE_KEY, None)
+            answers.pop(_AVAILABILITY_DRAFT_KEY, None)
             onboarding = await OnboardingRepository(session).save_progress(
                 user_id=user.id,
                 current_step=OnboardingStep.AVAILABILITY_INTAKE,
-                answers=cast(dict[str, object], self._answers(onboarding)),
+                answers=cast(dict[str, object], answers),
             )
             return self._result(user, onboarding)
 

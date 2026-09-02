@@ -32,7 +32,8 @@ class WorkoutHistoryQuery(_HistorySchema):
 class WorkoutHistoryWebAppRequest(WorkoutHistoryQuery):
     """Web App query plus its Telegram-signed identity evidence."""
 
-    init_data: Annotated[str, Field(min_length=1, max_length=8192)]
+    init_data: Annotated[str | None, Field(max_length=8192)] = None
+    session_token: Annotated[str | None, Field(max_length=256)] = None
 
 
 class WorkoutHistoryTotals(_HistorySchema):

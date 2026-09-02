@@ -13,7 +13,6 @@ from telegram.ext import (
 )
 
 from app.bot.handlers import (
-    add_workout_handler,
     callback_handler,
     cancel_handler,
     delete_handler,
@@ -39,7 +38,6 @@ def register_handlers(
     application.add_handler(CommandHandler("start", start_handler))
     application.add_handler(CommandHandler("help", help_handler))
     application.add_handler(CommandHandler("profile", profile_handler))
-    application.add_handler(CommandHandler("add_workout", add_workout_handler))
     application.add_handler(CommandHandler("cancel", cancel_handler))
     application.add_handler(CommandHandler("delete_me", delete_handler))
     runtime_settings = settings or get_settings()

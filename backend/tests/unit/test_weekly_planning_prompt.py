@@ -15,13 +15,17 @@ from app.workflows.prompts.weekly_planning import (
 def test_weekly_planner_prompt_is_versioned_and_serializes_exact_context() -> None:
     context: dict[str, object] = {
         "week_start": "2026-08-24",
-        "availability": "Tuesday evening only",
+        "confirmed_availability": {
+            "schema_version": 2,
+            "status": "confirmed",
+            "days": {"tuesday": {"available": True}},
+        },
         "recent_evidence": {"RUNNING": {"session_count": 3}},
     }
 
     messages = build_weekly_planner_messages(context)
 
-    assert WEEKLY_PLANNER_PROMPT_VERSION == 4
+    assert WEEKLY_PLANNER_PROMPT_VERSION == 5
     assert len(messages) == 2
     assert isinstance(messages[0], SystemMessage)
     assert "Monday-to-Sunday week" in str(messages[0].content)
@@ -36,7 +40,7 @@ def test_system_prompt_explains_every_evidence_state() -> None:
         build_weekly_planner_messages,
     )
 
-    assert WEEKLY_PLANNER_PROMPT_VERSION == 4
+    assert WEEKLY_PLANNER_PROMPT_VERSION == 5
     system = str(build_weekly_planner_messages({"week_start": "2026-08-31"})[0].content)
     for state in DisciplineEvidenceState:
         assert state.value in system

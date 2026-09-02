@@ -65,7 +65,6 @@ LABELS = {
     "confirm_delete": "Yes, delete my data",
     "keep_account": "Keep my account",
     "view_profile": "View profile",
-    "add_workout": "Add workout",
     "workout_history": "Workout history",
     "help": "Help",
     "start": "Start",
@@ -216,7 +215,18 @@ def profile_text_input_keyboard() -> InlineKeyboardMarkup:
 def profile_settings_text_keyboard() -> InlineKeyboardMarkup:
     """Leave profile editing without invoking the onboarding cancellation flow."""
 
-    return _rows([[("Back / Done", "ps:v1:done")]])
+    return _rows([[("Done", "ps:v1:done")]])
+
+
+def profile_discard_changes_keyboard() -> InlineKeyboardMarkup:
+    """Confirm that a draft in Profile may be safely discarded."""
+
+    return _rows(
+        [
+            [("Discard changes", "ps:v1:discard")],
+            [("Keep editing", "ps:v1:keep_editing")],
+        ]
+    )
 
 
 def profile_gender_keyboard() -> InlineKeyboardMarkup:
@@ -284,13 +294,10 @@ def completed_onboarding_keyboard(
         if plan_available
         else LABELS["plan_next_week"]
     )
-    training_rows: list[list[str | KeyboardButton]] = [
-        [LABELS["add_workout"], plan_action]
-    ]
+    training_rows: list[list[str | KeyboardButton]] = [[plan_action]]
     if workout_history_url is not None:
         training_rows = [
             [
-                LABELS["add_workout"],
                 KeyboardButton(
                     LABELS["workout_history"],
                     web_app=WebAppInfo(url=workout_history_url),
@@ -327,7 +334,7 @@ def profile_settings_keyboard() -> InlineKeyboardMarkup:
             [("Equipment & access", "ps:v1:section:equipment")],
             [("Health limitations", "ps:v1:section:health")],
             [("Personal details", "ps:v1:section:personal")],
-            [("Back / Done", "ps:v1:done")],
+            [("Done", "ps:v1:done")],
         ]
     )
 
@@ -451,7 +458,7 @@ def profile_health_keyboard() -> InlineKeyboardMarkup:
     return _rows(
         [
             [("None", "ps:v1:health:none")],
-            [("Back / Done", "ps:v1:done")],
+            [("Back", "ps:v1:back")],
         ]
     )
 
@@ -472,7 +479,7 @@ def profile_personal_keyboard(
             [(label("Weight", "weight_kg"), "ps:v1:personal:weight")],
             [(label("Height", "height_cm"), "ps:v1:personal:height")],
             [(label("Timezone", "timezone"), "ps:v1:personal:timezone")],
-            [("Back / Done", "ps:v1:back")],
+            [("Back", "ps:v1:back")],
         ]
     )
 
@@ -482,7 +489,7 @@ def profile_settings_gender_keyboard() -> InlineKeyboardMarkup:
         [
             [(LABELS["gender_male"], "ps:v1:personal:gender:MALE")],
             [(LABELS["gender_female"], "ps:v1:personal:gender:FEMALE")],
-            [("Back / Done", "ps:v1:back")],
+            [("Back", "ps:v1:personal:back")],
         ]
     )
 
@@ -495,7 +502,7 @@ def profile_equipment_keyboard(
         for key, value in resources.items()
     ]
     rows.extend(
-        [[("Continue", "ps:v1:equipment:done")], [("Back / Done", "ps:v1:back")]]
+        [[("Continue", "ps:v1:equipment:done")], [("Back", "ps:v1:back")]]
     )
     return _rows(rows)
 
@@ -552,14 +559,6 @@ def deletion_confirmation_keyboard() -> InlineKeyboardMarkup:
         [
             [(LABELS["confirm_delete"], "acct:v1:delete:confirm")],
             [(LABELS["keep_account"], "acct:v1:delete:keep")],
-        ]
-    )
-
-
-def add_workout_keyboard() -> InlineKeyboardMarkup:
-    return _rows(
-        [
-            [(LABELS["cancel"], "ob:v1:cancel")],
         ]
     )
 

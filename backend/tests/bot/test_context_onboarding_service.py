@@ -284,9 +284,7 @@ async def test_profile_settings_callbacks_strip_the_transport_prefix() -> None:
         identity, "section:availability"
     )
     assert opened.text == messages.PROFILE_SETTINGS_MENU
-    assert "Current availability" in availability.text
-    assert "Not set" in availability.text
-    assert availability.text.endswith(messages.PROFILE_AVAILABILITY)
+    assert "do not have confirmed weekly availability" in availability.text
     assert availability.keyboard == keyboards.profile_settings_text_keyboard()
 
 

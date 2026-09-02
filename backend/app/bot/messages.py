@@ -120,10 +120,9 @@ PROFILE_INCOMPLETE = (
     "Your athlete profile is not complete yet. Resume onboarding to continue from "
     "your saved step."
 )
-ADD_WORKOUT_REQUEST = (
-    "Send one screenshot of a completed workout summary.\n\n"
-    "I will read the visible metrics, show you what I found, and only save it "
-    "after you confirm."
+PROFILE_DISCARD_CHANGES = (
+    "You have an availability draft that has not been saved. Discard it, or keep "
+    "editing?"
 )
 WEEKLY_PLAN_UNAVAILABLE = (
     "I could not create a weekly plan right now. No plan was saved. Please try again "
@@ -139,7 +138,6 @@ _ONBOARDING_FIELD_LABELS = {
     "weight_kg": "weight",
     "height_cm": "height",
     "timezone": "timezone",
-    "availability_text": "availability",
     "health_limitations_text": "training limitations",
 }
 ONBOARDING_MODIFICATION_FALLBACK = "Your athlete data has been updated."
@@ -202,23 +200,29 @@ AVAILABILITY_CLARIFICATION = (
 
 
 def availability_review(schedule: object) -> str:
-    if not isinstance(schedule, dict) or not isinstance(schedule.get("days"), dict):
+    table = _availability_table(schedule)
+    if table is None:
         return GENERIC_ERROR
-    rows = ["Review your weekly availability:"]
-    for day, details in schedule["days"].items():
-        if not isinstance(details, dict) or not details.get("available"):
-            rows.append(f"• {str(day).title()}: unavailable")
-            continue
-        disciplines = ", ".join(str(value) for value in details.get("disciplines", []))
-        windows = details.get("time_windows", [])
-        duration = sum(
-            int(window.get("duration_minutes", 0))
-            for window in windows
-            if isinstance(window, dict)
+    return (
+        "Review your weekly availability:\n"
+        f"{table}\n\nConfirm it, or edit by sending a corrected description."
+    )
+
+
+def profile_availability_prompt(schedule: object) -> str:
+    """Show the current structured schedule before accepting a change request."""
+
+    table = _availability_table(schedule)
+    if table is None:
+        return (
+            "You do not have confirmed weekly availability yet. Describe the days, "
+            "activities, and approximate time you have for training."
         )
-        rows.append(f"• {str(day).title()}: {disciplines} ({duration} min)")
-    rows.append("\nConfirm it, or edit by sending a corrected description.")
-    return "\n".join(rows)
+    return (
+        "Current weekly availability:\n"
+        f"{table}\n\nTell me what you want to change. For example: "
+        "'Make Tuesday evening swimming for 45 minutes instead.'"
+    )
 
 
 HEALTH_LIMITATIONS_INTAKE = (
@@ -386,7 +390,7 @@ VALIDATION_ERRORS: dict[str, str] = {
     "apple_health_import_disabled": ("Apple Health import is currently unavailable."),
     "import_already_active": ("An Apple Health import is already in progress."),
     "training_file_not_expected": (
-        "Use Add workout from your account menu before sending a training file."
+        "Send a completed-workout screenshot to add a workout."
     ),
     "training_file_import_disabled": "Training-file import is currently unavailable.",
     "unsupported_training_file": (
@@ -590,7 +594,7 @@ def persisted_profile(profile: Mapping[str, Any]) -> str:
     training_goal = profile.get("training_goal")
     free_text_values = [
         value
-        for key in ("availability_text", "health_limitations_text")
+        for key in ("health_limitations_text",)
         if isinstance((value := profile.get(key)), str) and value
     ]
     if isinstance(training_goal, Mapping):
@@ -613,10 +617,10 @@ def persisted_profile(profile: Mapping[str, Any]) -> str:
             f"Height: {_optional_metric(profile.get('height_cm'), 'cm')}",
             f"Timezone: {_display(profile.get('timezone'))}",
         ]
-        for label, key in (
-            ("Availability", "availability_text"),
-            ("Training limitations", "health_limitations_text"),
-        ):
+        availability = _availability_table(profile.get("weekly_availability"))
+        if availability is not None:
+            lines.extend(["", "<b>Weekly availability</b>", availability])
+        for label, key in (("Training limitations", "health_limitations_text"),):
             value = profile.get(key)
             if isinstance(value, str) and value:
                 lines.append(f"{label}: {_profile_free_text(value, free_text_cap)}")
@@ -703,6 +707,77 @@ def _performance_target_lines(goal: Mapping[str, Any]) -> list[str]:
     if isinstance(finish, int):
         lines.append(f"finish time {_duration(finish)}")
     return lines
+
+
+def _availability_table(schedule: object) -> str | None:
+    if not isinstance(schedule, Mapping):
+        return None
+    days = schedule.get("days")
+    if not isinstance(days, Mapping):
+        return None
+    rows: list[tuple[str, str, str, str]] = []
+    for day in (
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+        "sunday",
+    ):
+        details = days.get(day)
+        if not isinstance(details, Mapping) or not details.get("available"):
+            rows.append((day.title()[:3], "Off", "-", "-"))
+            continue
+        windows = details.get("time_windows")
+        if not isinstance(windows, (list, tuple)):
+            return None
+        slots: list[str] = []
+        duration = 0
+        for window in windows:
+            if not isinstance(window, Mapping):
+                return None
+            minutes = window.get("duration_minutes")
+            if (
+                not isinstance(minutes, int)
+                or isinstance(minutes, bool)
+                or minutes <= 0
+            ):
+                return None
+            duration += minutes
+            time_of_day = window.get("time_of_day")
+            slots.append(
+                {
+                    "morning": "AM",
+                    "afternoon": "PM",
+                    "evening": "Eve",
+                    "night": "Night",
+                }.get(str(time_of_day), "Any")
+            )
+        disciplines = details.get("disciplines")
+        if not isinstance(disciplines, (list, tuple)) or not disciplines:
+            return None
+        sports = "/".join(
+            {
+                "running": "Run",
+                "cycling": "Bike",
+                "swimming": "Swim",
+                "strength_training": "Str",
+            }.get(str(item), _plain_display(item))
+            for item in disciplines
+        )
+        rows.append(
+            (
+                day.title()[:3],
+                "/".join(slots),
+                f"{duration}m",
+                sports,
+            )
+        )
+    return (
+        _html_pre_table(("Day", "When", "Min", "Sports"), rows, (3, 10, 5, 18))
+        + "\nRun=running · Bike=cycling · Swim=swimming · Str=strength"
+    )
 
 
 def _profile_free_text(value: str, cap: int | None) -> str:

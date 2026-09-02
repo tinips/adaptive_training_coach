@@ -61,13 +61,6 @@ async def profile_handler(
     await _agent_delegate(update, context, "/profile")
 
 
-async def add_workout_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-    await _agent_delegate(update, context, "/add_workout")
-
-
 async def cancel_handler(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -337,8 +330,12 @@ async def _handle_screenshot_callback(
     except WorkoutScreenshotNotFoundError:
         await _edit_or_reply(query, messages.SCREENSHOT_DRAFT_EXPIRED)
         return
-    except ActivityImportValidationError:
-        logger.info("telegram_screenshot_import_invalid user_id=%s", user.id)
+    except ActivityImportValidationError as error:
+        logger.info(
+            "telegram_screenshot_import_invalid user_id=%s reason=%s",
+            user.id,
+            str(error),
+        )
         await _edit_or_reply(query, messages.SCREENSHOT_IMPORT_INVALID)
         return
 

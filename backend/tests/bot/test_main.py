@@ -12,7 +12,6 @@ from telegram.ext import CommandHandler, MessageHandler, filters
 from app.bot.handlers import (
     BOT_SERVICE_KEY,
     DEV_USER_IDS_KEY,
-    add_workout_handler,
     document_handler,
     web_app_data_handler,
 )
@@ -34,15 +33,7 @@ def test_create_application_registers_handlers_and_injects_facade() -> None:
     application = create_application(settings, service=service)
 
     assert application.bot_data[BOT_SERVICE_KEY] is service
-    assert len(application.handlers[0]) == 11
-    registered = [
-        handler
-        for handler in application.handlers[0]
-        if isinstance(handler, CommandHandler)
-        and handler.commands == frozenset({"add_workout"})
-    ]
-    assert len(registered) == 1
-    assert registered[0].callback is add_workout_handler
+    assert len(application.handlers[0]) == 10
     web_app_handlers = [
         handler
         for handler in application.handlers[0]
