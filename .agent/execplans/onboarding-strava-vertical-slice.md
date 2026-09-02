@@ -2618,3 +2618,25 @@ MacBook/iPhone proof described in `ios/CoachHealthSync/README.md`.
 The local API and bot containers were rebuilt; `/ready` and the disabled mobile
 route contract are available locally, but no live Telegram or iPhone pairing is
 claimed while the opt-in flag remains off.
+
+## Follow-up: optional self-hosted Langfuse tracing (2026-09-02)
+
+- [x] Keep tracing opt-in and metadata-only. The observer protocol cannot
+  represent raw prompts, athlete text, screenshots, or credentials; no LangChain
+  callback handler is used.
+- [x] Add disabled-by-default settings, a no-op factory fallback, a Langfuse v3
+  client observer, and app-level run correlation metadata for availability,
+  weekly planning, and screenshot extraction.
+- [x] Add the separately-started `docker-compose.langfuse.yml` stack based on
+  Langfuse's official current compose file, with isolated Postgres, ClickHouse,
+  Redis, and MinIO storage; document setup and placeholder secrets in
+  `.env.example` and README.
+- [ ] Validate against a locally started Langfuse stack after installing the new
+  Python dependency and creating a Langfuse project key pair. This is manual and
+  intentionally not part of default tests.
+
+Validation: focused offline workflow tests pass; `ruff check .` passes. The
+repository-wide formatter and mypy command currently report unrelated existing
+working-tree formatting/type failures outside this change; the modified files
+are individually formatted. The full suite still has the known Apple Health
+fixture-count mismatch (archive contains 42 workouts, assertion expects 28).

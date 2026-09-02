@@ -13,14 +13,23 @@ import secrets
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings
 from app.db.models import Workout
+from app.domain.enums import OnboardingStep
 from app.integrations.llm.vision import (
     DeepSeekWorkoutScreenshotExtractor,
     ScreenshotExtractionError,
+)
+from app.observability.noop import NoOpAIWorkflowObserver
+from app.observability.protocol import (
+    AIWorkflowObserver,
+    AIWorkflowRunError,
+    AIWorkflowRunMetadata,
+    AIWorkflowRunResult,
 )
 from app.repositories.activities import (
     ActivityImportValidationError,
@@ -73,10 +82,12 @@ class WorkoutScreenshotService:
         session_factory: async_sessionmaker[AsyncSession],
         settings: Settings,
         extractor: DeepSeekWorkoutScreenshotExtractor,
+        observer: AIWorkflowObserver | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._settings = settings
         self._extractor = extractor
+        self._observer = observer or NoOpAIWorkflowObserver()
         self._pending: dict[str, _PendingDraft] = {}
 
     async def extract_draft(
@@ -94,13 +105,43 @@ class WorkoutScreenshotService:
         if user is None:
             raise WorkoutScreenshotNotFoundError("athlete not recognized")
 
+        started_at = datetime.now(UTC)
+        metadata = AIWorkflowRunMetadata(
+            workflow_name="workout_screenshot_extraction",
+            run_id=uuid.uuid4(),
+            # Screenshot extraction shares the history-import product feature.
+            onboarding_step=OnboardingStep.TRAINING_HISTORY_IMPORT,
+            provider_mode="live",
+            model_name=self._settings.llm_vision_model,
+            started_at=started_at,
+        )
+        await self._observer.on_run_started(metadata)
         try:
             request = await self._extractor.extract(
                 image_bytes=image_bytes,
                 image_media_type=image_media_type,
             )
         except ScreenshotExtractionError:
+            failed_at = datetime.now(UTC)
+            await self._observer.on_run_failed(
+                AIWorkflowRunError(
+                    metadata=metadata,
+                    failed_at=failed_at,
+                    latency_ms=int((failed_at - started_at).total_seconds() * 1000),
+                    error_code="screenshot_extraction_failed",
+                )
+            )
             raise
+
+        completed_at = datetime.now(UTC)
+        await self._observer.on_run_completed(
+            AIWorkflowRunResult(
+                metadata=metadata,
+                outcome="confirmation_required",
+                completed_at=completed_at,
+                latency_ms=int((completed_at - started_at).total_seconds() * 1000),
+            )
+        )
 
         token = self._store(telegram_user_id, request)
         return ScreenshotDraft(token=token, request=request)

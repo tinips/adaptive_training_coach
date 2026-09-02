@@ -26,7 +26,15 @@ from app.domain.enums import (
     OnboardingStep,
 )
 from app.integrations.llm.models import StructuredOnboardingModel
-from app.observability.protocol import ProviderMode
+from app.observability.callbacks import build_langchain_run_config
+from app.observability.noop import NoOpAIWorkflowObserver
+from app.observability.protocol import (
+    AIWorkflowObserver,
+    AIWorkflowRunError,
+    AIWorkflowRunMetadata,
+    AIWorkflowRunResult,
+    ProviderMode,
+)
 from app.repositories.athlete_baselines import AthleteBaselineRepository
 from app.repositories.athlete_capabilities import AthleteCapabilityRepository
 from app.repositories.fitness import FitnessRepository
@@ -177,10 +185,12 @@ class WeeklyPlanningService:
         session_factory: async_sessionmaker[AsyncSession],
         settings: Settings,
         model: StructuredOnboardingModel,
+        observer: AIWorkflowObserver | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._settings = settings
         self._model = model
+        self._observer = observer or NoOpAIWorkflowObserver()
 
     async def has_plan_for_next_week(self, identity: TelegramIdentity) -> bool:
         """Return only whether the current athlete already has next week's plan."""
@@ -228,6 +238,18 @@ class WeeklyPlanningService:
         if isinstance(prepared, WeeklyPlanningResult):
             return prepared
 
+        started_at = datetime.now(UTC)
+        metadata = AIWorkflowRunMetadata(
+            workflow_name="weekly_training_plan",
+            run_id=uuid.uuid4(),
+            # Shared structured-model boundary requires an onboarding step.
+            onboarding_step=OnboardingStep.TRAINING_HISTORY_IMPORT,
+            provider_mode=self._model.provider_mode,
+            model_name=self._model.model_name,
+            started_at=started_at,
+        )
+        await self._observer.on_run_started(metadata)
+
         try:
             response = await self._model.ainvoke_structured(
                 # Existing provider protocol is shared with onboarding. Feature
@@ -235,7 +257,7 @@ class WeeklyPlanningService:
                 step=OnboardingStep.TRAINING_HISTORY_IMPORT,
                 schema=WeeklyPlan,
                 messages=build_weekly_planner_messages(prepared.prompt_context),
-                config={"run_name": "weekly_training_plan"},
+                config=build_langchain_run_config(metadata),
             )
         except Exception as exc:  # Provider adapters surface vendor-specific errors.
             logger.error(
@@ -249,6 +271,7 @@ class WeeklyPlanningService:
                 prompt_tokens=None,
                 completion_tokens=None,
             )
+            await self._observe_failure(metadata, "provider_error")
             return WeeklyPlanningResult(kind="unavailable")
 
         try:
@@ -269,19 +292,63 @@ class WeeklyPlanningService:
                 prompt_tokens=response.prompt_tokens,
                 completion_tokens=response.completion_tokens,
             )
+            await self._observe_failure(
+                metadata,
+                "structured_output_malformed"
+                if response.malformed
+                else "schema_validation_failed",
+            )
             return WeeklyPlanningResult(kind="unavailable")
 
         availability = prepared.prompt_context.get("confirmed_availability")
         if isinstance(availability, dict) and not _plan_fits_availability(
             plan, availability
         ):
+            await self._observe_completed(metadata, response, "fallback_required")
             return WeeklyPlanningResult(kind="availability_conflict")
 
-        return await self._persist_generated(
+        result = await self._persist_generated(
             prepared=prepared,
             plan=plan,
             prompt_tokens=response.prompt_tokens,
             completion_tokens=response.completion_tokens,
+        )
+        await self._observe_completed(metadata, response, "confirmation_required")
+        return result
+
+    async def _observe_completed(
+        self,
+        metadata: AIWorkflowRunMetadata,
+        response: object,
+        outcome: Literal["confirmation_required", "fallback_required"],
+    ) -> None:
+        completed_at = datetime.now(UTC)
+        await self._observer.on_run_completed(
+            AIWorkflowRunResult(
+                metadata=metadata,
+                outcome=outcome,
+                completed_at=completed_at,
+                latency_ms=int(
+                    (completed_at - metadata.started_at).total_seconds() * 1000
+                ),
+                prompt_tokens=getattr(response, "prompt_tokens", None),
+                completion_tokens=getattr(response, "completion_tokens", None),
+            )
+        )
+
+    async def _observe_failure(
+        self, metadata: AIWorkflowRunMetadata, error_code: str
+    ) -> None:
+        failed_at = datetime.now(UTC)
+        await self._observer.on_run_failed(
+            AIWorkflowRunError(
+                metadata=metadata,
+                failed_at=failed_at,
+                latency_ms=int(
+                    (failed_at - metadata.started_at).total_seconds() * 1000
+                ),
+                error_code=error_code,
+            )
         )
 
     async def _prepare(

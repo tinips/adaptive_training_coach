@@ -34,6 +34,8 @@ from app.domain.enums import (
 )
 from app.integrations.llm.factory import create_goal_extraction_model
 from app.integrations.llm.models import StructuredOnboardingModel
+from app.observability.noop import NoOpAIWorkflowObserver
+from app.observability.protocol import AIWorkflowObserver
 from app.repositories.apple_health import AppleHealthRepository
 from app.repositories.athlete_baselines import AthleteBaselineRepository
 from app.repositories.athlete_capabilities import AthleteCapabilityRepository
@@ -105,9 +107,7 @@ _ATHLETE_PROFILE_UPDATE_FIELDS = frozenset(
     {"birth_year", "gender", "weight_kg", "height_cm"}
 )
 _TRAINING_GOAL_UPDATE_FIELDS = frozenset({"event_date"})
-_ATHLETE_PROFILE_CONTEXT_UPDATE_FIELDS = frozenset(
-    {"health_limitations_text"}
-)
+_ATHLETE_PROFILE_CONTEXT_UPDATE_FIELDS = frozenset({"health_limitations_text"})
 _ONBOARDING_UPDATE_FIELDS = (
     _ATHLETE_PROFILE_UPDATE_FIELDS
     | _TRAINING_GOAL_UPDATE_FIELDS
@@ -312,11 +312,13 @@ class OnboardingService:
         session_factory: async_sessionmaker[AsyncSession],
         settings: Settings,
         model: StructuredOnboardingModel | None = None,
+        observer: AIWorkflowObserver | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._settings = settings
         self._availability = AvailabilityExtractionService(
-            model or create_goal_extraction_model(settings)
+            model or create_goal_extraction_model(settings),
+            observer or NoOpAIWorkflowObserver(),
         )
 
     async def start(self, identity: TelegramIdentity) -> OnboardingServiceResult:
@@ -863,10 +865,10 @@ class OnboardingService:
             "swimming_type": answers.get("swimming_type"),
         }
         await ProfileRepository(session).upsert_training_goal(
-                user_id=user.id,
-                main_goal=template.display_name,
-                event_date=None,
-                secondary_priority=None,
+            user_id=user.id,
+            main_goal=template.display_name,
+            event_date=None,
+            secondary_priority=None,
             goal_template_id=template.id,
             supporting_goal_template_id=None,
             target_distance_km=cast(float | None, target_payload["target_distance_km"]),
@@ -1960,16 +1962,12 @@ class OnboardingService:
                         await self._availability.revise(
                             current=confirmed,
                             change_request=cleaned,
-                            goal_disciplines=disciplines_by_sport.get(
-                                sport or "", ()
-                            ),
+                            goal_disciplines=disciplines_by_sport.get(sport or "", ()),
                         )
                         if confirmed is not None
                         else await self._availability.extract(
                             cleaned,
-                            goal_disciplines=disciplines_by_sport.get(
-                                sport or "", ()
-                            ),
+                            goal_disciplines=disciplines_by_sport.get(sport or "", ()),
                         )
                     )
                 except AvailabilityExtractionError:
@@ -1986,11 +1984,7 @@ class OnboardingService:
                     step=next_step,
                     pending={
                         **(
-                            {
-                                "current_availability": confirmed.model_dump(
-                                    mode="json"
-                                )
-                            }
+                            {"current_availability": confirmed.model_dump(mode="json")}
                             if confirmed is not None
                             else {}
                         ),

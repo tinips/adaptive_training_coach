@@ -42,6 +42,12 @@ class Settings(BaseSettings):
     llm_min_confidence: float = Field(default=0.75, ge=0, le=1)
     llm_other_requests_per_hour: int = Field(default=10, ge=1, le=100)
 
+    # Optional self-hosted, metadata-only LLM tracing. Disabled by default.
+    langfuse_enabled: bool = False
+    langfuse_public_key: str | None = None
+    langfuse_secret_key: SecretStr | None = None
+    langfuse_host: str = "http://langfuse-web:3000"
+
     # Send a workout summary screenshot to the bot; a vision model reads the
     # visible source-app metrics and the athlete confirms before it is saved.
     # Uses the same DeepSeek credentials as `llm_api_key`/`llm_base_url` above,
@@ -131,6 +137,7 @@ class Settings(BaseSettings):
             "default_bot_language": self.default_bot_language,
             "llm_mode": self.llm_mode,
             "llm_model": self.llm_model,
+            "langfuse_enabled": self.langfuse_enabled,
             "apple_health_import_enabled": self.apple_health_import_enabled,
             "tcx_import_enabled": self.tcx_import_enabled,
             "fitness_window_days": self.fitness_window_days,

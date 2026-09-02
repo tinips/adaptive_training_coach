@@ -25,6 +25,7 @@ from app.db.session import create_engine, create_session_factory
 from app.integrations.llm.factory import create_goal_extraction_model
 from app.integrations.llm.vision import DeepSeekWorkoutScreenshotExtractor
 from app.logging import configure_logging
+from app.observability import create_ai_workflow_observer
 from app.services.accounts import AccountQueryService, AccountService
 from app.services.onboarding import OnboardingService
 from app.services.profiles import ProfileService
@@ -71,11 +72,13 @@ def build_runtime(
         session_factory=session_factory,
         settings=runtime_settings,
     )
+    observer = create_ai_workflow_observer(runtime_settings)
     service = CoachBotApplicationService(
         onboarding=OnboardingService(
             session_factory=session_factory,
             settings=runtime_settings,
             model=create_goal_extraction_model(runtime_settings),
+            observer=observer,
         ),
         profiles=ProfileService(session_factory),
         account_queries=AccountQueryService(session_factory),
@@ -89,6 +92,7 @@ def build_runtime(
             session_factory=session_factory,
             settings=runtime_settings,
             model=create_goal_extraction_model(runtime_settings),
+            observer=observer,
         ),
     )
     workout_screenshot = WorkoutScreenshotService(
@@ -99,6 +103,7 @@ def build_runtime(
             base_url=runtime_settings.llm_base_url or None,
             model_name=runtime_settings.llm_vision_model,
         ),
+        observer=observer,
     )
     return BotRuntime(
         settings=runtime_settings,
