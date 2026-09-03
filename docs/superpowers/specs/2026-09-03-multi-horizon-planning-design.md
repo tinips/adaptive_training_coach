@@ -7,8 +7,13 @@ affects, and they are listed together in the next section so nobody rebuilds fro
 the old assumptions.
 
 One example athlete carried through every stage: **Marc**, male, 34, 74 kg, 179 cm,
-training for an Olympic-distance triathlon 20 weeks away. Weakest discipline:
-swimming. Coaching style: normal.
+training for a half-distance triathlon (Ironman 70.3) 20 weeks away, with a stated
+target of finishing in **5 hours**. Weakest discipline: swimming, which he has never
+trained. Coaching style: normal.
+
+The 5-hour target is not decoration. It is the only performance number the product
+asks a triathlete for, and the design has to do something with it. It is also, for
+Marc, probably out of reach, and the design has to do something about that too.
 
 Every stage says three things: what it does, what it was chosen over, and what it
 costs. A stage with no stated cost has not been thought about hard enough.
@@ -83,6 +88,12 @@ form (`STATE.md`, onboarding sequence). Everything below already exists except t
 two fields marked new.
 
 - Goal and race date. The race date is optional and nullable.
+- **The one performance number the goal asks for.** For a triathlete this is the
+  finish time and nothing else (`app/services/onboarding/service.py:194-195`). Marc
+  types `5:00` and it is stored as 18000 seconds. A runner is asked for pace,
+  distance and elevation instead, and a cyclist for distance, elevation and average
+  speed. This number already reaches the planner in the prompt context
+  (`app/services/weekly_planning/service.py:460-475`), and nothing has ever used it.
 - Sex, age, weight, height. Collected, stored, and never yet shown to the planner.
 - Availability, as a confirmed structure of per-day disciplines and time windows,
   not free text (`app/schemas/availability.py:52-57`).
@@ -258,95 +269,346 @@ read-the-generated-plan test as stage 1.
 
 ---
 
-## Stage 3 - The macrocycle: what the next block is for
+## The handover: when the form stops driving the plan
 
-**Trigger, stated precisely enough to implement:** the first plan request at which at
-least one target discipline is in state `WELL_EVIDENCED` and no macrocycle row
-exists. For Marc that is week 3, when running and cycling have three sessions across
-two days each and swimming is still empty.
+Everything up to here runs on numbers Marc typed about himself. At some point the
+system has seen enough of what he actually does to stop leaning on that. That moment
+is called the handover, and until now nothing in this design named it.
 
-**Correction: the phase is not the model's to decide.** The first draft asked a model
-for "the phase structure for the weeks ahead" and got back "BUILD, peaking around
-week 13, taper in the last 3." Two problems. The 2026-08-28 spec decided phase stays
-in code precisely so it cannot drift, and its table puts Marc at 20 weeks out in
-`BASE`, not `BUILD` (section 4.10). And the rest of that answer just restates the
-same table's 7-week and 3-week boundaries. The model call was either reproducing
-arithmetic or contradicting it.
+**Decided: one handover for the whole athlete, not one per sport.** The reason is
+simple and it comes from what the first plan already does. From week one, every
+target discipline is prescribed something, including the ones with no evidence at
+all. Swimming gets an introductory session in Marc's very first week. So if Marc
+follows the plan, every discipline starts producing real evidence at the same time,
+and there is no reason to treat one as graduated while another is still provisional.
 
-**So the split is:** code computes the phase from the race date, every week, from the
-existing table. The macrocycle owns the three things arithmetic cannot give.
+**Considered instead: graduate each sport on its own** as it reaches
+`WELL_EVIDENCED`. That is what the earlier version of this document assumed, and it
+is the smallest change because the per-sport states already exist in code. Rejected
+because it describes an athlete who ignores half his plan. If Marc is doing his runs
+and rides but not his swims, the right response is to notice the missed swims, not to
+quietly promote running to a different tier of trust.
 
-1. **The priority discipline.** Which sport gets more than its own evidence would
-   justify.
-2. **The one-sentence reason.** Written by the model, shown to the athlete, and
-   carried into every weekly prompt.
-3. **An optional, explicit deviation from the default block structure**, with a
-   stated why. The 2026-08-28 spec invites this itself: it notes that a long runway
-   would often have base split in two, and that its boundaries are an uncoached
-   opinion (section 4.10).
+### What triggers it
 
-**We build this prompt:**
+The handover happens at the first plan request where all three hold.
 
-> Real evidence so far: running and cycling are at a consistent 3 to 4 sessions a
-> week each. Swimming: nothing logged, self-reported as zero, named by the athlete as
-> his weakest discipline, and he has asked for 3 sessions a week.
-> Profile: male, 34, 74 kg, 179 cm. 20 weeks to an Olympic triathlon.
-> Current phase, computed: BASE. Coaching style: normal.
-> Name the priority discipline and say why in one sentence. If the default block
-> structure is wrong for this athlete, say so and say why. Otherwise leave it alone.
+1. **At least 3 completed weeks have had a plan.** Not three weeks since signup:
+   three weeks the system actually prescribed and the athlete could follow.
+2. **Overall adherence across those weeks is at least 70 percent.** Actual minutes
+   over planned minutes, summed across all target sports, as defined in stage 6.
+3. **Every target discipline has at least one real logged session** inside the
+   30-day planner window.
 
-**We get back:**
+Marc, if he follows the plan: three prescribed weeks, roughly 6 sessions a week, one
+swim among them. All three conditions hold at week 4 and the handover fires.
 
-> Priority: swimming. "Swimming has no real training behind it yet and the athlete
-> has already named it as his limiter, so give it steady, safe volume for the next
-> several weeks while running and cycling hold roughly flat."
+**The numbers are guesses and belong in configuration with that label.** Three weeks
+and 70 percent are not derived from anything. Three weeks is the shortest stretch
+that can show a pattern rather than one good week. Seventy percent is the same number
+stage 7 uses for the opposite question, which is convenient and not a justification.
+Once real adherence data exists, both should be looked at before either is defended.
 
-**Stored once and reused every week**, until the goal changes or stage 7's offer is
-accepted. It is not regenerated weekly.
+### The exit, and why it has to exist
+
+Condition three is an all-sports requirement, and this codebase has been burned by
+one of those before. The readiness gate used to demand evidence in every target sport
+and a triathlete with a weak swim got no plan at all, which is why it was replaced by
+a whole-athlete floor (`app/services/weekly_planning/evidence.py:80-89`, and section
+3.1 of the 2026-08-28 spec). Writing a new all-sports rule without an exit repeats
+that mistake in a different place.
+
+**So: if conditions one and two hold but one discipline is still empty after 6
+prescribed weeks, the system stops waiting and asks.** "You have not logged a swim in
+six weeks. Is getting to a pool the problem, or something else?" The answer decides
+what happens: a pool access problem is a real constraint that should change the plan,
+and simply not enjoying it is a different conversation.
+
+**What that costs.** It is the only place in this design where the system asks the
+athlete why something did not happen, and the 2026-08-28 spec deliberately decided
+not to chase missed training in this iteration (section 7.5). The argument for making
+an exception here is that this question is not about one skipped session, it is about
+a sport the athlete's race requires and has never once done. That is worth one
+message. If it turns out to be one message too many, the honest fallback is to hand
+over anyway and let the empty sport stay at `NONE`.
+
+### What actually changes at the handover
+
+Three things, and it is worth being exact because "the real flow" is otherwise a
+feeling rather than a state.
+
+- **The macrocycle is created.** Stage 3 fires here, and only here.
+- **Milestones may carry pace and speed numbers**, not just volume. Stage 3 explains
+  the rule.
+- **The self-reported baseline stops being a planning input** and becomes history. It
+  is not deleted. It stays as the record of where Marc said he started, which is
+  exactly what the 2026-08-28 spec means by a starting point that never changes
+  (section 5.1).
+
+**What does not change:** the per-sport evidence states keep working as they do now.
+A sport that is still `THIN` after the handover is still planned gently. The handover
+decides whose numbers the plan is built from, not how hard any single sport is
+pushed.
+
+**What this costs.** An athlete who trains well but logs badly never hands over. The
+system cannot tell "did not train" from "did not screenshot", and it never will
+without an automatic sync path, which no longer exists. So the handover measures
+logging discipline as much as training discipline, and the wording of every message
+around it should not accuse anyone of not training.
+
+---
+
+## Stage 3 - The macrocycle: what the goal actually requires
+
+**Trigger:** the handover, described above. Not before, and it happens once.
+
+This is the stage that turns "Ironman 70.3 in 5 hours" into something a weekly plan
+can be built against. Today the finish time reaches the model as a raw number of
+seconds in the prompt and nothing bridges it to a training week
+(`app/services/weekly_planning/service.py:460-475`). Marc's 5 hours may as well not
+be there.
+
+The macrocycle produces four things, in this order, because each one depends on the
+last.
+
+### One: the leg distances, from the catalog
+
+A finish time means nothing without the distances it covers. Those distances are
+nowhere in the database. The goal template holds a code, a display name, a
+description, and no numbers at all (`app/db/models.py:377-405`).
+
+**Decided: add the leg distances to the goal catalog.** For
+`TRIATHLON_HALF_DISTANCE` that is 1.9 km swim, 90 km bike, 21.1 km run. One seed
+change, one migration, a fixed and checkable fact per template.
+
+**Considered instead: let the model supply them.** A 70.3's distances are common
+knowledge and the model will produce them correctly nearly every time. Rejected
+because nearly every time is the problem. A split time computed against a
+hallucinated 80 km bike leg is wrong by 10 minutes and looks entirely plausible, and
+nothing downstream would catch it.
+
+**What it costs.** Goal templates that are not fixed-distance events do not fit this
+at all. A goal of "run a marathon" has one distance and works fine; a goal of "get
+fitter" has none, and the whole of stage 3 has nothing to decompose. That case is
+handled by skipping the decomposition, not by inventing a distance.
+
+### Two: the split, which is judgement, not division
+
+Five hours across three legs plus two transitions is not a division problem. A strong
+cyclist takes time out of the bike and gives some back on the run. The split depends
+on the athlete.
+
+**Decided: code supplies the distances and the total, the model proposes the split.**
+This is the same division of labour as section 4.6 of the 2026-08-28 spec: arithmetic
+in code, judgement in the model.
+
+For Marc, whose FTP of 230 watts at 74 kg is about 3.1 watts per kilogram, a
+plausible 5-hour shape is roughly a 38 minute swim, 2 hours 40 on the bike, and 1
+hour 35 running, with 7 minutes of transitions.
+
+**Considered instead: fixed proportions per event template.** Deterministic, no model
+call, and it would produce a defensible split for an average athlete. Rejected
+because it produces the same split for a swimmer and a cyclist, which is exactly the
+information the decomposition exists to use.
+
+**What it costs.** The model is being asked to predict race performance, which it
+will do fluently and with more confidence than the evidence supports. Every number it
+produces here is an estimate about a race five months away, and it must be worded and
+stored as one.
+
+### Three: the feasibility verdict
+
+The split above is what 5 hours requires. The next question is whether Marc can get
+there, and the honest answer is no.
+
+His running baseline is 90 minutes a week with a longest run of 35 minutes. A 1 hour
+35 half marathon off the back of a 90 km bike is not reachable from there in 20
+weeks. His swimming is zero. The bike is the only leg where the target and the
+evidence are in the same neighbourhood.
+
+**Decided: the macrocycle returns a verdict and a realistic alternative, and Marc is
+told at the handover.**
+
+> "Five hours is a stretch from where you are now, mostly because of the run and the
+> swim. Based on what you have done so far, something in the 5:45 to 6:15 range looks
+> realistic if training goes well. I will plan toward that and we can revisit it as
+> the numbers come in. Your goal stays 5 hours unless you change it."
+
+**The stated goal is never overwritten.** The 5 hours Marc typed stays in his goal
+row untouched. The realistic range is a separate, dated estimate stored on the
+macrocycle. Section 7.4's rule holds here as everywhere: the system proposes, it does
+not impose, and silently retargeting someone's goal would be the largest imposition
+in this design.
+
+**Considered instead: plan toward 5 hours regardless** and let stage 7 surface the
+shortfall over months. Nothing has to judge the athlete early, and the system avoids
+making a prediction it is not equipped to make. Rejected because the consequence is
+worse than the discomfort. Milestones derived from an unreachable target are
+unreachable, so Marc would miss every one, and a checkpoint system that always fails
+teaches him to ignore checkpoints.
+
+**Considered instead: ask Marc to choose** between keeping the time and keeping the
+date. Rejected as premature. At the handover the system has four weeks of evidence
+and a shaky forecast, which is not a strong enough basis to make someone re-plan
+their season. The choice becomes reasonable later, once milestones have actually been
+hit or missed, and stage 7 is where it belongs.
+
+**What this costs, and it is the largest cost in this document.** The system is
+telling an athlete his goal is probably out of reach, at week 4, on evidence that is
+thin by its own admission. It will sometimes be wrong, and being wrong in this
+direction is discouraging in a way that being wrong in the other direction is not.
+Three guards, none of which fully solve it:
+
+- The verdict is only produced when the gap is large. A target within reach of the
+  evidence gets no verdict at all, and nothing is said.
+- It is always phrased as an estimate with a range, never a single number and never a
+  ruling.
+- It is revisited. Stage 7 re-forecasts as real evidence accumulates, and an athlete
+  who improves fast should see the range move toward his goal, not sit there.
+
+**Still undecided: what counts as a large enough gap to say something.** Ten percent
+off the target time is clearly nothing; fifty percent is clearly worth saying. The
+line between them is a real product decision that should be made by looking at
+forecasts against real athletes, not chosen here.
+
+### Four: the milestones
+
+Dated capability checkpoints between now and the race. This is what the athlete
+actually sees, and it is the part that makes a 20-week runway feel like a plan rather
+than a series of weeks.
+
+For Marc, planning toward the realistic 6-hour shape:
+
+| By | Milestone | Carries a number because |
+|---|---|---|
+| Week 6 | Swim 800 m continuous, any pace | Volume only. Swimming has no evidence, so no pace is claimed |
+| Week 9 | Ride 60 km in one session | Volume only, though cycling is evidenced, because this is a distance step |
+| Week 11 | Swim 1.9 km continuous, any pace | Volume only, same reason as week 6 |
+| Week 13 | Ride 90 km averaging 32 kph | Pace attached. Cycling is `WELL_EVIDENCED` and his FTP is known |
+| Week 15 | Run 18 km at 5:30 per km | Pace attached. Running is `WELL_EVIDENCED` by now |
+| Week 17 | Ride 70 km then run 8 km off the bike | The only milestone that tests the thing the race actually asks for |
+
+**The rule that decides whether a milestone carries a pace: the sport's evidence
+state.** A sport in `WELL_EVIDENCED` gets pace or speed targets. A sport in `THIN`,
+`NONE` or `SELF_REPORTED` gets volume and duration targets only.
+
+This is how milestones with real numbers coexist with the shipped safety rule that
+forbids exact paces for unevidenced sports
+(`app/workflows/prompts/weekly_planning.py:28-36`). The two do not actually collide,
+because they govern different things. That rule governs what goes inside a session
+Marc is asked to do this week. A milestone is a capability expected by a future date.
+"Swim 1.9 km continuous by week 11" tells him where he is going without telling him
+how fast to swim on Tuesday.
+
+**The line that must not be crossed:** a milestone number never leaks into a session
+prescription for a sport that has not earned it. If week 11 says swim 1.9 km and
+swimming is still `THIN`, the weekly plan still prescribes short easy swims, and the
+milestone is context for the model, not a target to chase.
+
+**Considered instead: milestones with no numbers at all**, just named blocks and
+their purpose. Safer, and impossible to miss. Rejected because a checkpoint that
+cannot be failed is not a checkpoint, and because the phase table already says what
+kind of week it is. Blocks without numbers would mostly restate arithmetic, which is
+the same failure the phase decision below avoids.
+
+**What milestones cost.** Six dated commitments made at week 4 from thin evidence,
+which will be wrong in detail. Marc may hit the week 13 bike target in week 10 and
+still be nowhere near the week 15 run. They need to be re-forecast rather than
+treated as fixed, which is stage 7's job, and they need to be shown as "where we are
+aiming" rather than "what you owe."
+
+### The phase is still not the model's to decide
+
+**Correction carried forward from this document's first draft.** That draft asked a
+model for "the phase structure for the weeks ahead" and got back "BUILD, peaking
+around week 13, taper in the last 3." The 2026-08-28 spec decided phase stays in code
+precisely so it cannot drift, and its table puts Marc at 20 weeks out in `BASE`, not
+`BUILD` (section 4.10). The rest of that answer just restated the same table's 7-week
+and 3-week boundaries.
+
+**Milestones and the phase table do not conflict**, which is what makes it safe to
+have both. The phase says what kind of week week 13 is. A milestone says what should
+be true by week 13. One is about the shape of training, the other about the state of
+the athlete, and neither has an opinion about the other.
+
+The macrocycle may still record **an explicit deviation from the default block
+structure**, with a stated why, because the 2026-08-28 spec invites exactly that: it
+notes a long runway would often have base split in two, and that its boundaries are
+an uncoached opinion (section 4.10).
+
+### What the macrocycle holds, and when it is rebuilt
+
+Stored once at the handover, read every week, not regenerated weekly: the priority
+discipline, the one-sentence reason, the target split, the feasibility verdict and
+realistic range, the milestones, and any stated deviation from the default blocks.
+
+For Marc the priority is still swimming, and the reason is now sharper than it was,
+because the decomposition says why:
+
+> Priority: swimming. "Swimming is both his weakest leg and the one furthest from its
+> target split, so it buys the most time for the least risk over the next several
+> weeks while running and cycling build steadily."
 
 **Considered instead: regenerate the macrocycle every week.** Always current, no
 staleness problem, no invalidation rule to get wrong. Rejected because a priority
-that can change every Monday is not a priority. The whole value of this row is that
-it holds a decision still across weeks so the model can build on it.
+that changes every Monday is not a priority, and because milestones that move every
+week are not milestones.
 
-**What it costs.** A stored opinion that outlives the evidence it was formed from. If
-Marc starts swimming three times a week and improves fast, the row still says
-swimming is the priority until something invalidates it. Stage 7 is the only thing
-that notices, it only notices when things go badly, and it will not notice this case
-at all.
+**Invalidation, specified:** rebuilt when the goal signature changes (a different
+goal template or supporting template, which the planner already computes at
+`app/services/weekly_planning/service.py:702-712`), when the race date or the target
+time changes, or when Marc accepts stage 7's offer.
 
-**Invalidation, specified:** the macrocycle is discarded and regenerated when the
-goal signature changes (a different goal template or supporting template, which the
-planner already computes at `app/services/weekly_planning/service.py:702-712`), when
-the race date changes, or when Marc accepts stage 7's offer.
+**Deliberately not included: expiry after N weeks.** A timer would paper over
+staleness without detecting anything. If the row goes stale, the honest fix is a
+check that can see it, not a clock.
 
-**Deliberately not included: expiry after N weeks.** A timer would paper over the
-staleness problem above without detecting anything. If the row goes stale, the honest
-fix is a check that can see it, not a clock.
+**What the whole stage costs.** One model call that produces a race forecast, a set
+of dated promises, and a judgement about someone's ambition, all from four weeks of
+screenshot data. Every part of it is an estimate. The design's protection is that
+nothing here is binding: the weekly planner still owns each week, the athlete's
+stated goal is never changed, and stage 7 re-forecasts as evidence arrives. If those
+three hold, a wrong macrocycle costs a conversation. If any of them slips, it costs
+five months of training aimed at the wrong thing.
 
-**Still undecided:** what happens to the macrocycle when there is no race date at
-all. The phase is `GENERAL`, the block structure question is meaningless, and a
-priority discipline may still be useful. Nobody has thought this through and it
-should not be invented here.
+**Still undecided:** what a macrocycle means with no race date and no target time. The
+phase is `GENERAL`, there is nothing to decompose, and no milestone has a deadline. A
+priority discipline may still be useful and the rest of this stage may simply not
+apply. Nobody has worked it through, and it should not be invented here.
 
 ---
 
 ## Stage 4 - The weekly plan, every week
 
-**We read:** the macrocycle's priority and reason, the computed phase, this week's
-real evidence, availability, desired session counts, equipment, health limitations,
-coaching style, and from week 2 onward the previous check-in from stage 6.
+**We read:** the macrocycle's priority, reason and next milestones, the computed
+phase, this week's real evidence, availability, desired session counts, equipment,
+health limitations, coaching style, and from week 2 onward the previous check-in from
+stage 6.
 
-**We add to the existing prompt:**
+**We add to the existing prompt.** This is week 7, three weeks after the handover:
 
-> Phase: BASE, 20 weeks to the event. Priority discipline: swimming, because [the
-> sentence from stage 3]. Running and cycling: WELL_EVIDENCED. Swimming:
-> SELF_REPORTED, zero logged volume. Coaching style: normal, so the safety ceiling is
-> a 50 percent increase over last week's actual load. Desired sessions a week:
-> running 3, cycling 2, swimming 3. Aim for these, do not force them.
+> Phase: BUILD, 14 weeks to the event. Priority discipline: swimming, because [the
+> sentence from stage 3]. Running and cycling: WELL_EVIDENCED. Swimming: THIN, 4
+> sessions logged, longest 600 m.
+> Next milestones: swim 1.9 km continuous by week 11 (4 weeks away, currently 600 m);
+> ride 90 km averaging 32 kph by week 13. Milestones are direction, not this week's
+> prescription.
+> Coaching style: normal, so the safety ceiling is a 50 percent increase over last
+> week's actual load. Desired sessions a week: running 3, cycling 2, swimming 3. Aim
+> for these, do not force them.
 
-**We get back:** a normal week where swimming gets more attention than its own
-evidence alone would justify, because the macrocycle said why.
+**We get back:** a week where the swims step up in length rather than intensity,
+because the milestone that matters is continuous distance and the sport is still
+`THIN`, so pace is not on the table.
+
+**Only the next one or two milestones per discipline reach the prompt, never all
+six.** A model shown a week 17 brick milestone while planning week 7 has been given a
+reason to start doing brick sessions in base. The milestone list is a map; the weekly
+prompt only needs the next turning.
+
+**What that costs.** The model cannot see the shape of the whole runway, so it cannot
+notice that two milestones are bunched badly or that the runway is too short for the
+sequence. That is stage 7's job, and if stage 7 does not do it, nobody does.
 
 ### The trap: the plan cache will hide the new inputs
 
@@ -355,7 +617,8 @@ when the fingerprint matches (`app/services/weekly_planning/service.py:514-520`)
 That fingerprint covers evidence, goal, and availability only
 (`app/services/weekly_planning/service.py:113-148`).
 
-Add the macrocycle, the coaching style, and the check-in to the prompt without adding
+Add the macrocycle, the milestones, the coaching style, and the check-in to the
+prompt without adding
 them to the fingerprint, and this happens: Marc does his check-in on Sunday, asks for
 a plan, and gets back the plan generated before the check-in, marked "existing", with
 no model call and no error. Silent and very hard to notice.
@@ -623,19 +886,51 @@ how good the data is, not how fit the athlete is
 plainly: there is currently no honest way to say whether the athlete is improving,
 only whether they are doing more (section 5.3).
 
-So the check uses two inputs, both computable today.
+So the check uses three inputs, all computable today.
 
 1. **Adherence**, per discipline: actual minutes divided by planned minutes, over
    completed weeks that had a plan. Both halves are defined in stage 6. Weeks with no
    plan, or with zero planned minutes for that discipline, are skipped rather than
    counted as zero.
-2. **The coarse pace-at-heart-rate comparison** from stage 6, carrying its caveat.
+2. **Milestones whose date has passed**, checked against real evidence. A milestone
+   is either met or not, and the check is deterministic because every milestone is a
+   volume, a distance, or a pace over a stated distance. "Swim 1.9 km continuous by
+   week 11" is met when a logged swim of 1.9 km or more exists.
+3. **The coarse pace-at-heart-rate comparison** from stage 6, carrying its caveat.
 
-The second is a weak signal and is used only to soften the message, never to trigger
-it. Adherence alone decides whether anything is said.
+The third is a weak signal, used only to soften the message, never to trigger it.
 
-**The trigger:** the priority discipline's adherence has been below 70 percent for
-two consecutive completed weeks that had plans.
+**The two triggers.** Either one fires the message.
+
+- The priority discipline's adherence has been below 70 percent for two consecutive
+  completed weeks that had plans.
+- Two consecutive milestones in the same discipline passed their date unmet.
+
+### Re-forecasting, which is the point of the milestone check
+
+Stage 3 produced a realistic target range from four weeks of thin evidence. That
+forecast is the part of this design most likely to be wrong, and the milestone check
+is the only thing that can find out.
+
+**Decided: met and missed milestones re-forecast the range, and the direction
+matters.** An athlete hitting milestones early should see the estimate move toward
+his stated goal. Marc hitting the week 13 bike milestone in week 10 is evidence the
+6-hour estimate was pessimistic, and he should be told so:
+
+> "You hit the 90 km bike target three weeks early. That moves my estimate from
+> 5:45 to 6:15 down toward 5:30 to 5:50. Five hours is still a stretch, but less of
+> one than it looked in month one."
+
+**Considered instead: only re-forecast downward, when milestones are missed.**
+Cheaper, and it avoids raising hopes on one good session. Rejected because a forecast
+that can only get worse is a forecast nobody will believe, and because the whole
+argument for saying "5 hours is a stretch" in stage 3 was that it gets revisited. A
+verdict that never improves is a ruling, which is the thing stage 3 promised it was
+not.
+
+**What this costs.** An estimate that moves in public every few weeks invites the
+athlete to track the estimate instead of the training. It should be shown when it
+changes meaningfully, not recomputed and displayed every week.
 
 **These two numbers are guesses. Label them as guesses in the code.** Seventy percent
 and two weeks are not derived from anything. They were picked because 70 percent is a
@@ -644,6 +939,11 @@ noise while two is a pattern. Nobody has seen a single week of real adherence da
 Both numbers live in configuration, in one place, and the first thing to do once real
 data exists is look at what adherence actually distributes like before defending
 either.
+
+The milestone trigger is a guess of a different kind, and a weaker one. Two missed
+milestones in a row may mean the athlete is behind, or it may mean stage 3 set them
+badly from four weeks of data. Early on, the second is more likely than the first,
+which is an argument for the message asking rather than concluding.
 
 **Reversal named: the 2026-08-28 spec said there is only one threshold.** Section 7.6
 says explicitly that with the ask-why conversation deferred, "only the 15 percent
@@ -756,11 +1056,22 @@ somewhere the athlete can see, rather than for making it a hard rule.
 - **Coaching style** and **desired sessions per discipline**: two fields on the
   athlete profile, asked together at onboarding, editable through the existing
   profile settings flow. One tunes intensity, the other tunes frequency.
+- **Leg distances per goal template**: a seed and migration change on the goal
+  catalog, which today holds no numbers at all. Without it there is nothing to
+  decompose a finish time against.
 - **The macrocycle**: one row per athlete holding the priority discipline, the
-  one-sentence reason, any stated deviation from the default block structure, and
-  what it was built from. Replaced when the goal changes or stage 7's offer is
-  accepted. The phase is not stored, because it is computed from the race date every
-  time.
+  one-sentence reason, the target split, the feasibility verdict and realistic range,
+  any stated deviation from the default block structure, and what it was built from.
+  Replaced when the goal changes or stage 7's offer is accepted. The phase is not
+  stored, because it is computed from the race date every time.
+- **The milestones**: rows attached to the macrocycle, each with a target date, a
+  discipline, what has to be true, whether it carries a pace, and once its date
+  passes, whether it was met. Kept after the macrocycle is replaced, because a
+  rebuilt macrocycle should be able to see what the previous one asked for and
+  whether it happened.
+- **The handover**: a single dated marker on the athlete. Not a computed-on-the-fly
+  answer, because "have we handed over" must give the same answer next week even if
+  adherence dips below the bar afterwards. Handing over is a one-way door.
 - **The weekly plan**: unchanged in shape, now also reading the macrocycle, the
   computed phase, the coaching style, the desired counts, and the previous check-in.
   Every one of those goes into the input fingerprint.
@@ -777,26 +1088,41 @@ somewhere the athlete can see, rather than for making it a hard rule.
 
 Listed rather than invented.
 
-1. **What a macrocycle means with no race date.** The phase is `GENERAL` and the
-   block structure question is meaningless. A priority discipline may still help.
-   Nobody has worked this through.
-2. **Whether screenshot-reported average heart rate is comparable week to week.**
+1. **Whether the model can forecast a race time at all from this evidence.** Stage 3
+   asks it to predict a 70.3 split from four weeks of screenshots and a self-reported
+   FTP. It will answer confidently. Nobody has checked whether those answers land
+   anywhere near right, and the feasibility verdict, the realistic range and every
+   milestone rest on them being roughly so. This is the single largest unvalidated
+   assumption added by this revision.
+2. **How large a gap has to be before the feasibility verdict says anything.** Ten
+   percent off the target time is not worth mentioning, fifty percent clearly is. The
+   line between them should be set by looking at forecasts against real athletes, not
+   chosen here.
+3. **What a macrocycle means with no race date or no target time.** The phase is
+   `GENERAL`, there is nothing to decompose, and no milestone has a deadline. A
+   priority discipline may still help and the rest of stage 3 may simply not apply.
+4. **The handover numbers.** Three prescribed weeks, 70 percent adherence, and the
+   six-week timeout on an empty discipline are all guesses. So is the decision that
+   the handover is one-way. An athlete who hands over and then disappears for two
+   months is planned from stale real evidence rather than from his form, and nobody
+   has decided whether that is better or worse than reverting.
+5. **Whether screenshot-reported average heart rate is comparable week to week.**
    Different apps report it differently. Until someone looks at real screenshots, the
    pace-at-heart-rate signal is a hypothesis.
-3. **The 70 percent and two-week numbers**, and the 20-point spread on the coaching
-   style ceiling. Guesses, labelled as such, to be revisited against real adherence
-   data.
-4. **Whether the weekly check-in and per-session effort coexist long term.** This
+6. **The 70 percent and two-week progress numbers**, and the 20-point spread on the
+   coaching style ceiling. Guesses, labelled as such, to be revisited against real
+   adherence data.
+7. **Whether the weekly check-in and per-session effort coexist long term.** This
    document defers per-session effort and does not refute the 2026-08-28 spec's
    argument for it.
-5. **How the two adherence thresholds relate.** The 15 percent mid-week drift
+8. **How the two adherence thresholds relate.** The 15 percent mid-week drift
    proposal and this document's 70 percent block-level check should be one escalating
    mechanism, and neither is built yet, so the shape of that is still open.
-6. **How much of stage 5's critic fires in practice.** Unknown until it runs against
+9. **How much of stage 5's critic fires in practice.** Unknown until it runs against
    a real model. If it flags most weeks, the design is wrong, not just the prompt.
-7. **What happens to a macrocycle when the athlete goes quiet.** Marc could reach
-   `WELL_EVIDENCED`, get a macrocycle, stop training for six weeks, and drop back to
-   `THIN` everywhere. The stored priority then rests on evidence that no longer
-   exists. Stage 7 will not catch it, because there were no plans to measure
-   adherence against. Neither the trigger nor the invalidation rule in stage 3 covers
-   this, and a rule invented here would be a guess.
+10. **What happens to a macrocycle when the athlete goes quiet.** Marc could hand
+    over, get a macrocycle and six milestones, then stop training for two months. The
+    stored priority and every milestone date then rest on evidence that no longer
+    describes him. Stage 7 will not catch it, because there were no plans to measure
+    adherence against and no milestone check runs without a plan request. Neither the
+    handover, the milestone check, nor stage 3's invalidation rule covers this.
