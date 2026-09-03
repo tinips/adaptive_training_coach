@@ -320,9 +320,26 @@ that mistake in a different place.
 
 **So: if conditions one and two hold but one discipline is still empty after 6
 prescribed weeks, the system stops waiting and asks.** "You have not logged a swim in
-six weeks. Is getting to a pool the problem, or something else?" The answer decides
-what happens: a pool access problem is a real constraint that should change the plan,
-and simply not enjoying it is a different conversation.
+six weeks. Is getting to a pool the problem, or something else?"
+
+**What the answer does, specified, because this is where a bad plan could come
+from.** If Marc says he cannot get to a pool, the handover fires anyway without
+swimming, and one rule follows immediately: **a discipline the athlete has reported
+as inaccessible can never be the priority discipline.** A macrocycle that names
+swimming the priority for someone with no pool is the worst single output this design
+could produce, and nothing else in it prevents that. Swimming stays in the target set,
+because his race still contains a swim, and it stays at `NONE` until something
+changes. The plan keeps offering it a short session, which is what `NONE` already
+means in the shipped prompt (`app/workflows/prompts/weekly_planning.py:37-38`).
+
+If he says anything else, or says nothing, the handover fires without swimming and
+the priority rule above does not apply. Not answering is not the same as reporting a
+barrier.
+
+**What that costs.** This is a per-discipline branch inside a deliberately
+whole-athlete rule, and it is the one place the "same importance" principle bends.
+The justification is narrow: it bends only for a reported physical barrier, never for
+preference or silence.
 
 **What that costs.** It is the only place in this design where the system asks the
 athlete why something did not happen, and the 2026-08-28 spec deliberately decided
@@ -505,6 +522,14 @@ prescription for a sport that has not earned it. If week 11 says swim 1.9 km and
 swimming is still `THIN`, the weekly plan still prescribes short easy swims, and the
 milestone is context for the model, not a target to chase.
 
+**Three things now claim authority over how much a sport gets in a week, so the
+order is stated once here.** The coaching-style safety ceiling wins over everything:
+no week exceeds it, whatever any milestone implies. Below that sits the `THIN` floor
+from stage 2, which stops a logged workout from shrinking a plan below what the
+athlete already said they do. The milestone comes last and is direction only: it
+tells the model where the sport is heading, and it never sets a week's volume by
+itself. Ceiling, then floor, then milestone.
+
 **Considered instead: milestones with no numbers at all**, just named blocks and
 their purpose. Safer, and impossible to miss. Rejected because a checkpoint that
 cannot be failed is not a checkpoint, and because the phase table already says what
@@ -558,6 +583,21 @@ week are not milestones.
 goal template or supporting template, which the planner already computes at
 `app/services/weekly_planning/service.py:702-712`), when the race date or the target
 time changes, or when Marc accepts stage 7's offer.
+
+**What may change without a rebuild, and it is a short list.** Stage 7 re-forecasts
+the realistic range as milestones are met or missed, so the row cannot be fully
+frozen between rebuilds. Exactly two things are mutable: the realistic range, and
+each milestone's met-or-not flag once its date has passed. Everything else, the
+priority, the reason, the split, and the milestones themselves, is frozen until a
+listed invalidation fires.
+
+**Considered instead: treat a re-forecast as a rebuild** and regenerate the
+milestones alongside the range. It is arguably more correct, because a moved forecast
+implies the milestones between here and the race are wrong too. Rejected because it
+makes every good week silently rewrite the athlete's checkpoints, which is the
+"milestones that move every week are not milestones" problem in a new place. If the
+forecast moves far enough that the milestones are genuinely wrong, that is a rebuild
+and stage 7 should offer one, not perform one.
 
 **Deliberately not included: expiry after N weeks.** A timer would paper over
 staleness without detecting anything. If the row goes stale, the honest fix is a
@@ -836,7 +876,9 @@ week start, the pain level, the free text when given, and the computed compariso
 a JSON document. Keep it as history rather than consuming it once, so Marc's own
 trajectory can be shown back to him later.
 
-**Marc's week 4.** Pain tap: none. Free text: "Running felt too easy, I think I could
+**Marc's week 4**, which is the same request that fires his handover, so the check-in
+below and the macrocycle in stage 3 both happen on that one tap. Pain tap: none. Free
+text: "Running felt too easy, I think I could
 push harder." The computed numbers agree: his running pace at a similar average heart
 rate was faster than his own recent weeks. Both go into stage 4's next prompt as they
 are, with no extraction step in between:
