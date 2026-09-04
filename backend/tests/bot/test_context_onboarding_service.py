@@ -226,10 +226,16 @@ def _weekly_plan() -> WeeklyPlan:
                     sessions=(
                         PlanSession(
                             discipline="RUNNING",
+                            purpose="Build easy aerobic consistency.",
                             objective="Easy aerobic run",
-                            duration_minutes=45,
-                            intensity="EASY",
-                            structure="Easy throughout.",
+                            intensity={
+                                "metric": "RPE",
+                                "target_range": [2, 3],
+                                "rpe_range": [2, 3],
+                                "guidance": "Easy, conversational effort.",
+                            },
+                            targets={"duration_minutes": 45, "rpe": 3},
+                            execution="Easy throughout.",
                         ),
                     ),
                 )
@@ -261,6 +267,28 @@ async def test_plan_next_week_uses_deterministic_route_and_switches_keyboard() -
     assert response.user_keyboard == keyboards.completed_onboarding_keyboard(
         plan_available=True
     )
+
+
+@pytest.mark.asyncio
+async def test_weekly_plan_deletion_callback_discards_the_current_plan() -> None:
+    identity = _identity()
+    planning = SimpleNamespace(delete_next_week=AsyncMock(return_value=True))
+
+    response = await _facade(SimpleNamespace(), planning=planning).handle_callback(
+        identity, "plan:v1:delete:confirm"
+    )
+
+    planning.delete_next_week.assert_awaited_once_with(identity)
+    assert response.text == messages.WEEKLY_PLAN_DELETED
+    assert response.edit_existing is True
+
+
+@pytest.mark.asyncio
+async def test_weekly_plan_deletion_requires_confirmation() -> None:
+    response = await _facade(SimpleNamespace()).delete_weekly_plan(_identity())
+
+    assert response.text == messages.WEEKLY_PLAN_DELETE_CONFIRM
+    assert response.keyboard == keyboards.weekly_plan_deletion_keyboard()
 
 
 @pytest.mark.asyncio

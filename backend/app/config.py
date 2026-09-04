@@ -55,30 +55,12 @@ class Settings(BaseSettings):
     screenshot_import_enabled: bool = False
     llm_vision_model: str = "deepseek-v4-flash-vision-exp"
 
-    apple_health_import_enabled: bool = True
-    apple_health_import_max_compressed_size_mb: int = Field(
-        default=100,
-        ge=1,
-        le=1024,
-    )
-    apple_health_import_max_uncompressed_size_mb: int = Field(
-        default=1024,
-        ge=1,
-        le=10240,
-    )
-    apple_health_import_max_zip_members: int = Field(default=100, ge=1, le=10000)
-    apple_health_import_max_compression_ratio: float = Field(
-        default=200,
-        ge=1,
-        le=10000,
-    )
-    apple_health_import_temp_dir: Path | None = None
-    apple_health_import_keep_original_files: bool = False
     tcx_import_enabled: bool = True
     tcx_import_max_size_mb: int = Field(default=25, ge=1, le=100)
 
     fitness_window_days: int = Field(default=14, ge=1, le=90)
     planner_window_days: int = Field(default=30, ge=1, le=90)
+    planner_repair_enabled: bool = False
 
     @field_validator("telegram_bot_username", mode="before")
     @classmethod
@@ -116,18 +98,6 @@ class Settings(BaseSettings):
             return {value}
         return value
 
-    @field_validator("apple_health_import_temp_dir", mode="before")
-    @classmethod
-    def normalize_apple_health_temp_dir(
-        cls,
-        value: object,
-    ) -> object:
-        """Treat the documented empty optional path as the system temp dir."""
-
-        if isinstance(value, str) and not value.strip():
-            return None
-        return value
-
     def exposed_configuration(self) -> dict[str, object]:
         """Return non-secret configuration suitable for diagnostics."""
 
@@ -138,10 +108,10 @@ class Settings(BaseSettings):
             "llm_mode": self.llm_mode,
             "llm_model": self.llm_model,
             "langfuse_enabled": self.langfuse_enabled,
-            "apple_health_import_enabled": self.apple_health_import_enabled,
             "tcx_import_enabled": self.tcx_import_enabled,
             "fitness_window_days": self.fitness_window_days,
             "planner_window_days": self.planner_window_days,
+            "planner_repair_enabled": self.planner_repair_enabled,
         }
 
 

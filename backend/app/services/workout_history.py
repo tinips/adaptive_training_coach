@@ -204,10 +204,7 @@ def _page_start(
     if cursor is None:
         return 0
     for index, workout in enumerate(workouts):
-        if (
-            _as_utc(workout.started_at) == cursor[0]
-            and workout.id == cursor[1]
-        ):
+        if _as_utc(workout.started_at) == cursor[0] and workout.id == cursor[1]:
             return index + 1
     raise WorkoutHistoryCursorError("cursor is no longer in this result set")
 

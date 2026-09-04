@@ -61,6 +61,7 @@ class OnboardingServiceResult(BaseModel):
     updated_fields: tuple[str, ...] = ()
     created: bool = False
     training_history_skipped: bool = False
+    baseline_fits_availability: bool | None = None
     capability_review: CapabilityReview | None = None
     execution_assessment: GoalExecutionAssessment | None = None
 

@@ -340,8 +340,8 @@ async def test_history_skip_is_rejected_while_an_import_is_active(
                 onboarding_session_id=None,
                 telegram_file_id="active",
                 telegram_file_unique_id="active-unique",
-                display_filename="history.zip",
-                file_format=TrainingFileFormat.APPLE_HEALTH_ZIP,
+                display_filename="history.tcx",
+                file_format=TrainingFileFormat.TCX,
                 status=AppleHealthImportStatus.PROCESSING,
             )
         )
@@ -426,19 +426,23 @@ async def test_web_app_baseline_is_goal_adaptive_and_persisted(
 
     assert started.current_step is OnboardingStep.BASELINE_INTAKE
     assert started.answers["baseline_fields"] == [
+        "preferences.coaching_style",
         "running.typical_weekly_sessions",
         "running.typical_weekly_duration_minutes",
         "running.longest_recent_run_minutes",
         "running.recent_race_result",
+        "preferences.desired_weekly_sessions.RUNNING",
     ]
 
     completed = await service.submit_baseline_form(
         identity,
         {
+            "preferences.coaching_style": "NORMAL",
             "running.typical_weekly_sessions": "3",
             "running.typical_weekly_duration_minutes": "150",
             "running.longest_recent_run_minutes": "55",
             "running.recent_race_result": "",
+            "preferences.desired_weekly_sessions.RUNNING": "3",
         },
     )
 
@@ -452,5 +456,9 @@ async def test_web_app_baseline_is_goal_adaptive_and_persisted(
             "typical_weekly_sessions": 3,
             "typical_weekly_duration_minutes": 150,
             "longest_recent_run_minutes": 55,
-        }
+        },
+        "preferences": {
+            "coaching_style": "NORMAL",
+            "desired_weekly_sessions": {"RUNNING": 3},
+        },
     }

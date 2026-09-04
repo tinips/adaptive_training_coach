@@ -69,7 +69,7 @@ class DeterministicFakeOnboardingModel:
             payload = (
                 _fake_availability(messages)
                 if step is OnboardingStep.AVAILABILITY_INTAKE
-                else _fake_weekly_plan(user_text)
+                else _fake_weekly_prescription(_planner_request(messages))
             )
             output = schema.model_validate(payload)
             return StructuredModelResponse(
@@ -111,49 +111,75 @@ def _last_user_text(messages: list[BaseMessage]) -> str:
     return ""
 
 
-def _fake_weekly_plan(request_json: str) -> dict[str, object]:
-    """Return a stable valid weekly plan for local bot and service tests."""
+def _planner_request(messages: list[BaseMessage]) -> str:
+    """Find the original planner JSON when a repair instruction is appended."""
 
-    from datetime import date, timedelta
+    for message in reversed(messages):
+        if not isinstance(message, HumanMessage) or not isinstance(
+            message.content, str
+        ):
+            continue
+        try:
+            value = json.loads(message.content)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict) and "week_start" in value:
+            return message.content
+    return _last_user_text(messages)
+
+
+def _fake_weekly_prescription(request_json: str) -> dict[str, object]:
+    """Return stable unscheduled session intents for local planner tests."""
+
+    from datetime import date
 
     request = json.loads(request_json)
     week_start = date.fromisoformat(str(request["week_start"]))
-    contexts = request.get("goal", {}).get("target_contexts", [])
+    goal = request.get("goal")
+    contexts = goal.get("target_contexts", []) if isinstance(goal, dict) else []
+    planned_disciplines = request.get("planned_disciplines", [])
     discipline = (
         str(contexts[0].get("discipline", "OTHER"))
         if isinstance(contexts, list) and contexts and isinstance(contexts[0], dict)
-        else "OTHER"
+        else (
+            str(planned_disciplines[0])
+            if isinstance(planned_disciplines, list) and planned_disciplines
+            else "OTHER"
+        )
     )
-    days: list[dict[str, object]] = []
-    for offset in range(7):
-        day = week_start + timedelta(days=offset)
-        if offset in {1, 4, 6}:
-            days.append(
-                {
-                    "date": day.isoformat(),
-                    "sessions": [
-                        {
-                            "discipline": discipline,
-                            "objective": "Build consistent aerobic training",
-                            "duration_minutes": 45,
-                            "intensity": "EASY",
-                            "structure": (
-                                "Easy warm-up, steady main set, easy cool-down."
-                            ),
-                        }
-                    ],
-                    "rest_note": None,
-                }
-            )
-        else:
-            days.append(
-                {
-                    "date": day.isoformat(),
-                    "sessions": [],
-                    "rest_note": "Rest or gentle mobility.",
-                }
-            )
-    return {"week_start": week_start.isoformat(), "days": days}
+    is_first_week = request.get("planner_mode") == "FIRST_WEEK"
+    session = {
+        "discipline": discipline,
+        "purpose": "Build easy aerobic consistency.",
+        "objective": "Build consistent aerobic training",
+        "intensity": {
+            "metric": "RPE",
+            "target_range": [2, 3],
+            "rpe_range": [2, 3],
+            "guidance": "Easy, conversational effort.",
+        },
+        "targets": {"duration_minutes": 45, "rpe": 3},
+        "execution": "Easy warm-up, steady main set, easy cool-down.",
+    }
+    if is_first_week:
+        preferences = request.get("preferences")
+        desired = (
+            preferences.get("desired_weekly_sessions", {}).get(discipline, 1)
+            if isinstance(preferences, dict)
+            else 1
+        )
+        return {
+            "week_start": week_start.isoformat(),
+            "sessions": [session for _ in range(desired)],
+            "guardrails": [],
+            "logging_instructions": [],
+            "tests": [],
+        }
+    scheduled_session = {**session, "priority": "ESSENTIAL", "can_share_day": True}
+    return {
+        "week_start": week_start.isoformat(),
+        "sessions": [scheduled_session for _ in range(3)],
+    }
 
 
 def _fake_availability(messages: list[BaseMessage]) -> dict[str, object]:

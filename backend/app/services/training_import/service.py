@@ -1,4 +1,4 @@
-"""Secure, durable Apple Health ZIP and TCX import orchestration."""
+"""Secure, durable TCX import orchestration."""
 
 from __future__ import annotations
 
@@ -26,11 +26,6 @@ from app.domain.enums import (
     TrainingImportContext,
     UserStatus,
 )
-from app.integrations.apple_health import (
-    AppleHealthArchiveLimits,
-    AppleHealthParser,
-    AppleHealthParserError,
-)
 from app.integrations.tcx import TCXParser, TCXParserError, TCXParserLimits
 from app.repositories.activities import (
     ActivityImportValidationError,
@@ -57,7 +52,6 @@ _COMPLETED_PROFILE_STATES = {
     UserStatus.ONBOARDING_COMPLETED,
     UserStatus.PROFILE_COMPLETED,
 }
-_ZIP_MAGIC = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
 
 
 @dataclass(slots=True, frozen=True)
@@ -101,20 +95,6 @@ class TrainingFileImportService:
         self._session_factory = session_factory
         self._settings = settings
         self._clock = clock or (lambda: datetime.now(UTC))
-        self._apple_parser = AppleHealthParser(
-            AppleHealthArchiveLimits(
-                max_compressed_bytes=(
-                    settings.apple_health_import_max_compressed_size_mb * 1024 * 1024
-                ),
-                max_uncompressed_bytes=(
-                    settings.apple_health_import_max_uncompressed_size_mb * 1024 * 1024
-                ),
-                max_members=settings.apple_health_import_max_zip_members,
-                max_compression_ratio=(
-                    settings.apple_health_import_max_compression_ratio
-                ),
-            )
-        )
         self._tcx_parser = TCXParser(
             TCXParserLimits(
                 max_bytes=settings.tcx_import_max_size_mb * 1024 * 1024,
@@ -131,10 +111,7 @@ class TrainingFileImportService:
     ) -> TrainingFileImportOutcome:
         """Import one owned document and always delete its generated temp file."""
 
-        if not (
-            self._settings.apple_health_import_enabled
-            or self._settings.tcx_import_enabled
-        ):
+        if not self._settings.tcx_import_enabled:
             raise OnboardingApplicationError("training_file_import_disabled")
 
         job, user_id, claimed = await self._begin(
@@ -149,19 +126,7 @@ class TrainingFileImportService:
 
         temp_path: Path | None = None
         try:
-            enabled_limits = [
-                *(
-                    [self._apple_parser.max_compressed_bytes]
-                    if self._settings.apple_health_import_enabled
-                    else []
-                ),
-                *(
-                    [self._tcx_parser.max_bytes]
-                    if self._settings.tcx_import_enabled
-                    else []
-                ),
-            ]
-            maximum_hint = max(enabled_limits)
+            maximum_hint = self._tcx_parser.max_bytes
             if document.file_size is not None and document.file_size > maximum_hint:
                 raise TrainingFileImportError("training_file_size_exceeded")
             temp_path = self._create_temp_path()
@@ -180,7 +145,6 @@ class TrainingFileImportService:
                 _inspect_file,
                 temp_path,
                 self._tcx_parser.max_bytes,
-                self._apple_parser.max_compressed_bytes,
             )
             self._require_enabled(file_format)
             await self._mark_processing(
@@ -203,14 +167,6 @@ class TrainingFileImportService:
                 )
                 return await self._outcome(copied, exact_file_duplicate=True)
 
-            if file_format is TrainingFileFormat.APPLE_HEALTH_ZIP:
-                return await self._process_apple(
-                    user_id=user_id,
-                    job_id=job.id,
-                    path=temp_path,
-                    file_sha256=file_sha256,
-                    progress=progress,
-                )
             return await self._process_tcx(
                 user_id=user_id,
                 job_id=job.id,
@@ -219,7 +175,6 @@ class TrainingFileImportService:
                 progress=progress,
             )
         except (
-            AppleHealthParserError,
             TCXParserError,
             TrainingFileImportError,
             AppleHealthImportConflictError,
@@ -330,94 +285,6 @@ class TrainingFileImportService:
                 onboarding_session_id=onboarding_session_id,
             )
             return job, user.id, created
-
-    async def _process_apple(
-        self,
-        *,
-        user_id: uuid.UUID,
-        job_id: uuid.UUID,
-        path: Path,
-        file_sha256: str,
-        progress: ProgressCallback,
-    ) -> TrainingFileImportOutcome:
-        await progress("validating_archive")
-        member = await asyncio.to_thread(self._apple_parser.validate, path)
-        await progress("reading_workouts")
-        workouts, found, duplicates, warnings = await asyncio.to_thread(
-            self._apple_parser.read_workouts,
-            path,
-            member,
-        )
-        if not workouts:
-            raise TrainingFileImportError("training_file_no_workouts")
-        await progress("reading_heart_rate")
-        matched = await asyncio.to_thread(
-            self._apple_parser.read_heart_rate,
-            path,
-            member,
-            workouts,
-        )
-        await progress("matching_data")
-        await progress("saving_activities")
-        async with self._session_factory.begin() as session:
-            jobs = AppleHealthRepository(session)
-            job = await jobs.require_job(
-                user_id=user_id,
-                job_id=job_id,
-                for_update=True,
-            )
-            if job.status not in {
-                AppleHealthImportStatus.RECEIVED,
-                AppleHealthImportStatus.PROCESSING,
-            }:
-                return await self._outcome_in_session(session, job)
-            await self._require_current_context(session=session, job=job)
-            activities = TrainingActivityRepository(session)
-            imported = 0
-            updated = 0
-            unchanged = 0
-            fitness_input_changed = False
-            latest: Workout | None = None
-            for workout in workouts:
-                activity, outcome = await activities.import_apple_workout(
-                    user_id=user_id,
-                    workout=workout,
-                    file_sha256=file_sha256,
-                    import_job_id=job.id,
-                )
-                if latest is None or activity.started_at > latest.started_at:
-                    latest = activity
-                if outcome == "inserted":
-                    imported += 1
-                elif outcome == "updated":
-                    updated += 1
-                else:
-                    unchanged += 1
-                fitness_input_changed = (
-                    fitness_input_changed
-                    or _fitness_input_changed_in_import(
-                        activity=activity,
-                        outcome=outcome,
-                        job=job,
-                    )
-                )
-            completed = await jobs.mark_succeeded(
-                user_id=user_id,
-                job_id=job.id,
-                workouts_found=found,
-                activities_imported=imported,
-                activities_updated=updated,
-                activities_skipped=unchanged + duplicates,
-                heart_rate_records_matched=matched,
-                warning_count=len(warnings),
-                activity_id=latest.id if len(workouts) == 1 and latest else None,
-                file_format=TrainingFileFormat.APPLE_HEALTH_ZIP,
-            )
-            await self._complete_onboarding_if_needed(
-                session=session,
-                job=completed,
-            )
-            return await self._outcome_in_session(session, completed)
 
     async def _process_tcx(
         self,
@@ -698,24 +565,16 @@ class TrainingFileImportService:
 
     def _require_enabled(self, file_format: TrainingFileFormat) -> None:
         if (
-            file_format is TrainingFileFormat.APPLE_HEALTH_ZIP
-            and not self._settings.apple_health_import_enabled
-        ):
-            raise OnboardingApplicationError("apple_health_import_disabled")
-        if (
             file_format is TrainingFileFormat.TCX
             and not self._settings.tcx_import_enabled
         ):
             raise OnboardingApplicationError("tcx_import_disabled")
 
     def _create_temp_path(self) -> Path:
-        configured = self._settings.apple_health_import_temp_dir
-        if configured is not None:
-            configured.mkdir(parents=True, exist_ok=True)
         descriptor, raw_path = tempfile.mkstemp(
             prefix="training-import-",
             suffix=".upload",
-            dir=configured,
+            dir=None,
         )
         os.close(descriptor)
         return Path(raw_path)
@@ -743,9 +602,7 @@ class TrainingFileImportService:
         return True
 
     def _is_generated_temporary_path(self, path: Path) -> bool:
-        expected_parent = (
-            self._settings.apple_health_import_temp_dir or Path(tempfile.gettempdir())
-        ).resolve()
+        expected_parent = Path(tempfile.gettempdir()).resolve()
         resolved = path.resolve(strict=False)
         return (
             resolved.parent == expected_parent
@@ -782,22 +639,16 @@ def _fitness_input_changed_in_import(
 def _inspect_file(
     path: Path,
     tcx_max_bytes: int,
-    zip_max_bytes: int,
 ) -> tuple[str, TrainingFileFormat]:
     size = path.stat().st_size
     with path.open("rb") as stream:
         prefix = stream.read(4096)
-    if prefix.startswith(_ZIP_MAGIC):
-        if size > zip_max_bytes:
-            raise TrainingFileImportError("archive_compressed_size_exceeded")
-        file_format = TrainingFileFormat.APPLE_HEALTH_ZIP
-    else:
-        if size > tcx_max_bytes:
-            raise TrainingFileImportError("tcx_size_exceeded")
-        xml_prefix = prefix.lstrip(b"\xef\xbb\xbf \t\r\n")
-        if not xml_prefix.startswith(b"<"):
-            raise TrainingFileImportError("unsupported_training_file")
-        file_format = TrainingFileFormat.TCX
+    if size > tcx_max_bytes:
+        raise TrainingFileImportError("tcx_size_exceeded")
+    xml_prefix = prefix.lstrip(b"\xef\xbb\xbf \t\r\n")
+    if not xml_prefix.startswith(b"<"):
+        raise TrainingFileImportError("unsupported_training_file")
+    file_format = TrainingFileFormat.TCX
     return _sha256_file(path), file_format
 
 

@@ -13,7 +13,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.base import utc_now
 from app.db.models import Workout
 from app.domain.enums import ActivitySource
-from app.integrations.apple_health.models import ParsedWorkout
 from app.repositories.activity_source_links import ActivitySourceLinkRepository
 from app.repositories.errors import OwnedRecordNotFoundError
 from app.repositories.heart_rate_observations import HeartRateObservationRepository
@@ -27,7 +26,6 @@ from app.schemas.workouts import (
     main_detail,
     serialize_workout,
 )
-from app.services.activities.adapters.apple_health import from_apple_health
 from app.services.activities.adapters.tcx import from_tcx
 from app.services.activities.contracts import (
     ActivityImportData,
@@ -123,23 +121,6 @@ class TrainingActivityRepository:
             raise OwnedRecordNotFoundError("Workout not found")
         return serialize_workout(workout)
 
-    async def import_apple_workout(
-        self,
-        *,
-        user_id: uuid.UUID,
-        workout: ParsedWorkout,
-        file_sha256: str | None,
-        import_job_id: uuid.UUID | None,
-    ) -> tuple[Workout, ActivityUpsertOutcome]:
-        """Import one Apple workout using its deterministic fingerprint."""
-
-        return await self._import_activity(
-            user_id=user_id,
-            incoming=from_apple_health(workout),
-            file_sha256=file_sha256,
-            import_job_id=import_job_id,
-        )
-
     async def import_tcx_activity(
         self,
         *,
@@ -166,8 +147,8 @@ class TrainingActivityRepository:
         """Persist a source-neutral activity outside the file-import workflow.
 
         Mobile and future provider adapters retain the same exact-identity and
-        normalization boundary as Apple Health ZIP and TCX imports, without
-        manufacturing a file hash or an Apple import job.
+        normalization boundary as TCX imports, without manufacturing a file hash
+        or a training-file import job.
         """
 
         return await self._import_activity(

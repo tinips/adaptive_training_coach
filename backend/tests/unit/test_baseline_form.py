@@ -5,8 +5,10 @@ from datetime import UTC, date, datetime
 import pytest
 
 from app.domain.enums import Discipline
+from app.schemas.availability import ConfirmedWeeklyAvailability
 from app.services.onboarding.baseline_form import (
     build_baseline,
+    desired_sessions_fit_availability,
     fields_for_disciplines,
     parse_answer,
 )
@@ -48,7 +50,9 @@ def test_triathlon_form_includes_every_relevant_discipline() -> None:
     assert "cycling.riding_confidence" in fields
     assert "swimming.swimming_environment" in fields
     assert "triathlon.open_water_confidence" in fields
-    assert len(fields) == 19
+    assert "preferences.coaching_style" in fields
+    assert "preferences.desired_weekly_sessions.SWIMMING" in fields
+    assert len(fields) == 23
 
 
 def test_self_reported_baseline_allows_a_conservative_first_plan() -> None:
@@ -62,6 +66,72 @@ def test_self_reported_baseline_allows_a_conservative_first_plan() -> None:
 
     assert readiness.ready is True
     assert readiness.disciplines[0].state.value == "SELF_REPORTED"
+
+
+def test_desired_sessions_must_fit_each_discipline_and_total_availability() -> None:
+    days = {
+        day: {"available": False, "disciplines": [], "time_windows": []}
+        for day in (
+            "monday",
+            "tuesday",
+            "wednesday",
+            "thursday",
+            "friday",
+            "saturday",
+            "sunday",
+        )
+    }
+    days["tuesday"] = {
+        "available": True,
+        "disciplines": ["swimming"],
+        "time_windows": [{"duration_minutes": 60}],
+    }
+
+    fits, detail = desired_sessions_fit_availability(
+        {Discipline.SWIMMING: 3}, ConfirmedWeeklyAvailability(days=days)
+    )
+
+    assert fits is False
+    assert detail is not None
+
+
+def test_two_hour_weekend_windows_allow_two_different_sessions() -> None:
+    days = {
+        day: {
+            "available": True,
+            "disciplines": ["running", "cycling", "strength_training"],
+            "time_windows": [{"duration_minutes": 60}],
+        }
+        for day in ("monday", "tuesday", "wednesday", "thursday", "friday")
+    }
+    days.update(
+        {
+            day: {
+                "available": True,
+                "disciplines": [
+                    "running",
+                    "cycling",
+                    "swimming",
+                    "strength_training",
+                ],
+                "time_windows": [{"duration_minutes": 120}],
+            }
+            for day in ("saturday", "sunday")
+        }
+    )
+
+    fits, detail = desired_sessions_fit_availability(
+        {
+            Discipline.RUNNING: 2,
+            Discipline.CYCLING: 2,
+            Discipline.SWIMMING: 2,
+            Discipline.STRENGTH: 2,
+        },
+        ConfirmedWeeklyAvailability(days=days),
+    )
+
+    assert fits is True
+    assert detail is None
 
 
 @pytest.mark.parametrize(

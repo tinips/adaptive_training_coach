@@ -16,5 +16,6 @@ class ProfileSettingsResult(BaseModel):
     saved_field: str | None = None
     confirm_discard: bool = False
     current_value: str | int | float | None = None
+    baseline_reopened: bool = False
     capability_review: CapabilityReview | None = None
     execution_assessment: GoalExecutionAssessment | None = None

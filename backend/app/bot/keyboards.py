@@ -71,8 +71,9 @@ LABELS = {
     "resume_menu": "Resume",
     "profile": "Profile",
     "change_profile": "Change profile",
-    "plan_next_week": "Plan next week",
+    "plan_next_week": "Start your first week",
     "view_weekly_plan": "View weekly plan",
+    "delete_weekly_plan": "Delete weekly plan",
     "delete": "Delete",
 }
 
@@ -290,9 +291,7 @@ def completed_onboarding_keyboard(
     """Expose the durable completed-account actions."""
 
     plan_action = (
-        LABELS["view_weekly_plan"]
-        if plan_available
-        else LABELS["plan_next_week"]
+        LABELS["view_weekly_plan"] if plan_available else LABELS["plan_next_week"]
     )
     training_rows: list[list[str | KeyboardButton]] = [[plan_action]]
     if workout_history_url is not None:
@@ -309,7 +308,19 @@ def completed_onboarding_keyboard(
         [
             [LABELS["profile"], LABELS["change_profile"]],
             *training_rows,
+            *([[LABELS["delete_weekly_plan"]]] if plan_available else []),
             [LABELS["delete"]],
+        ]
+    )
+
+
+def weekly_plan_deletion_keyboard() -> InlineKeyboardMarkup:
+    """Confirm discarding a plan before enabling a fresh generation."""
+
+    return _rows(
+        [
+            [("Yes, delete this plan", "plan:v1:delete:confirm")],
+            [("Keep this plan", "plan:v1:delete:keep")],
         ]
     )
 
@@ -501,9 +512,7 @@ def profile_equipment_keyboard(
         [(("[x] " if key in selected else "[ ] ") + value, f"ps:v1:equipment:{key}")]
         for key, value in resources.items()
     ]
-    rows.extend(
-        [[("Continue", "ps:v1:equipment:done")], [("Back", "ps:v1:back")]]
-    )
+    rows.extend([[("Continue", "ps:v1:equipment:done")], [("Back", "ps:v1:back")]])
     return _rows(rows)
 
 

@@ -44,7 +44,9 @@ from app.repositories.profile_settings import ProfileSettingsRepository
 from app.repositories.profiles import ProfileRepository
 from app.repositories.training_catalog import TrainingCatalogRepository
 from app.repositories.users import UserRepository
+from app.repositories.weekly_plans import WeeklyTrainingPlanRepository
 from app.schemas.availability import ConfirmedWeeklyAvailability
+from app.schemas.baseline import AthleteBaselineData
 from app.schemas.capabilities import CapabilityReview, GoalExecutionAssessment
 from app.schemas.common import TelegramIdentity
 from app.schemas.onboarding_service import (
@@ -60,6 +62,7 @@ from app.services.onboarding.availability import (
 )
 from app.services.onboarding.baseline_form import (
     build_baseline,
+    desired_sessions_fit_availability,
     fields_for_disciplines,
     is_optional_field,
     parse_answer,
@@ -136,6 +139,13 @@ def _parse_event_date(text: str) -> date | None:
         except ValueError:
             continue
     return None
+
+
+def _safe_zone(timezone: str | None) -> ZoneInfo:
+    try:
+        return ZoneInfo(timezone) if timezone else ZoneInfo("UTC")
+    except ZoneInfoNotFoundError:
+        return ZoneInfo("UTC")
 
 
 def _parse_goal_metric(field: str, text: str) -> JsonValue:
@@ -1245,7 +1255,12 @@ class OnboardingService:
                         if expected_roles.get(relation.goal_template_id)
                         is relation.role
                         and context.discipline
-                        in {Discipline.RUNNING, Discipline.CYCLING, Discipline.SWIMMING}
+                        in {
+                            Discipline.RUNNING,
+                            Discipline.CYCLING,
+                            Discipline.SWIMMING,
+                            Discipline.STRENGTH,
+                        }
                     },
                     key=lambda item: item.value,
                 )
@@ -1271,6 +1286,149 @@ class OnboardingService:
                 answers=cast(dict[str, object], answers),
             )
             return self._result(user, onboarding)
+
+    async def baseline_form_prefill(
+        self, identity: TelegramIdentity
+    ) -> dict[str, object]:
+        """Return only the carried-forward fields for the active baseline form."""
+
+        async with self._session_factory() as session:
+            _user, onboarding = await self._locked_state(session, identity)
+            self._require_active(onboarding)
+            if onboarding.current_step is not OnboardingStep.BASELINE_INTAKE:
+                raise OnboardingApplicationError("stale_action")
+            raw = onboarding.answers.get(_BASELINE_VALUES_KEY)
+            return dict(raw) if isinstance(raw, dict) else {}
+
+    async def _restart_baseline_for_goal_change(
+        self,
+        *,
+        session: AsyncSession,
+        user: User,
+        previous_baseline: object | None,
+    ) -> None:
+        """Invalidate a goal-scoped baseline and open a pre-filled replacement."""
+
+        previous_data: AthleteBaselineData | None = None
+        raw_baseline = getattr(previous_baseline, "baseline_jsonb", None)
+        if isinstance(raw_baseline, dict):
+            try:
+                previous_data = AthleteBaselineData.model_validate(raw_baseline)
+            except ValueError:
+                previous_data = None
+        baseline_repository = AthleteBaselineRepository(session)
+        await baseline_repository.invalidate_for_goal_change(athlete_id=user.id)
+        goal = await ProfileRepository(session).get_training_goal(user_id=user.id)
+        if goal is None or goal.goal_template_id is None:
+            raise OnboardingApplicationError("stale_action")
+        fields = await self._baseline_fields_for_goal(session=session, goal=goal)
+        if not fields:
+            raise OnboardingApplicationError("baseline_not_supported")
+        onboarding, _ = await OnboardingRepository(session).get_or_create(
+            user_id=user.id
+        )
+        prefill = self._baseline_prefill_values(previous_data, fields)
+        answers: dict[str, object] = {
+            _BASELINE_FIELDS_KEY: list(fields),
+            _BASELINE_INDEX_KEY: 0,
+            _BASELINE_VALUES_KEY: prefill,
+            _BASELINE_GOAL_SIGNATURE_KEY: "|".join(
+                str(item)
+                for item in (goal.goal_template_id, goal.supporting_goal_template_id)
+                if item is not None
+            ),
+        }
+        onboarding.status = OnboardingStatus.ACTIVE
+        await OnboardingRepository(session).save_progress(
+            user_id=user.id,
+            current_step=OnboardingStep.BASELINE_INTAKE,
+            answers=answers,
+        )
+        await UserRepository(session).update_status(
+            user_id=user.id, status=UserStatus.ONBOARDING_IN_PROGRESS
+        )
+        local_now = utc_now().astimezone(_safe_zone(user.timezone)).date()
+        current_week_start = date.fromordinal(
+            local_now.toordinal() - local_now.weekday()
+        )
+        await WeeklyTrainingPlanRepository(session).supersede_current_and_next_week(
+            athlete_id=user.id,
+            current_week_start=current_week_start,
+        )
+
+    async def _baseline_fields_for_goal(
+        self, *, session: AsyncSession, goal: TrainingGoal
+    ) -> tuple[str, ...]:
+        if goal.goal_template_id is None:
+            return ()
+        expected_roles = {goal.goal_template_id: GoalContextRole.TARGET}
+        if goal.supporting_goal_template_id is not None:
+            expected_roles[goal.supporting_goal_template_id] = (
+                GoalContextRole.SUPPORTING
+            )
+        catalog = TrainingCatalogRepository(session)
+        primary_goal = await catalog.active_goal_by_id(
+            goal_template_id=goal.goal_template_id
+        )
+        if primary_goal is None:
+            return ()
+        rows = await catalog.contexts_for_goals(goal_template_ids=expected_roles.keys())
+        disciplines = tuple(
+            sorted(
+                {
+                    context.discipline
+                    for relation, context in rows
+                    if expected_roles.get(relation.goal_template_id) is relation.role
+                    and context.discipline
+                    in {
+                        Discipline.RUNNING,
+                        Discipline.CYCLING,
+                        Discipline.SWIMMING,
+                        Discipline.STRENGTH,
+                    }
+                },
+                key=lambda item: item.value,
+            )
+        )
+        return fields_for_disciplines(
+            disciplines,
+            include_triathlon=primary_goal.code in _TRIATHLON_CODES,
+        )
+
+    @staticmethod
+    def _baseline_prefill_values(
+        baseline: AthleteBaselineData | None, fields: tuple[str, ...]
+    ) -> dict[str, object]:
+        if baseline is None:
+            return {}
+        document = baseline.model_dump(mode="json", exclude_none=True)
+        values: dict[str, object] = {}
+        for field in fields:
+            if field == "preferences.coaching_style":
+                preferences = document.get("preferences")
+                if isinstance(preferences, dict) and isinstance(
+                    preferences.get("coaching_style"), str
+                ):
+                    values[field] = preferences["coaching_style"]
+                continue
+            if field.startswith("preferences.desired_weekly_sessions."):
+                preferences = document.get("preferences")
+                desired = (
+                    preferences.get("desired_weekly_sessions")
+                    if isinstance(preferences, dict)
+                    else None
+                )
+                discipline = field.rsplit(".", 1)[1]
+                if isinstance(desired, dict) and isinstance(
+                    desired.get(discipline), int
+                ):
+                    values[field] = desired[discipline]
+                continue
+            section, _, key = field.partition(".")
+            source = document.get(section)
+            if isinstance(source, dict) and key in source:
+                values[field] = source[key]
+        return values
 
     async def submit_baseline_form(
         self, identity: TelegramIdentity, values: Mapping[str, object]
@@ -1313,17 +1471,40 @@ class OnboardingService:
                     kind="baseline_validation_error",
                     error_code=invalid[0],
                 )
+            baseline = build_baseline(parsed)
+            fits_availability: bool | None = None
+            if baseline.preferences is not None:
+                profile = await ProfileRepository(session).get_athlete_profile(
+                    user_id=user.id
+                )
+                confirmed = self._confirmed_profile_availability(profile)
+                if confirmed is not None:
+                    fits_availability, _ = desired_sessions_fit_availability(
+                        baseline.preferences.desired_weekly_sessions,
+                        confirmed,
+                    )
+                    baseline = baseline.model_copy(
+                        update={
+                            "preferences": baseline.preferences.model_copy(
+                                update={"fits_availability": fits_availability}
+                            )
+                        }
+                    )
             await AthleteBaselineRepository(session).upsert(
                 athlete_id=user.id,
                 goal_signature=signature,
-                baseline=build_baseline(parsed),
+                baseline=baseline,
             )
             onboarding.status = OnboardingStatus.COMPLETED
             user = await UserRepository(session).update_status(
                 user_id=user.id, status=UserStatus.ONBOARDING_COMPLETED
             )
             await session.flush()
-            return self._result(user, onboarding)
+            return self._result(
+                user,
+                onboarding,
+                baseline_fits_availability=fits_availability,
+            )
 
     async def skip_training_history(
         self,
@@ -1651,6 +1832,9 @@ class OnboardingService:
                 if goal is None:
                     raise OnboardingApplicationError("stale_action")
                 main_changed = template.id != goal.goal_template_id
+                previous_baseline = await AthleteBaselineRepository(session).get(
+                    athlete_id=user.id
+                )
                 await ProfileRepository(session).update_training_goal_fields(
                     user_id=user.id,
                     payload={
@@ -1670,6 +1854,17 @@ class OnboardingService:
                 )
                 if updated_goal is None:
                     raise OnboardingApplicationError("stale_action")
+                if main_changed and previous_baseline is not None:
+                    await self._restart_baseline_for_goal_change(
+                        session=session,
+                        user=user,
+                        previous_baseline=previous_baseline,
+                    )
+                    return ProfileSettingsResult(
+                        step=ProfileSettingsStep.MENU,
+                        saved_field="Main goal",
+                        baseline_reopened=True,
+                    )
                 state = await settings_repo.save(
                     user_id=user.id,
                     step=ProfileSettingsStep.GOAL_MENU,
@@ -1689,6 +1884,9 @@ class OnboardingService:
                 )
                 if goal is None:
                     raise OnboardingApplicationError("stale_action")
+                previous_baseline = await AthleteBaselineRepository(session).get(
+                    athlete_id=user.id
+                )
                 supporting_id: uuid.UUID | None = None
                 secondary_priority: str | None = None
                 if raw != "none":
@@ -1718,6 +1916,17 @@ class OnboardingService:
                 )
                 if updated_goal is None:
                     raise OnboardingApplicationError("stale_action")
+                if support_changed and previous_baseline is not None:
+                    await self._restart_baseline_for_goal_change(
+                        session=session,
+                        user=user,
+                        previous_baseline=previous_baseline,
+                    )
+                    return ProfileSettingsResult(
+                        step=ProfileSettingsStep.MENU,
+                        saved_field="Secondary priority",
+                        baseline_reopened=True,
+                    )
                 state = await settings_repo.save(
                     user_id=user.id,
                     step=ProfileSettingsStep.GOAL_MENU,
@@ -3216,6 +3425,7 @@ class OnboardingService:
         updated_fields: tuple[str, ...] = (),
         created: bool = False,
         training_history_skipped: bool = False,
+        baseline_fits_availability: bool | None = None,
         capability_review: CapabilityReview | None = None,
         execution_assessment: GoalExecutionAssessment | None = None,
     ) -> OnboardingServiceResult:
@@ -3278,6 +3488,7 @@ class OnboardingService:
             updated_fields=updated_fields,
             created=created,
             training_history_skipped=training_history_skipped,
+            baseline_fits_availability=baseline_fits_availability,
             capability_review=capability_review,
             execution_assessment=execution_assessment,
         )

@@ -55,7 +55,4 @@ def test_missing_external_id_uses_a_deterministic_normalized_fingerprint() -> No
     assert identity(equivalent_utc) == first_identity
     assert identity(replace(incoming(), duration_seconds=3601)) != first_identity
     assert identity(replace(incoming(), distance_meters=10_001)) != first_identity
-    assert (
-        identity(replace(incoming(), source=ActivitySource.APPLE_HEALTH))
-        != first_identity
-    )
+    assert identity(replace(incoming(), source=ActivitySource.FIT)) != first_identity

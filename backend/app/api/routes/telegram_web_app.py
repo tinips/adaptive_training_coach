@@ -86,9 +86,8 @@ def history_session_identity(
         expires_at=expires_at,
         bot_token=token,
     )
-    if (
-        expires_at < int(time.time())
-        or not hmac.compare_digest(supplied_signature, expected_signature)
+    if expires_at < int(time.time()) or not hmac.compare_digest(
+        supplied_signature, expected_signature
     ):
         raise HTTPException(status_code=401, detail="invalid history session")
     return TelegramIdentity(

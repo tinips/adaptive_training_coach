@@ -9,7 +9,7 @@ from typing import Any
 
 from app.domain.enums import ProfileSettingsStep
 from app.schemas.capabilities import CapabilityReview, GoalExecutionAssessment
-from app.schemas.weekly_plans import PlanReadiness, WeeklyPlan
+from app.schemas.weekly_plans import FirstWeekPlan, PlanReadiness, WeeklyPlan
 
 TELEGRAM_MESSAGE_LIMIT = 4096
 _TRUNCATED_MARKER = "\u2026 [truncated for Telegram]"
@@ -129,9 +129,14 @@ WEEKLY_PLAN_UNAVAILABLE = (
     "in a moment."
 )
 WEEKLY_PLAN_NOT_FOUND = (
-    "There is no saved plan for next week yet. Choose Plan next week when you are "
-    "ready."
+    "There is no saved plan for next week yet. Choose Start your first week "
+    "when you are ready."
 )
+WEEKLY_PLAN_DELETE_CONFIRM = (
+    "Delete this weekly plan? You can generate a new one immediately afterwards."
+)
+WEEKLY_PLAN_DELETED = "Weekly plan deleted. You can now start your first week again."
+WEEKLY_PLAN_DELETE_NOT_FOUND = "There is no weekly plan to delete."
 _ONBOARDING_FIELD_LABELS = {
     "birth_year": "birth year",
     "gender": "category",
@@ -189,10 +194,6 @@ AVAILABILITY_INTAKE = (
     "\n'I can ride for up to two hours on the weekend. "
     "I can swim at a pool on Wednesday and Friday, and I can cycle only on weekends.'"
 )
-WEEKLY_PLAN_AVAILABILITY_CONFLICT = (
-    "I couldn't create a plan that fits your confirmed availability. Please update "
-    "your availability and try again."
-)
 AVAILABILITY_CLARIFICATION = (
     "I couldn't map that to a weekly schedule. Please list the days, activities, "
     "and duration for each day."
@@ -235,8 +236,8 @@ TRAINING_HISTORY_IMPORT = (
     "Only workout data is imported."
 )
 TRAINING_HISTORY_FILE_PROMPT = (
-    "Send an Apple Health export ZIP or a TCX workout file containing workouts "
-    "from the last 3 months. Only workout data is imported."
+    "Send a TCX workout file containing workouts from the last 3 months. "
+    "Only workout data is imported."
 )
 CONTEXT_VALIDATION_ERROR = (
     "Please send a short answer for this part of your athlete profile."
@@ -296,8 +297,8 @@ ONBOARDING_COMPLETED = (
     "Your onboarding is complete. You can change your profile settings at any time."
 )
 TRAINING_HISTORY_SKIP_SUGGESTION = (
-    "That's fine — we'll start conservatively. You can import an Apple Health export "
-    "or TCX workout later to give your coaching a more personalized starting point."
+    "That's fine — we'll start conservatively. You can import a TCX workout later "
+    "to give your coaching a more personalized starting point."
 )
 
 
@@ -313,12 +314,15 @@ def weekly_plan_readiness(readiness: PlanReadiness) -> str:
         f"session{'' if readiness.total_session_count == 1 else 's'} on "
         f"{readiness.total_active_day_count} "
         f"day{'' if readiness.total_active_day_count == 1 else 's'}.\n\n"
-        "Import an Apple Health export or TCX file, then try again."
+        "Import a TCX workout file, then try again."
     )
 
 
-def weekly_plan(plan: WeeklyPlan) -> str:
+def weekly_plan(plan: WeeklyPlan | FirstWeekPlan) -> str:
     """Render the saved seven-day structure compactly for Telegram."""
+
+    if isinstance(plan, FirstWeekPlan):
+        return first_week_menu(plan)
 
     lines = [f"Your plan for the week of {plan.week_start.isoformat()}"]
     for day in plan.days:
@@ -328,13 +332,37 @@ def weekly_plan(plan: WeeklyPlan) -> str:
             continue
         rendered = []
         for session in day.sessions:
+            rpe_range = session.intensity.rpe_range
             rendered.append(
                 f"• <b>{escape(session.discipline.value.title())}</b> — "
-                f"{escape(session.objective)} ({session.duration_minutes} min, "
-                f"{escape(session.intensity.title())})\n"
-                f"  {escape(session.structure)}"
+                f"{escape(session.purpose)} ({session.targets.duration_minutes} min, "
+                f"RPE {rpe_range[0]}-{rpe_range[1]})\n"
+                f"  {escape(session.objective)}\n"
+                f"  {escape(session.intensity.guidance)}\n"
+                f"  {escape(session.execution)}"
             )
         lines.append(f"\n<b>{heading}</b>\n" + "\n".join(rendered))
+    return _assert_telegram_length("\n".join(lines))
+
+
+def first_week_menu(plan: FirstWeekPlan) -> str:
+    """Render the first-week probe as an athlete-placed session menu."""
+
+    lines = [f"Your first-week training menu ({plan.week_start.isoformat()})"]
+    for number, session in enumerate(plan.sessions, start=1):
+        rpe_range = session.intensity.rpe_range
+        lines.append(
+            f"\n<b>{number}. {escape(session.discipline.value.title())}</b> â€” "
+            f"{escape(session.purpose)} ({session.targets.duration_minutes} min, "
+            f"RPE {rpe_range[0]}-{rpe_range[1]})\n"
+            f"  {escape(session.objective)}\n"
+            f"  {escape(session.intensity.guidance)}\n"
+            f"  {escape(session.execution)}"
+        )
+    lines.append("\n<b>Placement guardrails</b>")
+    lines.extend(f"â€¢ {escape(rule)}" for rule in plan.guardrails)
+    lines.append("\n<b>What to log</b>")
+    lines.extend(f"â€¢ {escape(item)}" for item in plan.logging_instructions)
     return _assert_telegram_length("\n".join(lines))
 
 
@@ -387,14 +415,13 @@ VALIDATION_ERRORS: dict[str, str] = {
     ),
     "invalid_timezone": "Send a valid IANA timezone, for example Europe/Madrid.",
     "invalid_event_date": ("Enter a future race date as YYYY-MM-DD or DD/MM/YYYY."),
-    "apple_health_import_disabled": ("Apple Health import is currently unavailable."),
-    "import_already_active": ("An Apple Health import is already in progress."),
+    "import_already_active": ("A training-file import is already in progress."),
     "training_file_not_expected": (
         "Send a completed-workout screenshot to add a workout."
     ),
     "training_file_import_disabled": "Training-file import is currently unavailable.",
     "unsupported_training_file": (
-        "That document is not a supported Apple Health ZIP or TCX workout file. "
+        "That document is not a supported TCX workout file. "
         "The temporary upload was deleted."
     ),
     "training_file_import_failed": (
@@ -413,20 +440,6 @@ VALIDATION_ERRORS: dict[str, str] = {
     ),
     "training_file_size_exceeded": (
         "That training file is larger than the allowed limit."
-    ),
-    "archive_compressed_size_exceeded": (
-        "That Apple Health ZIP is larger than the allowed limit."
-    ),
-    "archive_not_zip": "That document is not a valid Apple Health ZIP.",
-    "archive_empty": "That Apple Health ZIP is empty.",
-    "invalid_archive": "That Apple Health ZIP could not be read safely.",
-    "health_data_xml_not_found": (
-        "That ZIP does not contain an Apple Health export.xml file."
-    ),
-    "unsafe_xml_entity": "That XML contains unsafe entities and was rejected.",
-    "unsafe_external_dtd": "That XML contains an unsafe DTD and was rejected.",
-    "unsafe_xml_encoding": (
-        "That XML encoding is not supported safely. Export the file as UTF-8."
     ),
     "tcx_import_disabled": "TCX import is currently unavailable.",
     "tcx_size_exceeded": "That TCX file is larger than the allowed limit.",
@@ -451,14 +464,10 @@ VALIDATION_ERRORS: dict[str, str] = {
 TRAINING_FILE_PROGRESS = {
     "validating_file": "Validating file",
     "detecting_format": "Detecting file format",
-    "validating_archive": "Validating archive",
     "reading_tcx": "Reading TCX workout",
-    "reading_workouts": "Reading workouts",
-    "reading_heart_rate": "Reading heart-rate records",
     "matching_data": "Matching data",
     "saving_activities": "Saving activities",
 }
-APPLE_HEALTH_PROGRESS = TRAINING_FILE_PROGRESS
 
 SCREENSHOT_READING = "Reading the screenshot..."
 SCREENSHOT_DISABLED = "Workout screenshot import is not enabled yet."
@@ -481,26 +490,6 @@ SCREENSHOT_UPDATED = "Updated the matching existing workout."
 SCREENSHOT_UNCHANGED = "Already saved — nothing changed."
 
 
-def apple_health_file_result(
-    *,
-    activities_imported: int,
-    activities_updated: int,
-    activities_skipped: int,
-) -> str:
-    """Render one bulk-file outcome for an existing athlete."""
-
-    lines = [
-        "Apple Health history imported",
-        "",
-        f"Activities imported: {activities_imported}",
-        f"Activities updated: {activities_updated}",
-        f"Activities skipped: {activities_skipped}",
-        "",
-        "Your training history was updated.",
-    ]
-    return "\n".join(lines)
-
-
 def training_file_result(
     *,
     file_format: object,
@@ -508,13 +497,9 @@ def training_file_result(
     activities_updated: int,
     activities_skipped: int,
 ) -> str:
-    if getattr(file_format, "value", file_format) == "TCX":
-        heading = "TCX workout imported"
-    else:
-        heading = "Apple Health history imported"
     return "\n".join(
         [
-            heading,
+            "TCX workout imported",
             "",
             f"Activities imported: {activities_imported}",
             f"Activities updated: {activities_updated}",

@@ -70,6 +70,8 @@ class WeeklyPlanningBotPort(Protocol):
         self, identity: TelegramIdentity
     ) -> WeeklyPlanningResult: ...
 
+    async def delete_next_week(self, identity: TelegramIdentity) -> bool: ...
+
 
 class CoachBotApplicationService:
     def __init__(
@@ -79,8 +81,7 @@ class CoachBotApplicationService:
         profiles: ProfileService,
         account_queries: AccountQueryService,
         accounts: AccountService,
-        apple_health: TrainingImportBotPort | None = None,
-        apple_health_enabled: bool = True,
+        training_import: TrainingImportBotPort | None = None,
         tcx_enabled: bool = True,
         planning: WeeklyPlanningBotPort | None = None,
         telegram_web_app_url: str | None = None,
@@ -90,8 +91,7 @@ class CoachBotApplicationService:
         self._profiles = profiles
         self._account_queries = account_queries
         self._accounts = accounts
-        self._apple_health = apple_health
-        self._apple_health_enabled = apple_health_enabled
+        self._training_import = training_import
         self._tcx_enabled = tcx_enabled
         self._planning = planning
         self._telegram_web_app_url = telegram_web_app_url
@@ -140,6 +140,7 @@ class CoachBotApplicationService:
                 keyboards.LABELS["profile"]: "/profile",
                 keyboards.LABELS["plan_next_week"]: "/plan_next_week",
                 keyboards.LABELS["view_weekly_plan"]: "/view_weekly_plan",
+                keyboards.LABELS["delete_weekly_plan"]: "/delete_weekly_plan",
                 keyboards.LABELS["delete"]: "/delete_me",
             }.get(content, content)
         if event_type == "text":
@@ -154,6 +155,7 @@ class CoachBotApplicationService:
             "/profile",
             "/plan_next_week",
             "/view_weekly_plan",
+            "/delete_weekly_plan",
             "/cancel",
             "/delete_me",
         }
@@ -199,6 +201,7 @@ class CoachBotApplicationService:
             "/profile": self.profile,
             "/plan_next_week": self.plan_next_week,
             "/view_weekly_plan": self.view_weekly_plan,
+            "/delete_weekly_plan": self.delete_weekly_plan,
             "/cancel": self.cancel,
             "/delete_me": self.delete_me,
         }
@@ -273,9 +276,9 @@ class CoachBotApplicationService:
         download: Callable[[Path], Awaitable[None]],
         progress: Callable[[str], Awaitable[None]],
     ) -> TelegramResponse:
-        if self._apple_health is None:
+        if self._training_import is None:
             return TelegramResponse(messages.GENERIC_ERROR)
-        outcome = await self._apple_health.process_upload(
+        outcome = await self._training_import.process_upload(
             identity=identity, document=document, download=download, progress=progress
         )
         if outcome.status is not AppleHealthImportStatus.SUCCEEDED:
@@ -411,17 +414,30 @@ class CoachBotApplicationService:
             )
         if callback_data == "acct:v1:delete:keep":
             return TelegramResponse(messages.ACCOUNT_KEPT)
+        if callback_data == "plan:v1:delete:confirm":
+            if self._planning is None:
+                return TelegramResponse(messages.WEEKLY_PLAN_DELETE_NOT_FOUND)
+            deleted = await self._planning.delete_next_week(identity)
+            return TelegramResponse(
+                messages.WEEKLY_PLAN_DELETED
+                if deleted
+                else messages.WEEKLY_PLAN_DELETE_NOT_FOUND
+            )
+        if callback_data == "plan:v1:delete:keep":
+            return TelegramResponse("Keeping your weekly plan.")
         if callback_data == "ps:v1:open":
             return await self._render_profile_settings(
                 await self._onboarding.open_profile_settings(identity), identity
             )
         if callback_data.startswith("ps:v1:"):
-            return await self._render_profile_settings(
-                await self._onboarding.choose_profile_settings(
-                    identity, callback_data.removeprefix("ps:v1:")
-                ),
-                identity,
+            profile_state = await self._onboarding.choose_profile_settings(
+                identity, callback_data.removeprefix("ps:v1:")
             )
+            if profile_state.baseline_reopened:
+                return await self._render_onboarding(
+                    identity, await self._onboarding.snapshot(identity)
+                )
+            return await self._render_profile_settings(profile_state, identity)
         if callback_data in {"nav:v1:consent", "ob:v1:consent"}:
             state = await self._onboarding.start(identity)
             if state.onboarding_status is OnboardingStatus.CANCELLED:
@@ -524,6 +540,18 @@ class CoachBotApplicationService:
         if self._planning is None:
             return TelegramResponse(messages.WEEKLY_PLAN_UNAVAILABLE)
         result = await self._planning.generate_next_week(identity)
+        if result.kind == "baseline_required":
+            response = await self._render_onboarding(
+                identity, await self._onboarding.snapshot(identity)
+            )
+            return replace(
+                response,
+                text=(
+                    "Your goal changed, so I need an updated baseline before "
+                    "planning.\n\n"
+                    f"{response.text}"
+                ),
+            )
         if result.kind == "timezone_required":
             await self._onboarding.open_profile_settings(identity)
             await self._onboarding.choose_profile_settings(identity, "section:personal")
@@ -546,6 +574,12 @@ class CoachBotApplicationService:
         result = await self._planning.view_next_week(identity)
         return self._render_planning(result, viewing=True)
 
+    async def delete_weekly_plan(self, _: TelegramIdentity) -> TelegramResponse:
+        return TelegramResponse(
+            messages.WEEKLY_PLAN_DELETE_CONFIRM,
+            keyboards.weekly_plan_deletion_keyboard(),
+        )
+
     @staticmethod
     def _render_planning(
         result: WeeklyPlanningResult,
@@ -556,8 +590,6 @@ class CoachBotApplicationService:
             return TelegramResponse(messages.weekly_plan(result.plan))
         if result.kind == "insufficient" and result.readiness is not None:
             return TelegramResponse(messages.weekly_plan_readiness(result.readiness))
-        if result.kind == "availability_conflict":
-            return TelegramResponse(messages.WEEKLY_PLAN_AVAILABILITY_CONFLICT)
         return TelegramResponse(
             messages.WEEKLY_PLAN_NOT_FOUND
             if viewing

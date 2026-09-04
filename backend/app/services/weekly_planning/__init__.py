@@ -1,5 +1,9 @@
 """Weekly planner application service."""
 
-from app.services.weekly_planning.service import WeeklyPlanningService
+from app.services.weekly_planning.service import (
+    FirstWeekPlanner,
+    OngoingWeeklyPlanner,
+    WeeklyPlanningService,
+)
 
-__all__ = ["WeeklyPlanningService"]
+__all__ = ["FirstWeekPlanner", "OngoingWeeklyPlanner", "WeeklyPlanningService"]

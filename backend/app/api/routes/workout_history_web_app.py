@@ -41,28 +41,36 @@ document.querySelectorAll('[data-days]').forEach(button=>button.onclick=()=>{sta
 
 # Keep the Mini App self-contained while giving its compact chart enough context
 # to be understandable on a phone and usable with keyboard/screen-reader input.
-_PAGE = _PAGE.replace(
-    "</style>",
-    """.chart-meta{font-size:12px;margin:2px 0 10px;color:var(--tg-theme-hint-color,#666)}.chart-detail{min-height:20px;font-size:12px;margin:8px 0 0;color:var(--tg-theme-hint-color,#666)}.bar-group{border:0;border-radius:0;padding:0;background:transparent;color:inherit;cursor:pointer;text-align:left}.bar-group:focus-visible{outline:2px solid var(--tg-theme-button-color,#2481cc);outline-offset:2px}.chart-empty{align-self:center;width:100%;text-align:center;color:var(--tg-theme-hint-color,#666)}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}#loading{margin:0 0 8px}</style>""",
-).replace(
-    '<div class="card-head"><h2>Training volume</h2>',
-    '<div class="card-head"><div><h2>Training volume</h2><p id="chart-context" class="chart-meta">Daily totals · Time</p></div>',
-).replace(
-    '<div id="chart" class="chart"></div><div id="legend" class="legend"></div>',
-    '<div id="chart" class="chart" role="img" aria-describedby="chart-summary chart-detail"></div><p id="chart-detail" class="chart-detail">Select a bar for its total.</p><p id="chart-summary" class="sr-only"></p><div id="legend" class="legend"></div>',
-).replace(
-    '<p id="error" class="error hidden"></p>',
-    '<p id="loading" class="muted">Loading workout history…</p><p id="error" class="error hidden"></p>',
-).replace(
-    "function renderWorkouts(items,append){",
-    """function renderChart(){const buckets=state.data.chart_buckets;const field=state.metric==='time'?'duration_seconds_by_discipline':'distance_meters_by_discipline';const unit=state.metric==='time'?'training time':'distance';const bucketKind=buckets.length>31?'Weekly':'Daily';const fmt=v=>state.metric==='time'?formatDuration(v):formatDistance(v);const total=b=>Object.values(b[field]).reduce((a,v)=>a+v,0);const maximum=Math.max(1,...buckets.map(total));$('#chart-context').textContent=`${bucketKind} totals · ${unit}`;if(!buckets.some(total)){$('#chart').innerHTML='<p class="chart-empty">No '+unit+' recorded for this view.</p>';$('#chart').setAttribute('aria-label','No '+unit+' recorded for this view.');$('#chart-summary').textContent='No '+unit+' recorded for this view.';$('#legend').innerHTML='';return}const descriptions=[];$('#chart').innerHTML=buckets.map((b,index)=>{const value=total(b),parts=Object.entries(b[field]).map(([d,v])=>`${sport(d)} ${fmt(v)}`);const description=`${b.label}: ${fmt(value)}${parts.length?` (${parts.join(', ')})`:''}`;descriptions.push(description);const label=index===0||index===buckets.length-1||index%Math.ceil(buckets.length/6)===0?b.label:'';return `<button class="bar-group" type="button" aria-label="${description}" title="${description}" data-chart-detail="${description.replace(/&/g,'&amp;').replace(/\"/g,'&quot;')}">${Object.entries(b[field]).map(([d,v])=>`<span class="bar" style="height:${v/maximum*100}%;background:${colors[d]||colors.OTHER}"></span>`).join('')}<span class="bar-label">${label}</span></button>`}).join('');$('#chart').setAttribute('aria-label',`${bucketKind} ${unit} chart`);$('#chart-summary').textContent=descriptions.join('. ');document.querySelectorAll('[data-chart-detail]').forEach(bar=>{const show=()=>$('#chart-detail').textContent=bar.dataset.chartDetail;bar.onmouseenter=show;bar.onfocus=show;bar.onclick=show});const disciplines=[...new Set(buckets.flatMap(b=>Object.keys(b[field])))];$('#legend').innerHTML=disciplines.map(d=>`<span><i style="background:${colors[d]||colors.OTHER}"></i>${sport(d)}</span>`).join('');}
+_PAGE = (
+    _PAGE.replace(
+        "</style>",
+        """.chart-meta{font-size:12px;margin:2px 0 10px;color:var(--tg-theme-hint-color,#666)}.chart-detail{min-height:20px;font-size:12px;margin:8px 0 0;color:var(--tg-theme-hint-color,#666)}.bar-group{border:0;border-radius:0;padding:0;background:transparent;color:inherit;cursor:pointer;text-align:left}.bar-group:focus-visible{outline:2px solid var(--tg-theme-button-color,#2481cc);outline-offset:2px}.chart-empty{align-self:center;width:100%;text-align:center;color:var(--tg-theme-hint-color,#666)}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}#loading{margin:0 0 8px}</style>""",
+    )
+    .replace(
+        '<div class="card-head"><h2>Training volume</h2>',
+        '<div class="card-head"><div><h2>Training volume</h2><p id="chart-context" class="chart-meta">Daily totals · Time</p></div>',
+    )
+    .replace(
+        '<div id="chart" class="chart"></div><div id="legend" class="legend"></div>',
+        '<div id="chart" class="chart" role="img" aria-describedby="chart-summary chart-detail"></div><p id="chart-detail" class="chart-detail">Select a bar for its total.</p><p id="chart-summary" class="sr-only"></p><div id="legend" class="legend"></div>',
+    )
+    .replace(
+        '<p id="error" class="error hidden"></p>',
+        '<p id="loading" class="muted">Loading workout history…</p><p id="error" class="error hidden"></p>',
+    )
+    .replace(
+        "function renderWorkouts(items,append){",
+        """function renderChart(){const buckets=state.data.chart_buckets;const field=state.metric==='time'?'duration_seconds_by_discipline':'distance_meters_by_discipline';const unit=state.metric==='time'?'training time':'distance';const bucketKind=buckets.length>31?'Weekly':'Daily';const fmt=v=>state.metric==='time'?formatDuration(v):formatDistance(v);const total=b=>Object.values(b[field]).reduce((a,v)=>a+v,0);const maximum=Math.max(1,...buckets.map(total));$('#chart-context').textContent=`${bucketKind} totals · ${unit}`;if(!buckets.some(total)){$('#chart').innerHTML='<p class="chart-empty">No '+unit+' recorded for this view.</p>';$('#chart').setAttribute('aria-label','No '+unit+' recorded for this view.');$('#chart-summary').textContent='No '+unit+' recorded for this view.';$('#legend').innerHTML='';return}const descriptions=[];$('#chart').innerHTML=buckets.map((b,index)=>{const value=total(b),parts=Object.entries(b[field]).map(([d,v])=>`${sport(d)} ${fmt(v)}`);const description=`${b.label}: ${fmt(value)}${parts.length?` (${parts.join(', ')})`:''}`;descriptions.push(description);const label=index===0||index===buckets.length-1||index%Math.ceil(buckets.length/6)===0?b.label:'';return `<button class="bar-group" type="button" aria-label="${description}" title="${description}" data-chart-detail="${description.replace(/&/g,'&amp;').replace(/\"/g,'&quot;')}">${Object.entries(b[field]).map(([d,v])=>`<span class="bar" style="height:${v/maximum*100}%;background:${colors[d]||colors.OTHER}"></span>`).join('')}<span class="bar-label">${label}</span></button>`}).join('');$('#chart').setAttribute('aria-label',`${bucketKind} ${unit} chart`);$('#chart-summary').textContent=descriptions.join('. ');document.querySelectorAll('[data-chart-detail]').forEach(bar=>{const show=()=>$('#chart-detail').textContent=bar.dataset.chartDetail;bar.onmouseenter=show;bar.onfocus=show;bar.onclick=show});const disciplines=[...new Set(buckets.flatMap(b=>Object.keys(b[field])))];$('#legend').innerHTML=disciplines.map(d=>`<span><i style="background:${colors[d]||colors.OTHER}"></i>${sport(d)}</span>`).join('');}
 function renderWorkouts(items,append){""",
-).replace(
-    "async function load(append){$('#error').classList.add('hidden');",
-    "async function load(append){$('#error').classList.add('hidden');$('#loading').classList.remove('hidden');",
-).replace(
-    "$('#error').classList.remove('hidden')}}",
-    "$('#error').classList.remove('hidden')}finally{$('#loading').classList.add('hidden')}}",
+    )
+    .replace(
+        "async function load(append){$('#error').classList.add('hidden');",
+        "async function load(append){$('#error').classList.add('hidden');$('#loading').classList.remove('hidden');",
+    )
+    .replace(
+        "$('#error').classList.remove('hidden')}}",
+        "$('#error').classList.remove('hidden')}finally{$('#loading').classList.add('hidden')}}",
+    )
 )
 
 
@@ -90,9 +98,9 @@ async def workout_history_data(request: Request) -> dict[str, object]:
     else:
         raise HTTPException(status_code=401, detail="missing Telegram session")
     try:
-        result = await WorkoutHistoryService(
-            request.app.state.session_factory
-        ).query(identity=identity, request=body)
+        result = await WorkoutHistoryService(request.app.state.session_factory).query(
+            identity=identity, request=body
+        )
     except WorkoutHistoryUserNotFoundError as error:
         raise HTTPException(status_code=404, detail="athlete not found") from error
     except WorkoutHistoryCursorError as error:

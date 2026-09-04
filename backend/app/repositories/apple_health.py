@@ -1,4 +1,4 @@
-"""Ownership-scoped persistence for Apple Health imports."""
+"""Legacy-named, ownership-scoped persistence for training-file imports."""
 
 from __future__ import annotations
 
@@ -21,14 +21,11 @@ from app.domain.enums import (
     TrainingFileFormat,
     TrainingImportContext,
 )
-from app.integrations.apple_health.models import ParsedWorkout
-from app.repositories.activities import TrainingActivityRepository
 from app.repositories.errors import OwnedRecordNotFoundError
-from app.services.activities.contracts import ActivityUpsertOutcome
 
 
 class AppleHealthRepository:
-    """Persist import jobs and normalized records without taking transactions."""
+    """Persist TCX import jobs and historical source links without transactions."""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -535,19 +532,6 @@ class AppleHealthRepository:
             job.completed_at = utc_now()
             job.safe_error_code = "import_interrupted"
         await self._session.flush()
-
-    async def upsert_workout(
-        self,
-        *,
-        user_id: uuid.UUID,
-        workout: ParsedWorkout,
-    ) -> tuple[Workout, ActivityUpsertOutcome]:
-        return await TrainingActivityRepository(self._session).import_apple_workout(
-            user_id=user_id,
-            workout=workout,
-            file_sha256=None,
-            import_job_id=None,
-        )
 
 
 class AppleHealthImportConflictError(ValueError):

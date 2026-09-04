@@ -25,6 +25,7 @@ _PAGE = """<!doctype html>
 </head><body><main><h1>Your training baseline</h1><p class="intro">Use your usual training from the last four weeks. A few approximate answers are enough to create a conservative first week.</p><p id="error" class="error hidden"></p><form id="form"></form></main>
 <script>
 const config={
+ 'preferences.coaching_style':{section:'Coaching',label:'How should I push you?',kind:'select',options:[['CONSERVATIVE','Conservative'],['NORMAL','Normal'],['DEMANDING','Demanding']]},
  'running.typical_weekly_sessions':{section:'Running',label:'Typical runs per week',kind:'number',min:0,max:14,help:'Use your average across the last 4 weeks.'},
  'running.typical_weekly_duration_minutes':{section:'Running',label:'Typical total running minutes per week',kind:'number',min:0,max:1440,help:'Use 0 if you have not run.'},
  'running.longest_recent_run_minutes':{section:'Running',label:'Longest run in the last 14 days (minutes)',kind:'number',min:0,max:1440,help:'Use 0 if you have not run.'},
@@ -43,7 +44,11 @@ const config={
  'swimming.recent_400m_seconds':{section:'Swimming',label:'Recent 400m swim time',kind:'text',optional:true,placeholder:'For example: 8:30',help:'Optional. Leave blank if you do not have one.'},
  'triathlon.prior_experience':{section:'Triathlon',label:'Prior triathlon experience',kind:'select',options:[['NONE','None yet'],['SPRINT','Sprint'],['OLYMPIC','Olympic distance'],['LONG_COURSE','70.3 or full distance']]},
  'triathlon.weakest_discipline':{section:'Triathlon',label:'Your weakest discipline right now',kind:'select',options:[['RUNNING','Running'],['CYCLING','Cycling'],['SWIMMING','Swimming'],['NO_CLEAR_WEAKNESS','No clear weakness']]},
- 'triathlon.open_water_confidence':{section:'Triathlon',label:'Open-water swimming confidence',kind:'select',options:[['NOT_CONFIDENT','Not confident yet'],['SOME_EXPERIENCE','Some experience'],['CONFIDENT','Confident']]}
+ 'triathlon.open_water_confidence':{section:'Triathlon',label:'Open-water swimming confidence',kind:'select',options:[['NOT_CONFIDENT','Not confident yet'],['SOME_EXPERIENCE','Some experience'],['CONFIDENT','Confident']]},
+ 'preferences.desired_weekly_sessions.RUNNING':{section:'Running',label:'Runs per week you would like to aim for',kind:'number',min:0,max:14,help:'What you want, not what you do now.'},
+ 'preferences.desired_weekly_sessions.CYCLING':{section:'Cycling',label:'Rides per week you would like to aim for',kind:'number',min:0,max:14,help:'What you want, not what you do now.'},
+ 'preferences.desired_weekly_sessions.SWIMMING':{section:'Swimming',label:'Swims per week you would like to aim for',kind:'number',min:0,max:14,help:'What you want, not what you do now.'},
+ 'preferences.desired_weekly_sessions.STRENGTH':{section:'Strength',label:'Strength sessions per week you would like to aim for',kind:'number',min:0,max:14,help:'What you want, not what you do now.'}
 };
 const form=document.querySelector('#form');
 const requestedKeys=(new URLSearchParams(location.search).get('fields')||'').split(',').filter(Boolean);
@@ -55,6 +60,8 @@ let currentSection='';let section;
 for(const key of requested){const item=config[key];if(item.section!==currentSection){currentSection=item.section;section=document.createElement('section');section.className='section';const title=document.createElement('h2');title.textContent=currentSection;section.append(title);form.append(section)}const field=document.createElement('div');field.className='field';const label=document.createElement('label');label.htmlFor=key;label.textContent=item.label+(item.optional?' (optional)':'');field.append(label);if(item.help){const help=document.createElement('span');help.className='hint';help.textContent=item.help;field.append(help)}let input;if(item.kind==='select'){input=document.createElement('select');input.innerHTML='<option value="">Choose</option>';for(const [value,text] of item.options){const option=document.createElement('option');option.value=value;option.textContent=text;input.append(option)}}else{input=document.createElement('input');input.type=item.kind;input.inputMode=item.kind==='number'?'numeric':'text';input.placeholder=item.placeholder||'';if(item.min!==undefined)input.min=item.min;if(item.max!==undefined)input.max=item.max;if(item.kind==='number')input.step='1'}input.id=key;input.name=key;input.required=!item.optional;field.append(input);section.append(field)}
 if(!requested.length||hasUnsupportedFields){form.innerHTML='<section class="section"><p>This baseline form is out of date. Return to the coach and open the newest form again.</p></section>'}else{const button=document.createElement('button');button.type='submit';button.textContent='Save baseline';form.append(button)}
 const webApp=window.Telegram&&window.Telegram.WebApp;webApp&&webApp.ready();
+async function applyPrefill(){if(!webApp||!webApp.initData)return;try{const response=await fetch('/webapp/baseline/prefill',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({init_data:webApp.initData})});if(!response.ok)return;const values=await response.json();for(const [key,value] of Object.entries(values)){const input=form.elements.namedItem(key);if(input&&value!==null)input.value=String(value)}}catch(_){/* Prefill is a convenience; the form remains usable without it. */}}
+applyPrefill();
 form.addEventListener('submit',async event=>{event.preventDefault();if(!form.reportValidity())return;const data=Object.fromEntries(new FormData(form));if(!webApp||!webApp.initData){alert('Open this form from Telegram to save it.');return}const button=form.querySelector('button');button.disabled=true;button.textContent='Saving…';try{const response=await fetch('/webapp/baseline/submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({init_data:webApp.initData,values:data})});if(!response.ok)throw new Error();webApp.close()}catch(_){button.disabled=false;button.textContent='Save baseline';alert('Unable to save your baseline. Please try again.')}});
 </script></body></html>"""
 
@@ -62,6 +69,21 @@ form.addEventListener('submit',async event=>{event.preventDefault();if(!form.rep
 @router.get("/webapp/baseline", response_class=HTMLResponse)
 async def baseline_web_app() -> str:
     return _PAGE
+
+
+@router.post("/webapp/baseline/prefill")
+async def baseline_prefill(request: Request) -> dict[str, object]:
+    body = await request.json()
+    init_data = body.get("init_data")
+    if not isinstance(init_data, str):
+        raise HTTPException(status_code=400, detail="invalid payload")
+    settings = request.app.state.settings
+    identity = telegram_web_app_identity(settings=settings, init_data=init_data)
+    service = OnboardingService(
+        session_factory=request.app.state.session_factory,
+        settings=settings,
+    )
+    return await service.baseline_form_prefill(identity)
 
 
 @router.post("/webapp/baseline/submit")
@@ -76,14 +98,26 @@ async def submit_baseline(request: Request) -> dict[str, bool]:
     token = settings.telegram_bot_token
     if token is None:
         raise HTTPException(status_code=503, detail="bot unavailable")
-    service = OnboardingService(session_factory=request.app.state.session_factory, settings=settings)
-    await service.submit_baseline_form(identity, values)
+    service = OnboardingService(
+        session_factory=request.app.state.session_factory, settings=settings
+    )
+    result = await service.submit_baseline_form(identity, values)
+    saved_message = (
+        "Baseline saved. I have your starting point and will use completed workouts "
+        "to refine your plan."
+        if result.baseline_fits_availability is not False
+        else (
+            "Baseline saved. Your requested session frequency does not fit your "
+            "confirmed availability. You can lower the requested number or revisit "
+            "availability in Profile settings."
+        )
+    )
     async with httpx.AsyncClient(timeout=10) as client:
         await client.post(
             f"https://api.telegram.org/bot{token.get_secret_value()}/sendMessage",
             json={
                 "chat_id": identity.telegram_user_id,
-                "text": "Baseline saved. I have your starting point and will use completed workouts to refine your plan.",
+                "text": saved_message,
                 "reply_markup": keyboards.completed_onboarding_keyboard(
                     workout_history_url=workout_history_web_app_url(
                         settings.telegram_web_app_url,

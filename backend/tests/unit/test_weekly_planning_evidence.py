@@ -34,6 +34,7 @@ def test_readiness_uses_deduplicated_calculation_output() -> None:
     calculation = calculate_baseline_window(
         discipline=Discipline.RUNNING,
         workouts=(
+            # Historical Apple-origin rows remain readable after importer removal.
             _workout(source=ActivitySource.APPLE_HEALTH, started_at=first),
             _workout(source=ActivitySource.TCX, started_at=first),
             _workout(source=ActivitySource.TCX, started_at=NOW - timedelta(days=18)),
@@ -99,7 +100,7 @@ def _calculation_with(discipline: Discipline, day_offsets: tuple[int, ...]):
         FitnessWorkoutEvidence(
             workout_id=uuid.uuid4(),
             discipline=discipline,
-            source=ActivitySource.APPLE_HEALTH,
+            source=ActivitySource.MANUAL,
             started_at=NOW - timedelta(days=offset),
             duration_seconds=1800,
             fitness_input_updated_at=NOW,

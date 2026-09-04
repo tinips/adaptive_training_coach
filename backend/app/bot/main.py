@@ -30,7 +30,7 @@ from app.services.accounts import AccountQueryService, AccountService
 from app.services.onboarding import OnboardingService
 from app.services.profiles import ProfileService
 from app.services.training_import import TrainingFileImportService
-from app.services.weekly_planning import WeeklyPlanningService
+from app.services.weekly_planning import FirstWeekPlanner
 from app.services.workout_screenshot import WorkoutScreenshotService
 
 TelegramApplication = Application[Any, Any, Any, Any, Any, Any]
@@ -43,14 +43,14 @@ class BotRuntime:
 
     settings: Settings
     engine: AsyncEngine
-    apple_health: TrainingFileImportService
+    training_import: TrainingFileImportService
     service: CoachBotApplicationService
     workout_screenshot: WorkoutScreenshotService
 
     async def recover(self) -> None:
         """Reconcile durable background work before accepting updates."""
 
-        await self.apple_health.recover_stale_work()
+        await self.training_import.recover_stale_work()
 
     async def aclose(self) -> None:
         """Close provider and database connection pools exactly once."""
@@ -68,7 +68,7 @@ def build_runtime(
     runtime_settings = settings or get_settings()
     runtime_engine = engine or create_engine(runtime_settings)
     session_factory = create_session_factory(runtime_engine)
-    apple_health = TrainingFileImportService(
+    training_import = TrainingFileImportService(
         session_factory=session_factory,
         settings=runtime_settings,
     )
@@ -83,12 +83,11 @@ def build_runtime(
         profiles=ProfileService(session_factory),
         account_queries=AccountQueryService(session_factory),
         accounts=AccountService(session_factory),
-        apple_health=apple_health,
-        apple_health_enabled=runtime_settings.apple_health_import_enabled,
+        training_import=training_import,
         tcx_enabled=runtime_settings.tcx_import_enabled,
         telegram_web_app_url=runtime_settings.telegram_web_app_url,
         telegram_web_app_token=runtime_settings.telegram_bot_token,
-        planning=WeeklyPlanningService(
+        planning=FirstWeekPlanner(
             session_factory=session_factory,
             settings=runtime_settings,
             model=create_goal_extraction_model(runtime_settings),
@@ -108,7 +107,7 @@ def build_runtime(
     return BotRuntime(
         settings=runtime_settings,
         engine=runtime_engine,
-        apple_health=apple_health,
+        training_import=training_import,
         service=service,
         workout_screenshot=workout_screenshot,
     )

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from app.domain.enums import CoachingStyle, Discipline
 
 
 class _BaselineSchema(BaseModel):
@@ -62,6 +64,16 @@ class TriathlonBaseline(_BaselineSchema):
     open_water_confidence: Literal["NOT_CONFIDENT", "SOME_EXPERIENCE", "CONFIDENT"]
 
 
+class TrainingPreferences(_BaselineSchema):
+    """What the athlete wants, as distinct from current training volume."""
+
+    coaching_style: CoachingStyle
+    desired_weekly_sessions: dict[Discipline, Annotated[int, Field(ge=0, le=14)]] = (
+        Field(default_factory=dict)
+    )
+    fits_availability: bool | None = None
+
+
 class AthleteBaselineData(_BaselineSchema):
     """The current version of the goal-adaptive onboarding baseline."""
 
@@ -69,6 +81,7 @@ class AthleteBaselineData(_BaselineSchema):
     cycling: CyclingBaseline | None = None
     swimming: SwimmingBaseline | None = None
     triathlon: TriathlonBaseline | None = None
+    preferences: TrainingPreferences | None = None
 
 
 __all__ = [
@@ -77,5 +90,6 @@ __all__ = [
     "RecentRaceResult",
     "RunningBaseline",
     "SwimmingBaseline",
+    "TrainingPreferences",
     "TriathlonBaseline",
 ]

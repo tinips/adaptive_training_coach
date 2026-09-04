@@ -5,13 +5,15 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from app.domain.enums import Discipline
+from app.domain.enums import CoachingStyle, Discipline
+from app.schemas.availability import ConfirmedWeeklyAvailability
 from app.schemas.baseline import (
     AthleteBaselineData,
     CyclingBaseline,
     RecentRaceResult,
     RunningBaseline,
     SwimmingBaseline,
+    TrainingPreferences,
     TriathlonBaseline,
 )
 
@@ -39,6 +41,10 @@ _OPTIONAL_FIELDS = frozenset(
 )
 
 _QUESTIONS: dict[str, BaselineQuestion] = {
+    "preferences.coaching_style": BaselineQuestion(
+        "preferences.coaching_style",
+        "How should I push you? conservative, normal, or demanding.",
+    ),
     "running.typical_weekly_sessions": BaselineQuestion(
         "running.typical_weekly_sessions",
         "Running: typical sessions per week over the last 4 weeks (0 to 14).",
@@ -119,6 +125,22 @@ _QUESTIONS: dict[str, BaselineQuestion] = {
         "Triathlon: open-water confidence - not confident, some experience, "
         "or confident.",
     ),
+    "preferences.desired_weekly_sessions.RUNNING": BaselineQuestion(
+        "preferences.desired_weekly_sessions.RUNNING",
+        "Running: how many sessions per week would you like to aim for? (0 to 14)",
+    ),
+    "preferences.desired_weekly_sessions.CYCLING": BaselineQuestion(
+        "preferences.desired_weekly_sessions.CYCLING",
+        "Cycling: how many sessions per week would you like to aim for? (0 to 14)",
+    ),
+    "preferences.desired_weekly_sessions.SWIMMING": BaselineQuestion(
+        "preferences.desired_weekly_sessions.SWIMMING",
+        "Swimming: how many sessions per week would you like to aim for? (0 to 14)",
+    ),
+    "preferences.desired_weekly_sessions.STRENGTH": BaselineQuestion(
+        "preferences.desired_weekly_sessions.STRENGTH",
+        "Strength: how many sessions per week would you like to aim for? (0 to 14)",
+    ),
 }
 
 _FIELDS_BY_DISCIPLINE: dict[Discipline, tuple[str, ...]] = {
@@ -154,7 +176,15 @@ _DISPLAY_DISCIPLINE_ORDER = (
     Discipline.RUNNING,
     Discipline.CYCLING,
     Discipline.SWIMMING,
+    Discipline.STRENGTH,
 )
+
+_AVAILABILITY_DISCIPLINE = {
+    Discipline.RUNNING: "running",
+    Discipline.CYCLING: "cycling",
+    Discipline.SWIMMING: "swimming",
+    Discipline.STRENGTH: "strength_training",
+}
 
 
 def fields_for_disciplines(
@@ -163,13 +193,23 @@ def fields_for_disciplines(
     """Return the small form required for the athlete's active goal."""
 
     selected = set(disciplines)
-    fields = tuple(
+    baseline_fields = tuple(
         key
         for discipline in _DISPLAY_DISCIPLINE_ORDER
         if discipline in selected
         for key in _FIELDS_BY_DISCIPLINE.get(discipline, ())
     )
-    return fields + (_TRIATHLON_FIELDS if include_triathlon else ())
+    desired_fields = tuple(
+        f"preferences.desired_weekly_sessions.{discipline.value}"
+        for discipline in _DISPLAY_DISCIPLINE_ORDER
+        if discipline in selected
+    )
+    return (
+        ("preferences.coaching_style",)
+        + baseline_fields
+        + (_TRIATHLON_FIELDS if include_triathlon else ())
+        + desired_fields
+    )
 
 
 def is_optional_field(key: str) -> bool:
@@ -186,8 +226,12 @@ def parse_answer(*, key: str, text: str) -> object:
     value = text.strip()
     if key in _OPTIONAL_FIELDS and value.lower() in {"", "skip"}:
         return None
-    if key.endswith("typical_weekly_sessions"):
+    if key.endswith("typical_weekly_sessions") or key.startswith(
+        "preferences.desired_weekly_sessions."
+    ):
         return _integer(value, minimum=0, maximum=14)
+    if key == "preferences.coaching_style":
+        return _choice(value, {style.value for style in CoachingStyle})
     if key in {
         "running.typical_weekly_duration_minutes",
         "running.longest_recent_run_minutes",
@@ -246,7 +290,43 @@ def build_baseline(values: dict[str, object]) -> AthleteBaselineData:
         cycling=_cycling(values),
         swimming=_swimming(values),
         triathlon=_triathlon(values),
+        preferences=_preferences(values),
     )
+
+
+def desired_sessions_fit_availability(
+    desired: dict[Discipline, int],
+    availability: ConfirmedWeeklyAvailability,
+) -> tuple[bool, str | None]:
+    """Return whether requested frequency can fit confirmed availability."""
+
+    available_days = tuple(
+        day for day in availability.days.values() if day.available and day.time_windows
+    )
+    for discipline, requested in desired.items():
+        availability_discipline = _AVAILABILITY_DISCIPLINE.get(discipline)
+        if availability_discipline is None:
+            continue
+        possible = sum(
+            availability_discipline in day.disciplines for day in available_days
+        )
+        if requested > possible:
+            return (
+                False,
+                f"{discipline.value} requested {requested} sessions but has "
+                f"{possible} available days",
+            )
+    total_capacity = sum(
+        max(1, window.duration_minutes // 60)
+        for day in available_days
+        for window in day.time_windows
+    )
+    if sum(desired.values()) > total_capacity:
+        return (
+            False,
+            "requested sessions exceed available session capacity",
+        )
+    return True, None
 
 
 def _running(values: dict[str, object]) -> RunningBaseline | None:
@@ -302,6 +382,27 @@ def _triathlon(values: dict[str, object]) -> TriathlonBaseline | None:
         prior_experience=values["triathlon.prior_experience"],
         weakest_discipline=values["triathlon.weakest_discipline"],
         open_water_confidence=values["triathlon.open_water_confidence"],
+    )
+
+
+def _preferences(values: dict[str, object]) -> TrainingPreferences | None:
+    raw_style = values.get("preferences.coaching_style")
+    if not isinstance(raw_style, str):
+        return None
+    desired: dict[Discipline, int] = {}
+    prefix = "preferences.desired_weekly_sessions."
+    for key, value in values.items():
+        if not key.startswith(prefix) or not isinstance(value, int):
+            continue
+        try:
+            desired[Discipline(key.removeprefix(prefix))] = value
+        except ValueError:
+            continue
+    raw_fits = values.get("preferences.fits_availability")
+    return TrainingPreferences(
+        coaching_style=CoachingStyle(raw_style),
+        desired_weekly_sessions=desired,
+        fits_availability=raw_fits if isinstance(raw_fits, bool) else None,
     )
 
 

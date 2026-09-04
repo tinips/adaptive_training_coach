@@ -716,7 +716,6 @@ class Workout(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         self.title = value
 
 
-
 class AthleteSelfReportedBaseline(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     """Current goal-scoped baseline supplied during onboarding.
 
@@ -782,6 +781,10 @@ class WeeklyTrainingPlan(UUIDPrimaryKeyMixin, Base):
         json_document(),
         nullable=False,
     )
+    plan_schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    validation_jsonb: Mapped[dict[str, object] | None] = mapped_column(
+        json_document(), nullable=True
+    )
     evidence_snapshot_jsonb: Mapped[dict[str, object]] = mapped_column(
         json_document(),
         nullable=False,
@@ -799,6 +802,35 @@ class WeeklyTrainingPlan(UUIDPrimaryKeyMixin, Base):
     athlete: Mapped[User] = relationship(
         back_populates="weekly_training_plans",
         lazy="raise",
+    )
+
+
+class WeeklyPlanOutcome(UUIDPrimaryKeyMixin, Base):
+    """Aggregated plan-versus-actual comparison for one completed week."""
+
+    __tablename__ = "weekly_plan_outcomes"
+    __table_args__ = (
+        UniqueConstraint(
+            "athlete_id", "week_start", name="uq_weekly_plan_outcomes_athlete_week"
+        ),
+    )
+
+    athlete_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    plan_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("weekly_training_plans.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    week_start: Mapped[date] = mapped_column(Date, nullable=False)
+    comparison_jsonb: Mapped[dict[str, object]] = mapped_column(
+        json_document(), nullable=False
+    )
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
     )
 
 
@@ -1241,7 +1273,7 @@ class OtherWorkoutDetails(Base):
 
 
 class AppleHealthImportJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
-    """Durable metadata and safe outcome for one Telegram Apple Health upload."""
+    """Legacy-named durable metadata for one Telegram training-file upload."""
 
     __tablename__ = "apple_health_import_jobs"
     __table_args__ = (

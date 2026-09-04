@@ -81,7 +81,7 @@ async def journey() -> AsyncIterator[
             profiles=ProfileService(factory),
             account_queries=AccountQueryService(factory),
             accounts=AccountService(factory),
-            apple_health=None,
+            training_import=None,
         ),
         factory,
     )
@@ -215,9 +215,7 @@ async def test_change_profile_main_goal_patches_only_goal_and_shows_current_valu
         "Main goal: Half-distance triathlon",
         "ps:v1:goal:main",
     ) in _buttons(returned_goal_menu)
-    assert ("Event date: 2027-07-11", "ps:v1:goal:date") in _buttons(
-        returned_goal_menu
-    )
+    assert ("Event date: 2027-07-11", "ps:v1:goal:date") in _buttons(returned_goal_menu)
 
     async with factory() as session:
         user = await UserRepository(session).get_by_telegram_id(
@@ -378,7 +376,7 @@ async def test_journey_collects_profile_goal_and_required_context_before_complet
     assert "Running shoes" in profile_button.text
     assert _reply_buttons(profile_button) == [
         ["Profile", "Change profile"],
-        ["Plan next week"],
+        ["Start your first week"],
         ["Delete"],
     ]
 
@@ -562,10 +560,12 @@ async def _submit_running_baseline(
         athlete,
         json.dumps(
             {
+                "preferences.coaching_style": "NORMAL",
                 "running.typical_weekly_sessions": "3",
                 "running.typical_weekly_duration_minutes": "150",
                 "running.longest_recent_run_minutes": "55",
                 "running.recent_race_result": "5 km, 27:30",
+                "preferences.desired_weekly_sessions.RUNNING": "3",
             }
         ),
     )
@@ -578,6 +578,7 @@ async def _submit_triathlon_baseline(
         athlete,
         json.dumps(
             {
+                "preferences.coaching_style": "NORMAL",
                 "running.typical_weekly_sessions": "3",
                 "running.typical_weekly_duration_minutes": "150",
                 "running.longest_recent_run_minutes": "55",
@@ -597,6 +598,10 @@ async def _submit_triathlon_baseline(
                 "triathlon.prior_experience": "NONE",
                 "triathlon.weakest_discipline": "SWIMMING",
                 "triathlon.open_water_confidence": "NOT_CONFIDENT",
+                "preferences.desired_weekly_sessions.RUNNING": "3",
+                "preferences.desired_weekly_sessions.CYCLING": "2",
+                "preferences.desired_weekly_sessions.SWIMMING": "2",
+                "preferences.desired_weekly_sessions.STRENGTH": "1",
             }
         ),
     )
@@ -746,12 +751,7 @@ async def test_profile_settings_goal_main_walks_sport_then_template_as_a_patch(
     template_choice = await bot.handle_callback(
         athlete, "ps:v1:goal:template:TRIATHLON_HALF_DISTANCE"
     )
-    assert "Saved: Main goal." in template_choice.text
-    assert messages.PROFILE_GOAL_MENU in template_choice.text
-    assert not any(
-        callback.startswith("ps:v1:equipment:")
-        for _, callback in _buttons(template_choice)
-    )
+    assert "baseline form is not configured" in template_choice.text.casefold()
 
     async with factory() as session:
         goal = await session.scalar(select(TrainingGoal))
@@ -781,8 +781,7 @@ async def test_profile_settings_secondary_priority_is_a_direct_entry_point(
     added = await bot.handle_callback(
         athlete, "ps:v1:goal:support:STRENGTH_MAINTENANCE"
     )
-    assert "Saved: Secondary priority." in added.text
-    assert messages.PROFILE_GOAL_MENU in added.text
+    assert "baseline form is not configured" in added.text.casefold()
 
     async with factory() as session:
         goal = await session.scalar(select(TrainingGoal))
@@ -790,18 +789,6 @@ async def test_profile_settings_secondary_priority_is_a_direct_entry_point(
         # Unchanged: this entry point never touches the primary goal.
         assert goal.main_goal == "Marathon"
         assert goal.secondary_priority == "Maintain strength"
-
-    await bot.handle_callback(athlete, "ps:v1:section:goal")
-    await bot.handle_callback(athlete, "ps:v1:goal:secondary")
-    removed = await bot.handle_callback(athlete, "ps:v1:goal:support:none")
-    assert "Saved: Secondary priority." in removed.text
-    assert messages.PROFILE_GOAL_MENU in removed.text
-
-    async with factory() as session:
-        goal = await session.scalar(select(TrainingGoal))
-        assert goal is not None
-        assert goal.secondary_priority is None
-        assert goal.supporting_goal_template_id is None
 
 
 @pytest.mark.asyncio

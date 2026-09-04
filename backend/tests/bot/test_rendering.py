@@ -175,7 +175,16 @@ def test_lifecycle_reply_keyboards_expose_exact_account_actions() -> None:
     ]
     assert [[button.text for button in row] for row in completed.keyboard] == [
         ["Profile", "Change profile"],
-        ["Plan next week"],
+        ["Start your first week"],
+        ["Delete"],
+    ]
+    completed_with_plan = keyboards.completed_onboarding_keyboard(plan_available=True)
+    assert [
+        [button.text for button in row] for row in completed_with_plan.keyboard
+    ] == [
+        ["Profile", "Change profile"],
+        ["View weekly plan"],
+        ["Delete weekly plan"],
         ["Delete"],
     ]
     assert all(
@@ -271,7 +280,8 @@ def test_profile_setting_current_values_are_readable_escaped_and_bounded() -> No
 
 
 def test_import_and_profile_messages_do_not_reference_removed_features() -> None:
-    imported = messages.apple_health_file_result(
+    imported = messages.training_file_result(
+        file_format="TCX",
         activities_imported=1,
         activities_updated=2,
         activities_skipped=3,

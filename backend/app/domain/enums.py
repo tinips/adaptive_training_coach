@@ -71,6 +71,14 @@ class DisciplineEvidenceState(StrEnum):
     NONE = "NONE"
 
 
+class CoachingStyle(StrEnum):
+    """How assertively the athlete wants the coach to progress training."""
+
+    CONSERVATIVE = "CONSERVATIVE"
+    NORMAL = "NORMAL"
+    DEMANDING = "DEMANDING"
+
+
 class TrainingFileFormat(StrEnum):
     APPLE_HEALTH_ZIP = "APPLE_HEALTH_ZIP"
     TCX = "TCX"

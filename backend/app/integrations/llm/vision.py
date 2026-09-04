@@ -28,8 +28,7 @@ class ScreenshotExtractionError(RuntimeError):
 
 
 _EXTRACTION_PROMPT = """\
-This image is a screenshot of a single workout summary from a fitness app \
-(for example Apple Health, or the source app's own detail screen). Extract \
+This image is a screenshot of a single workout summary from a fitness app. Extract \
 every metric visible on it into the given schema.
 
 The current local date is {current_date}. Resolve relative labels such as \
@@ -51,7 +50,7 @@ strength training to STRENGTH. If the screenshot has both a title and an icon, \
 prefer the title. Do not classify a generic activity as STRENGTH without one \
 of those strength signals.
 - source_app_name is the app or brand shown on the card (e.g. "Mi Fitness", \
-"Apple Health", "Strava").
+"Strava").
 - Parse localized dates and month abbreviations before falling back to a \
 relative date: for example, Spanish "31 ago." means 31 August, and French \
 "31 août" means 31 August. When a displayed date has a day and month but no \
@@ -195,10 +194,7 @@ class DeepSeekWorkoutScreenshotExtractor:
     ) -> ManualWorkoutImportRequest:
         """Reject console scores that an initial broad extraction calls calories."""
 
-        if (
-            request.calories_active_kcal is None
-            and request.calories_total_kcal is None
-        ):
+        if request.calories_active_kcal is None and request.calories_total_kcal is None:
             return request
         audit_message = HumanMessage(
             content=[

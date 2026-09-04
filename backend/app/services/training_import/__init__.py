@@ -1,4 +1,4 @@
-"""Unified Apple Health ZIP and TCX import orchestration."""
+"""TCX import orchestration."""
 
 from app.services.training_import.service import (
     TrainingFileImportOutcome,

@@ -28,7 +28,11 @@ from app.services.workout_screenshot.service import (
 )
 
 
-def _service_with_draft() -> WorkoutScreenshotService:
+def _service_with_draft(
+    *,
+    average_heart_rate: float | None = None,
+    max_heart_rate: float | None = None,
+) -> WorkoutScreenshotService:
     service = object.__new__(WorkoutScreenshotService)
     service._pending = {
         "draft-token": _PendingDraft(
@@ -38,6 +42,9 @@ def _service_with_draft() -> WorkoutScreenshotService:
                 source_app_name="Treadmill",
                 started_at=datetime(2026, 8, 31, 8, tzinfo=UTC),
                 duration_seconds=1800,
+                distance_meters=5_000,
+                average_heart_rate=average_heart_rate,
+                max_heart_rate=max_heart_rate,
             ),
         )
     }
@@ -80,7 +87,7 @@ async def test_confirm_persists_a_pending_screenshot_workout(
             telegram_username="runner",
             first_name="Ada",
         )
-    service = _service_with_draft()
+    service = _service_with_draft(average_heart_rate=142, max_heart_rate=168)
     service._session_factory = factory
     service._settings = Settings(
         environment="test",
@@ -95,6 +102,14 @@ async def test_confirm_persists_a_pending_screenshot_workout(
 
     assert outcome == "inserted"
     assert workout.athlete_id == user.id
+    assert workout.discipline.value == "RUNNING"
+    assert workout.started_at == datetime(2026, 8, 31, 8, tzinfo=UTC)
+    assert workout.duration_seconds == 1800
+    assert workout.running_details is not None
+    assert workout.running_details.distance_meters == 5_000
+    assert workout.running_details.average_heart_rate == 142
+    assert workout.running_details.max_heart_rate == 168
+    assert workout.running_details.average_pace_seconds_per_km == 360
     assert "draft-token" not in service._pending
 
 

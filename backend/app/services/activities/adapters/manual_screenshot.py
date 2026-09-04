@@ -87,7 +87,7 @@ def _pool_details(
 def _external_id(payload: ManualWorkoutImportRequest) -> str:
     """A stable identity so re-submitting the same screenshot is a no-op.
 
-    Unlike HealthKit, a screenshot carries no provider UUID. Hashing the
+    Unlike a provider export, a screenshot carries no provider UUID. Hashing the
     fields a duplicate submission would reproduce exactly (sport, start
     time, duration, distance) keeps re-imports idempotent without one.
     """

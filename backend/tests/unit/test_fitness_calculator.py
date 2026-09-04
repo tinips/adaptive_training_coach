@@ -22,7 +22,7 @@ def _workout(
     return FitnessWorkoutEvidence(
         workout_id=uuid.uuid4(),
         discipline=discipline,
-        source=ActivitySource.APPLE_HEALTH,
+        source=ActivitySource.MANUAL,
         started_at=started_at,
         duration_seconds=duration_seconds,
         fitness_input_updated_at=NOW,
