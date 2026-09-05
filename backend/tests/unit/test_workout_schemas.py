@@ -266,7 +266,7 @@ def test_strength_json_has_exact_keys_and_allows_empty_imports() -> None:
             )
 
 
-def test_generic_read_schema_and_cycling_schema_exclude_forbidden_metrics() -> None:
+def test_generic_read_schema_excludes_extra_fields_and_cycling_schema_has_no_indoor_flag() -> None:
     assert set(WorkoutRead.model_fields) == {
         "id",
         "athlete_id",
@@ -282,7 +282,5 @@ def test_generic_read_schema_and_cycling_schema_exclude_forbidden_metrics() -> N
         "details",
     }
     assert "is_indoor" not in CyclingWorkoutDetailsData.model_fields
-    assert not any(
-        "watt" in field or "power" in field
-        for field in CyclingWorkoutDetailsData.model_fields
-    )
+    assert "average_power_watts" in CyclingWorkoutDetailsData.model_fields
+    assert "max_power_watts" in CyclingWorkoutDetailsData.model_fields
