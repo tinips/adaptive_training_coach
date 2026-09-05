@@ -24,8 +24,11 @@ def test_zones_view_renders_hr_pace_and_power_with_min_sec() -> None:
 
     assert "182.8" in text or "183" in text
     assert "approximate" in text
-    assert ":" in text  # pace rendered as min:sec somewhere
-    assert "296" not in text  # never show a raw pace-in-seconds number
+    # running_pace_zones(252.0) yields easy=(277, 315) seconds/km; pinning the
+    # min:sec rendering of the real lower bound proves format_pace_min_sec was
+    # actually applied, not just that a colon appears somewhere in the message.
+    assert "4:37/km" in text
+    assert "277-315" not in text  # never show the raw seconds-per-km bounds
     assert "no numeric source" in text.lower()  # swimming has no baseline
 
 

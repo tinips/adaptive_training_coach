@@ -20,6 +20,7 @@ from app.repositories.profiles import ProfileRepository
 from app.repositories.users import UserRepository
 from app.schemas.baseline import (
     AthleteBaselineData,
+    CyclingBaseline,
     RunningBaseline,
     TrainingPreferences,
 )
@@ -73,6 +74,14 @@ async def test_zones_composes_birth_year_and_baseline(
                     typical_weekly_duration_minutes=150,
                     longest_recent_run_minutes=60,
                 ),
+                cycling=CyclingBaseline(
+                    typical_weekly_sessions=2,
+                    typical_weekly_duration_minutes=120,
+                    longest_recent_ride_minutes=90,
+                    riding_environment="OUTDOOR",
+                    riding_confidence="CONFIDENT",
+                    recent_ftp_watts=220,
+                ),
                 preferences=TrainingPreferences(
                     coaching_style=CoachingStyle.NORMAL,
                     desired_weekly_sessions={Discipline.RUNNING: 3},
@@ -87,6 +96,12 @@ async def test_zones_composes_birth_year_and_baseline(
     assert zones is not None
     assert zones.heart_rate is not None
     assert zones.running is None  # no recent_race_result in the baseline above
+    # recent_ftp_watts is set above: a value here (rather than None) proves the
+    # saved baseline_jsonb actually round-tripped through model_dump(mode="json")
+    # -> model_validate(...) instead of silently failing and falling back to
+    # baseline=None (which would also leave running as None, masking the bug).
+    assert zones.cycling is not None
+    assert zones.cycling.metric == "POWER_WATTS"
 
 
 @pytest.mark.asyncio
