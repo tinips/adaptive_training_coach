@@ -106,6 +106,8 @@ class CyclingWorkoutDetailsData(_StrictSchema):
     max_heart_rate: float | None = Field(default=None, ge=0)
     average_cadence_rpm: float | None = Field(default=None, ge=0)
     max_cadence_rpm: float | None = Field(default=None, ge=0)
+    average_power_watts: float | None = Field(default=None, ge=0)
+    max_power_watts: float | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def derive_canonical_speed(self) -> CyclingWorkoutDetailsData:

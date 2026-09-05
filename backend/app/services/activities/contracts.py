@@ -60,6 +60,8 @@ class ActivityImportData:
     max_cadence: float | None = None
     average_speed_kph: float | None = None
     max_speed_kph: float | None = None
+    average_power_watts: float | None = None
+    max_power_watts: float | None = None
     average_pace_seconds_per_km: float | None = None
     average_pace_seconds_per_100m: float | None = None
     running_type: RunningType | None = None

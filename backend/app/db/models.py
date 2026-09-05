@@ -968,6 +968,14 @@ class CyclingWorkoutDetails(Base):
             "max_cadence_rpm IS NULL OR max_cadence_rpm >= 0",
             name="max_cadence_nonnegative",
         ),
+        CheckConstraint(
+            "average_power_watts IS NULL OR average_power_watts >= 0",
+            name="average_power_nonnegative",
+        ),
+        CheckConstraint(
+            "max_power_watts IS NULL OR max_power_watts >= 0",
+            name="max_power_nonnegative",
+        ),
     )
 
     workout_id: Mapped[uuid.UUID] = mapped_column(
@@ -999,6 +1007,8 @@ class CyclingWorkoutDetails(Base):
     max_heart_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
     average_cadence_rpm: Mapped[float | None] = mapped_column(Float, nullable=True)
     max_cadence_rpm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    average_power_watts: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_power_watts: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     workout: Mapped[Workout] = relationship(
         back_populates="cycling_details",

@@ -231,7 +231,7 @@ async def test_create_manual_supports_every_running_type(
 
 
 @pytest.mark.asyncio
-async def test_stationary_cycling_has_no_indoor_or_power_fields(
+async def test_stationary_cycling_has_no_indoor_field(
     database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
 ) -> None:
     _, factory = database
@@ -257,10 +257,38 @@ async def test_stationary_cycling_has_no_indoor_or_power_fields(
     assert details.cycling_type is CyclingType.STATIONARY
     assert details.average_speed_kph == 30
     assert not hasattr(details, "is_indoor")
-    assert not any(
-        "watt" in column.name or "power" in column.name
-        for column in details.__table__.columns
-    )
+    assert details.average_power_watts is None
+    assert details.max_power_watts is None
+
+
+@pytest.mark.asyncio
+async def test_cycling_workout_persists_power_when_provided(
+    database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
+) -> None:
+    _, factory = database
+    async with factory.begin() as session:
+        user_id = await create_user(session, telegram_user_id=22_002)
+        workout = await TrainingActivityRepository(session).create_manual(
+            WorkoutCreate(
+                athlete_id=user_id,
+                discipline=Discipline.CYCLING,
+                started_at=NOW,
+                duration_seconds=3600,
+                source=ActivitySource.MANUAL,
+                details=CyclingWorkoutDetailsData(
+                    cycling_type=CyclingType.STATIONARY,
+                    distance_meters=30_000,
+                    moving_duration_seconds=3600,
+                    average_power_watts=185,
+                    max_power_watts=240,
+                ),
+            )
+        )
+
+    details = workout.cycling_details
+    assert details is not None
+    assert details.average_power_watts == 185
+    assert details.max_power_watts == 240
 
 
 @pytest.mark.asyncio

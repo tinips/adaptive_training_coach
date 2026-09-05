@@ -62,6 +62,8 @@ def details_for_import(incoming: ActivityImportData) -> WorkoutDetailsData:
             cycling_type=incoming.cycling_type or CyclingType.OTHER,
             average_speed_kph=incoming.average_speed_kph,
             max_speed_kph=incoming.max_speed_kph,
+            average_power_watts=incoming.average_power_watts,
+            max_power_watts=incoming.max_power_watts,
             elevation_gain_meters=incoming.elevation_gain_meters,
             elevation_loss_meters=incoming.elevation_loss_meters,
             average_cadence_rpm=incoming.average_cadence,
