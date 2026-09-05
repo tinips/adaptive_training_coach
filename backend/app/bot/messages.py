@@ -459,15 +459,16 @@ def _intensity_range(session: PlanSession) -> str:
     elif intensity.metric == "HEART_RATE_BPM":
         target = f"{lower:g}-{upper:g} bpm"
     elif intensity.metric == "PACE_SECONDS_PER_KM":
-        target = f"{_format_seconds(lower)}-{_format_seconds(upper)}/km"
+        target = (
+            f"{format_pace_min_sec(lower, unit_label='')}-"
+            f"{format_pace_min_sec(upper, unit_label='')}/km"
+        )
     else:
-        target = f"{_format_seconds(lower)}-{_format_seconds(upper)}/100m"
+        target = (
+            f"{format_pace_min_sec(lower, unit_label='')}-"
+            f"{format_pace_min_sec(upper, unit_label='')}/100m"
+        )
     return f"{rpe}, {target}"
-
-
-def _format_seconds(value: float) -> str:
-    total_seconds = round(value)
-    return f"{total_seconds // 60}:{total_seconds % 60:02d}"
 
 
 def _interleaved_menu_sessions(
@@ -883,10 +884,10 @@ def _performance_target_lines(goal: Mapping[str, Any]) -> list[str]:
         lines.append(f"elevation {elevation:g} m")
     pace = goal.get("target_pace_seconds_per_km")
     if isinstance(pace, (int, float)):
-        lines.append(f"run pace {_duration(int(pace))}/km")
+        lines.append(f"run pace {format_pace_min_sec(pace, unit_label='')}/km")
     swim_pace = goal.get("target_swim_pace_seconds_per_100m")
     if isinstance(swim_pace, (int, float)):
-        lines.append(f"swim pace {_duration(int(swim_pace))}/100 m")
+        lines.append(f"swim pace {format_pace_min_sec(swim_pace, unit_label='')}/100 m")
     speed = goal.get("target_average_speed_kph")
     if isinstance(speed, (int, float)):
         lines.append(f"average speed {speed:g} km/h")

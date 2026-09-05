@@ -109,6 +109,8 @@ def normalize_import(incoming: ActivityImportData) -> None:
                     ("max_cadence", incoming.max_cadence),
                     ("average_speed_kph", incoming.average_speed_kph),
                     ("max_speed_kph", incoming.max_speed_kph),
+                    ("average_power_watts", incoming.average_power_watts),
+                    ("max_power_watts", incoming.max_power_watts),
                     ("route_points", list(incoming.route_points)),
                 )
                 if value not in (None, [], ())
@@ -146,6 +148,8 @@ def validate_import(incoming: ActivityImportData) -> None:
         incoming.max_cadence,
         incoming.average_speed_kph,
         incoming.max_speed_kph,
+        incoming.average_power_watts,
+        incoming.max_power_watts,
     ):
         if value is not None and value < 0:
             raise ActivityImportValidationError("Workout metrics cannot be negative")
