@@ -62,6 +62,13 @@ async def profile_handler(
     await _agent_delegate(update, context, "/profile")
 
 
+async def zones_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    await _agent_delegate(update, context, "/zones")
+
+
 async def cancel_handler(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,

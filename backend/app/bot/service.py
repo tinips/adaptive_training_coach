@@ -199,6 +199,7 @@ class CoachBotApplicationService:
             "/start": self.start,
             "/help": self._help,
             "/profile": self.profile,
+            "/zones": self.zones,
             "/plan_next_week": self.plan_next_week,
             "/view_weekly_plan": self.view_weekly_plan,
             "/delete_weekly_plan": self.delete_weekly_plan,
@@ -533,6 +534,14 @@ class CoachBotApplicationService:
         return (
             TelegramResponse(messages.persisted_profile(profile))
             if profile is not None
+            else TelegramResponse(messages.NOT_FOUND)
+        )
+
+    async def zones(self, identity: TelegramIdentity) -> TelegramResponse:
+        zones = await self._account_queries.zones(identity)
+        return (
+            TelegramResponse(messages.zones_view(zones))
+            if zones is not None
             else TelegramResponse(messages.NOT_FOUND)
         )
 

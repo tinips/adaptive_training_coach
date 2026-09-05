@@ -25,6 +25,7 @@ from app.bot.handlers import (
     text_handler,
     web_app_data_handler,
     workout_screenshot_handler,
+    zones_handler,
 )
 from app.config import Settings, get_settings
 
@@ -38,6 +39,7 @@ def register_handlers(
     application.add_handler(CommandHandler("start", start_handler))
     application.add_handler(CommandHandler("help", help_handler))
     application.add_handler(CommandHandler("profile", profile_handler))
+    application.add_handler(CommandHandler("zones", zones_handler))
     application.add_handler(CommandHandler("cancel", cancel_handler))
     application.add_handler(CommandHandler("delete_me", delete_handler))
     runtime_settings = settings or get_settings()
