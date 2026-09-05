@@ -65,6 +65,10 @@ _STRENGTH_PRESCRIPTION = re.compile(
     r"\b(?:\d+\s*x\s*\d+|sets?|reps?|loads?|kg|kgs|lb|lbs|%|one[- ]rep)\b",
     re.IGNORECASE,
 )
+_STRENGTH_FALLBACK_EXECUTION = (
+    "Use controlled form throughout and finish with plenty in reserve."
+)
+_MIN_USABLE_STRENGTH_EXECUTION_LENGTH = 15
 _FIRST_WEEK_SESSION_ADAPTER: TypeAdapter[FirstWeekSession] = TypeAdapter(
     FirstWeekSession
 )
@@ -655,11 +659,19 @@ def _repair_first_week_menu(
         for raw in raw_sessions:
             if raw.get("discipline") != Discipline.STRENGTH.value:
                 continue
-            duration = _targets(raw).get("duration_minutes")
+            targets = _targets(raw)
+            execution = raw.get("execution")
+            execution_text = execution if isinstance(execution, str) else ""
+            extra_targets = [
+                field
+                for field, value in targets.items()
+                if field != "duration_minutes" and value is not None
+            ]
+            if not extra_targets and not _STRENGTH_PRESCRIPTION.search(execution_text):
+                continue  # this sibling session never violated; leave it untouched
+            duration = targets.get("duration_minutes")
             raw["targets"] = {"duration_minutes": duration}
-            raw["execution"] = (
-                "Use controlled form throughout and finish with plenty in reserve."
-            )
+            raw["execution"] = _strip_strength_prescription(execution_text)
     sessions = tuple(
         _FIRST_WEEK_SESSION_ADAPTER.validate_python(raw) for raw in raw_sessions
     )
@@ -753,6 +765,26 @@ def _unsupported_target_violations(
             )
         )
     return violations
+
+
+def _strip_strength_prescription(execution: str) -> str:
+    """Drop only the sentence(s) naming explicit sets, reps, or loads.
+
+    Splits on sentence boundaries and removes just the offending sentence,
+    keeping any surrounding equipment-appropriate detail intact. Falls back to
+    the generic safety literal only when nothing usable survives the strip.
+    """
+
+    sentences = re.split(r"(?<=[.!?])\s+", execution.strip())
+    kept = [
+        sentence
+        for sentence in sentences
+        if sentence and not _STRENGTH_PRESCRIPTION.search(sentence)
+    ]
+    cleaned = " ".join(kept).strip()
+    if len(cleaned) < _MIN_USABLE_STRENGTH_EXECUTION_LENGTH:
+        return _STRENGTH_FALLBACK_EXECUTION
+    return cleaned
 
 
 def _strength_violations(day: date | None, session: PlanSession) -> list[PlanViolation]:

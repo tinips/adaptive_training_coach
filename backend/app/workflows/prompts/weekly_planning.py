@@ -12,7 +12,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from app.schemas.availability import ConfirmedWeeklyAvailability
 
 ONGOING_WEEKLY_PLANNER_PROMPT_VERSION: Final = 10
-FIRST_WEEK_PLANNER_PROMPT_VERSION: Final = 7
+FIRST_WEEK_PLANNER_PROMPT_VERSION: Final = 8
 # Backward-compatible name for callers that use the ongoing planner.
 WEEKLY_PLANNER_PROMPT_VERSION: Final = ONGOING_WEEKLY_PLANNER_PROMPT_VERSION
 
@@ -158,13 +158,25 @@ overview.
 
 For strength, use duration only in targets. Do not prescribe sets, repetitions,
 loads, percentages, or a numeric RPE target anywhere in strength targets or
-execution. Keep the structured intensity as easy, and describe only controlled form
-and stopping with reserve.
-A valid strength session is: {"discipline":"STRENGTH","purpose":"Build controlled
-full-body movement quality.","intensity":{"metric":"RPE","target_range":[3,4],
-"rpe_range":[3,4],"guidance":"Easy, controlled form with reserve."},"objective":
-"Practice relaxed, stable movement.","targets":{"duration_minutes":30},"execution":
-"Use controlled form throughout and finish with plenty in reserve."}.
+execution. Keep the structured intensity as easy, and describe only controlled
+movements and stopping with reserve: name the movement and, for equipped strength,
+its relative load in words (light, moderate) rather than a number or percentage --
+for example "controlled goblet squats with a light weight," never "3x10 squats" or
+"squats at 60% of 1RM." Choose bodyweight or equipped movements to match the
+athlete's actual equipment/access.
+A valid bodyweight strength session is: {"discipline":"STRENGTH","purpose":"Build
+controlled full-body movement quality.","intensity":{"metric":"RPE","target_range":
+[3,4],"rpe_range":[3,4],"guidance":"Easy, controlled form with reserve."},
+"objective":"Practice relaxed, stable movement.","targets":{"duration_minutes":30},
+"execution":"Move through controlled bodyweight squats, hip hinges, and a plank
+hold, keeping form relaxed and stopping well short of fatigue."}.
+A valid equipped-gym strength session is: {"discipline":"STRENGTH","purpose":"Build
+controlled full-body strength with light equipment.","intensity":{"metric":"RPE",
+"target_range":[3,4],"rpe_range":[3,4],"guidance":"Easy, controlled form with
+reserve."},"objective":"Practice relaxed, stable movement with light load.",
+"targets":{"duration_minutes":30},"execution":"Perform controlled goblet squats
+with a light dumbbell, easy machine rows, and a supported plank hold, keeping every
+movement slow and stopping with plenty in reserve."}.
 
 availability_constraints is non-negotiable. Ensure every individual menu session fits
 at least one allowed discipline/window, but do not name days or times. Respect

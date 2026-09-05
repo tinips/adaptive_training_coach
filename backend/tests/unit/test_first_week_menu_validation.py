@@ -15,6 +15,7 @@ from app.schemas.baseline import (
     TrainingPreferences,
 )
 from app.schemas.weekly_plans import (
+    FirstWeekPlan,
     FirstWeekPlanPrescription,
     PlanReadiness,
     PlanReadinessDiscipline,
@@ -25,8 +26,11 @@ from app.services.weekly_planning.service import (
     _PlanningInput,
 )
 from app.services.weekly_planning.validation import (
+    _STRENGTH_FALLBACK_EXECUTION,
+    PlanViolation,
     _strength_violations,
     make_first_week_plan,
+    repair_plan,
     validate_first_week_plan,
 )
 from app.services.weekly_planning.zones import resolve_first_week_zones
@@ -256,6 +260,101 @@ def test_strength_validator_remains_a_safety_net_for_legacy_sessions() -> None:
     assert [violation.code for violation in _strength_violations(None, unsafe)] == [
         "STRENGTH_OVER_SPECIFIED"
     ]
+
+
+def _strength_session(execution: str) -> dict[str, object]:
+    return {
+        "discipline": "STRENGTH",
+        "purpose": "Build controlled full-body movement quality.",
+        "intensity": {
+            "metric": "RPE",
+            "target_range": [3, 4],
+            "rpe_range": [3, 4],
+            "guidance": "Easy, controlled form with reserve.",
+        },
+        "objective": "Practice relaxed, stable movement.",
+        "targets": {"duration_minutes": 30},
+        "execution": execution,
+    }
+
+
+def test_repair_strips_only_the_overspecified_sentence_from_strength_execution() -> (
+    None
+):
+    week_start = date(2026, 9, 7)
+    prescription = FirstWeekPlanPrescription.model_validate(
+        {
+            "week_start": week_start,
+            "sessions": [
+                _strength_session(
+                    "Warm up with a few gentle bodyweight squats. "
+                    "Complete 3 sets of 10 controlled squats with a light dumbbell. "
+                    "Finish with a relaxed plank hold, stopping well short of "
+                    "fatigue."
+                )
+            ],
+        }
+    )
+    plan = make_first_week_plan(prescription)
+    violation = PlanViolation(
+        "STRENGTH_OVER_SPECIFIED", Discipline.STRENGTH, None, "sets/reps in execution"
+    )
+
+    repaired = repair_plan(plan, [violation], baseline=None)
+
+    assert isinstance(repaired, FirstWeekPlan)
+    execution = repaired.sessions[0].execution
+    assert execution != _STRENGTH_FALLBACK_EXECUTION
+    assert "sets of 10" not in execution
+    assert "plank hold" in execution
+    assert "gentle bodyweight squats" in execution
+
+
+def test_repair_falls_back_to_generic_text_when_nothing_usable_remains() -> None:
+    week_start = date(2026, 9, 7)
+    prescription = FirstWeekPlanPrescription.model_validate(
+        {
+            "week_start": week_start,
+            "sessions": [
+                _strength_session("Complete 3 sets of 10 reps at a moderate load.")
+            ],
+        }
+    )
+    plan = make_first_week_plan(prescription)
+    violation = PlanViolation(
+        "STRENGTH_OVER_SPECIFIED", Discipline.STRENGTH, None, "sets/reps in execution"
+    )
+
+    repaired = repair_plan(plan, [violation], baseline=None)
+
+    assert isinstance(repaired, FirstWeekPlan)
+    assert repaired.sessions[0].execution == _STRENGTH_FALLBACK_EXECUTION
+
+
+def test_repair_does_not_alter_a_compliant_sibling_strength_session() -> None:
+    week_start = date(2026, 9, 7)
+    compliant_execution = (
+        "Move through controlled bodyweight squats, hip hinges, and a plank hold, "
+        "keeping form relaxed and stopping well short of fatigue."
+    )
+    prescription = FirstWeekPlanPrescription.model_validate(
+        {
+            "week_start": week_start,
+            "sessions": [
+                _strength_session("Complete 3 sets of 10 reps of controlled squats."),
+                _strength_session(compliant_execution),
+            ],
+        }
+    )
+    plan = make_first_week_plan(prescription)
+    violation = PlanViolation(
+        "STRENGTH_OVER_SPECIFIED", Discipline.STRENGTH, None, "sets/reps in execution"
+    )
+
+    repaired = repair_plan(plan, [violation], baseline=None)
+
+    assert isinstance(repaired, FirstWeekPlan)
+    assert repaired.sessions[1].execution == compliant_execution
 
 
 def test_first_week_fallback_honors_requested_strength_frequency_and_is_valid() -> None:
