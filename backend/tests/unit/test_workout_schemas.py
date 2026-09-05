@@ -266,7 +266,7 @@ def test_strength_json_has_exact_keys_and_allows_empty_imports() -> None:
             )
 
 
-def test_generic_read_schema_excludes_extra_fields_and_cycling_schema_has_no_indoor_flag() -> None:
+def test_generic_read_schema_and_cycling_schema_have_expected_fields() -> None:
     assert set(WorkoutRead.model_fields) == {
         "id",
         "athlete_id",
