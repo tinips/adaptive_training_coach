@@ -15,6 +15,9 @@ from app.schemas.weekly_plans import (
     PlanSession,
     WeeklyPlan,
 )
+from app.services.athlete_zones import AthleteDisplayZones
+from app.services.formatting import format_pace_min_sec
+from app.services.weekly_planning.zones import ResolvedIntensityZones
 
 TELEGRAM_MESSAGE_LIMIT = 4096
 TELEGRAM_CHUNK_LIMIT = 3900
@@ -717,6 +720,58 @@ def validation_error(code: str) -> str:
     """Map a safe application error code to English copy."""
 
     return VALIDATION_ERRORS.get(code, GENERIC_ERROR)
+
+
+def zones_view(zones: AthleteDisplayZones) -> str:
+    """Render the read-only "view my zones" output."""
+
+    lines = ["Your current zones (informational only, not a training plan):", ""]
+    if zones.heart_rate is not None:
+        hr = zones.heart_rate
+        lines.append(
+            f"Heart rate (age-estimated max ~{hr.estimated_max_hr_bpm:.0f} bpm):"
+        )
+        lines.append(f"  Easy: {hr.easy[0]:.0f}-{hr.easy[1]:.0f} bpm")
+        lines.append(f"  Moderate: {hr.moderate[0]:.0f}-{hr.moderate[1]:.0f} bpm")
+        lines.append(f"  Hard: {hr.hard[0]:.0f}-{hr.hard[1]:.0f} bpm")
+        lines.append(f"  {hr.caveat}")
+    else:
+        lines.append("Heart rate: add your birth year in /profile to see this.")
+    lines.append("")
+    lines.append(_zone_line("Running pace", zones.running, unit_label="/km"))
+    lines.append(_zone_line("Cycling power", zones.cycling, unit_label=" W"))
+    lines.append(_zone_line("Swimming pace", zones.swimming, unit_label="/100m"))
+    return "\n".join(lines)
+
+
+def _zone_line(
+    label: str, zone: ResolvedIntensityZones | None, *, unit_label: str
+) -> str:
+    if zone is None or zone.mode == "RPE_FALLBACK":
+        return f"{label}: no numeric source yet -- use RPE/feel."
+    assert zone.easy is not None
+    assert zone.moderate is not None
+    assert zone.hard is not None
+    if zone.metric == "POWER_WATTS":
+        render = _render_power_range
+    else:
+        render = _render_pace_range
+    return (
+        f"{label}: easy {render(zone.easy, unit_label)}, "
+        f"moderate {render(zone.moderate, unit_label)}, "
+        f"hard {render(zone.hard, unit_label)}"
+    )
+
+
+def _render_power_range(bounds: tuple[float, float], unit_label: str) -> str:
+    return f"{bounds[0]:.0f}-{bounds[1]:.0f}{unit_label}"
+
+
+def _render_pace_range(bounds: tuple[float, float], unit_label: str) -> str:
+    return (
+        f"{format_pace_min_sec(bounds[0], unit_label=unit_label)}-"
+        f"{format_pace_min_sec(bounds[1], unit_label=unit_label)}"
+    )
 
 
 def persisted_profile(profile: Mapping[str, Any]) -> str:

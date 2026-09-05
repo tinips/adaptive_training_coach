@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.repositories.athlete_baselines import AthleteBaselineRepository
 from app.repositories.users import UserRepository
+from app.schemas.baseline import AthleteBaselineData
 from app.schemas.common import TelegramIdentity
+from app.services.athlete_zones import (
+    AthleteDisplayZones,
+    resolve_athlete_display_zones,
+)
 from app.services.profiles import ProfileService
 
 
@@ -63,6 +71,34 @@ class AccountQueryService:
         if profile is None:
             return None
         return profile.model_dump(mode="python")
+
+    async def zones(
+        self,
+        identity: TelegramIdentity,
+    ) -> AthleteDisplayZones | None:
+        user_id = await self.resolve_user_id(identity)
+        if user_id is None:
+            return None
+        profile = await self._profiles.get(user_id=user_id)
+        if profile is None:
+            return None
+        async with self._session_factory() as session:
+            saved_baseline = await AthleteBaselineRepository(session).get(
+                athlete_id=user_id
+            )
+        baseline: AthleteBaselineData | None = None
+        if saved_baseline is not None:
+            try:
+                baseline = AthleteBaselineData.model_validate(
+                    saved_baseline.baseline_jsonb
+                )
+            except ValidationError:
+                baseline = None
+        return resolve_athlete_display_zones(
+            birth_year=profile.birth_year,
+            baseline=baseline,
+            current_year=datetime.now(UTC).year,
+        )
 
 
 class AccountService:
