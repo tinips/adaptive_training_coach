@@ -8,12 +8,15 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date
 
+from pydantic import TypeAdapter
+
 from app.domain.enums import Discipline
 from app.schemas.availability import ConfirmedWeeklyAvailability
 from app.schemas.baseline import AthleteBaselineData, TrainingPreferences
 from app.schemas.weekly_plans import (
     FirstWeekPlan,
     FirstWeekPlanPrescription,
+    FirstWeekSession,
     PlanReadiness,
     PlanSession,
     WeeklyPlan,
@@ -26,6 +29,7 @@ from app.services.weekly_planning.constants import (
     UNTRAINED_SWIM_MAX_SESSIONS,
     UNTRAINED_SWIM_SESSION_MAX_MINUTES,
 )
+from app.services.weekly_planning.tiers import BaselineTier
 from app.services.weekly_planning.zones import ResolvedIntensityZones
 
 
@@ -58,8 +62,11 @@ _AVAILABILITY_DISCIPLINE = {
     Discipline.STRENGTH: "strength_training",
 }
 _STRENGTH_PRESCRIPTION = re.compile(
-    r"\b(?:\d+\s*x\s*\d+|sets?|reps?|kg|kgs|lb|lbs|%|one[- ]rep)\b",
+    r"\b(?:\d+\s*x\s*\d+|sets?|reps?|loads?|kg|kgs|lb|lbs|%|one[- ]rep)\b",
     re.IGNORECASE,
+)
+_FIRST_WEEK_SESSION_ADAPTER: TypeAdapter[FirstWeekSession] = TypeAdapter(
+    FirstWeekSession
 )
 
 _FIRST_WEEK_GUARDRAILS = (
@@ -199,6 +206,7 @@ def validate_first_week_plan(
     availability: ConfirmedWeeklyAvailability | None,
     preferences: TrainingPreferences | None,
     zones: dict[Discipline, ResolvedIntensityZones],
+    tiers: dict[Discipline, BaselineTier] | None = None,
 ) -> ValidationOutcome:
     """Validate an athlete-placed menu without assigning it calendar dates."""
 
@@ -215,8 +223,11 @@ def validate_first_week_plan(
             evidenced_sessions=readiness_counts.get(discipline, 0),
         )
     }
-    counts = Counter(session.discipline for session in plan.sessions)
+    counts: Counter[Discipline] = Counter(
+        session.discipline for session in plan.sessions
+    )
     for session in plan.sessions:
+        violations.extend(_first_week_purpose_violations(session))
         violations.extend(
             _first_week_zone_violations(session, zones.get(session.discipline))
         )
@@ -242,6 +253,9 @@ def validate_first_week_plan(
                     "session does not fit any confirmed window for its discipline",
                 )
             )
+    violations.extend(_first_week_distinctness_violations(plan))
+    if tiers is not None:
+        violations.extend(_first_week_tier_demand_violations(plan, zones, tiers))
     if preferences is not None:
         for discipline, requested in preferences.desired_weekly_sessions.items():
             if requested <= 0 or discipline in zero_baseline:
@@ -256,6 +270,109 @@ def validate_first_week_plan(
                     )
                 )
     return ValidationOutcome(violations=tuple(violations))
+
+
+def _first_week_purpose_violations(session: PlanSession) -> list[PlanViolation]:
+    """Require the overview purpose to be one concise, complete sentence."""
+
+    purpose = session.purpose.strip()
+    ending_count = len(re.findall(r"[.!?]", purpose))
+    has_single_natural_ending = ending_count == 1 and purpose.endswith((".", "!", "?"))
+    if len(purpose) <= 120 and has_single_natural_ending:
+        return []
+    return [
+        PlanViolation(
+            "FIRST_WEEK_PURPOSE_NOT_CONCISE",
+            session.discipline,
+            None,
+            "purpose must be one complete sentence of at most 120 characters",
+        )
+    ]
+
+
+def _first_week_distinctness_violations(
+    plan: FirstWeekPlan,
+) -> list[PlanViolation]:
+    """Reject repeated menu cards that cannot reveal different training signals."""
+
+    seen: set[tuple[object, ...]] = set()
+    violations: list[PlanViolation] = []
+    for session in plan.sessions:
+        signature = (
+            session.discipline,
+            session.purpose.casefold().strip(),
+            session.intensity.metric,
+            session.intensity.target_range,
+            session.intensity.rpe_range,
+            session.objective.casefold().strip(),
+            session.execution.casefold().strip(),
+        )
+        if signature in seen:
+            violations.append(
+                PlanViolation(
+                    "FIRST_WEEK_DUPLICATE_SESSION",
+                    session.discipline,
+                    None,
+                    (
+                        "sessions in a first-week menu must differ in purpose, "
+                        "intensity, or execution"
+                    ),
+                )
+            )
+        seen.add(signature)
+    return violations
+
+
+def _first_week_tier_demand_violations(
+    plan: FirstWeekPlan,
+    zones: dict[Discipline, ResolvedIntensityZones],
+    tiers: dict[Discipline, BaselineTier],
+) -> list[PlanViolation]:
+    """Keep tiered calibration signal deterministic instead of prompt-only."""
+
+    by_discipline: dict[Discipline, list[PlanSession]] = defaultdict(list)
+    for session in plan.sessions:
+        by_discipline[session.discipline].append(session)
+    violations: list[PlanViolation] = []
+    for discipline, sessions in by_discipline.items():
+        tier = tiers.get(discipline)
+        if tier is None:
+            continue
+        if tier == "UNPREPARED":
+            if any(session.intensity.rpe_range[1] > 4 for session in sessions):
+                violations.append(
+                    PlanViolation(
+                        "FIRST_WEEK_UNPREPARED_TOO_HARD",
+                        discipline,
+                        None,
+                        (
+                            "unprepared disciplines must remain at an easy "
+                            "perceived effort"
+                        ),
+                    )
+                )
+            continue
+        zone = zones.get(discipline)
+        if (
+            zone is None
+            or zone.mode != "NUMERIC"
+            or len(sessions) < 2
+            or tier not in {"DEVELOPING", "TRAINED", "WELL_TRAINED"}
+        ):
+            continue
+        if not any(session.intensity.rpe_range[0] >= 5 for session in sessions):
+            violations.append(
+                PlanViolation(
+                    "FIRST_WEEK_CALIBRATION_SIGNAL_MISSING",
+                    discipline,
+                    None,
+                    (
+                        "prepared discipline with numeric zones needs controlled "
+                        "moderate work"
+                    ),
+                )
+            )
+    return violations
 
 
 def _first_week_zone_violations(
@@ -534,7 +651,18 @@ def _repair_first_week_menu(
                 "swim_pace_seconds_per_100m",
             ):
                 targets[field] = None
-    sessions = tuple(PlanSession.model_validate(raw) for raw in raw_sessions)
+    if "STRENGTH_OVER_SPECIFIED" in codes:
+        for raw in raw_sessions:
+            if raw.get("discipline") != Discipline.STRENGTH.value:
+                continue
+            duration = _targets(raw).get("duration_minutes")
+            raw["targets"] = {"duration_minutes": duration}
+            raw["execution"] = (
+                "Use controlled form throughout and finish with plenty in reserve."
+            )
+    sessions = tuple(
+        _FIRST_WEEK_SESSION_ADAPTER.validate_python(raw) for raw in raw_sessions
+    )
     return make_first_week_plan(
         FirstWeekPlanPrescription(
             week_start=plan.week_start,

@@ -90,7 +90,12 @@ def build_runtime(
         planning=FirstWeekPlanner(
             session_factory=session_factory,
             settings=runtime_settings,
-            model=create_goal_extraction_model(runtime_settings),
+            model=create_goal_extraction_model(
+                runtime_settings,
+                model_name=(
+                    runtime_settings.first_week_llm_model or runtime_settings.llm_model
+                ),
+            ),
             observer=observer,
         ),
     )

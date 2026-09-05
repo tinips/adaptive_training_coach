@@ -56,7 +56,6 @@ from app.schemas.weekly_plans import (
     FirstWeekPlan,
     FirstWeekPlanPrescription,
     PlanReadiness,
-    PlanSession,
     WeeklyPlan,
     WeeklyPlanPrescription,
 )
@@ -71,6 +70,10 @@ from app.services.weekly_planning.evidence import (
     build_plan_readiness,
 )
 from app.services.weekly_planning.scheduler import schedule_prescription
+from app.services.weekly_planning.tiers import (
+    BaselineTier,
+    resolve_first_week_tiers,
+)
 from app.services.weekly_planning.validation import (
     ValidationOutcome,
     build_fallback_week,
@@ -112,6 +115,7 @@ class WeeklyPlanningResult:
     ]
     plan: WeeklyPlan | FirstWeekPlan | None = None
     readiness: PlanReadiness | None = None
+    generation_source: Literal["model", "model_repaired", "fallback"] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,6 +131,7 @@ class _PlanningInput:
     evidence_snapshot: dict[str, object]
     input_digest: str
     zones: dict[Discipline, ResolvedIntensityZones]
+    tiers: dict[Discipline, BaselineTier]
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,8 +267,15 @@ def _is_untrained_discipline(
     )
 
 
-def _validation_snapshot(kind: str, outcome: ValidationOutcome) -> dict[str, object]:
-    return {
+def _validation_snapshot(
+    kind: str,
+    outcome: ValidationOutcome,
+    *,
+    generation_source: Literal["model", "model_repaired", "fallback"] | None = None,
+    fallback_reason: str | None = None,
+    fallback_errors: tuple[dict[str, str], ...] = (),
+) -> dict[str, object]:
+    snapshot: dict[str, object] = {
         "kind": kind,
         "violations": [
             {
@@ -278,6 +290,45 @@ def _validation_snapshot(kind: str, outcome: ValidationOutcome) -> dict[str, obj
             for violation in outcome.violations
         ],
     }
+    if generation_source is not None:
+        snapshot["generation_source"] = generation_source
+    if fallback_reason is not None:
+        snapshot["fallback_reason"] = fallback_reason
+        snapshot["fallback_errors"] = list(fallback_errors)
+    return snapshot
+
+
+def _stored_generation_source(
+    validation: object,
+) -> Literal["model", "model_repaired", "fallback"] | None:
+    if not isinstance(validation, dict):
+        return None
+    source = validation.get("generation_source")
+    return source if source in {"model", "model_repaired", "fallback"} else None
+
+
+def _first_week_validation_errors(
+    outcome: ValidationOutcome,
+) -> tuple[dict[str, str], ...]:
+    return tuple(
+        {
+            "code": violation.code,
+            "detail": violation.detail,
+        }
+        for violation in outcome.violations
+    )
+
+
+def _first_week_schema_errors(
+    error: ValidationError,
+) -> tuple[dict[str, str], ...]:
+    return tuple(
+        {
+            "code": "SCHEMA_VALIDATION_FAILED",
+            "detail": f"{'.'.join(str(part) for part in item['loc'])}: {item['msg']}",
+        }
+        for item in error.errors(include_url=False)
+    )
 
 
 def _planning_input_digest(
@@ -374,7 +425,11 @@ class WeeklyPlanningService:
                 week_start=next_week_start(utc_now(), user.timezone),
             )
             return (
-                WeeklyPlanningResult(kind="existing", plan=_plan_schema(plan))
+                WeeklyPlanningResult(
+                    kind="existing",
+                    plan=_plan_schema(plan),
+                    generation_source=_stored_generation_source(plan.validation_jsonb),
+                )
                 if plan is not None
                 else WeeklyPlanningResult(kind="unavailable")
             )
@@ -510,11 +565,23 @@ class WeeklyPlanningService:
                     availability=prepared.availability,
                     preferences=prepared.preferences,
                     zones=prepared.zones,
+                    tiers=prepared.tiers,
                 )
                 result = await self._persist_generated(
                     prepared=prepared,
                     plan=fallback_plan,
-                    validation=_validation_snapshot("fallback", outcome),
+                    validation=_validation_snapshot(
+                        "fallback",
+                        outcome,
+                        generation_source="fallback",
+                        fallback_reason="provider_error",
+                        fallback_errors=(
+                            {
+                                "code": "PROVIDER_ERROR",
+                                "detail": type(exc).__name__,
+                            },
+                        ),
+                    ),
                     prompt_tokens=None,
                     completion_tokens=None,
                 )
@@ -621,6 +688,9 @@ class WeeklyPlanningService:
         plan: FirstWeekPlan | None = None
         outcome: ValidationOutcome | None = None
         current_response = response
+        source: Literal["model", "model_repaired", "fallback"] = "model"
+        fallback_reason: str | None = None
+        fallback_errors: tuple[dict[str, str], ...] = ()
         for attempt in range(_FIRST_WEEK_REPAIR_ATTEMPTS + 1):
             try:
                 prescription = FirstWeekPlanPrescription.model_validate(
@@ -634,13 +704,17 @@ class WeeklyPlanningService:
                     availability=prepared.availability,
                     preferences=prepared.preferences,
                     zones=prepared.zones,
+                    tiers=prepared.tiers,
                 )
-            except ValidationError:
+                fallback_errors = _first_week_validation_errors(outcome)
+            except ValidationError as error:
                 plan = None
                 outcome = None
+                fallback_reason = "schema_validation_failed"
+                fallback_errors = _first_week_schema_errors(error)
 
             if plan is not None and outcome is not None and outcome.ok:
-                validation_kind = "clean" if attempt == 0 else "repaired"
+                source = "model" if attempt == 0 else "model_repaired"
                 break
 
             if plan is not None and outcome is not None:
@@ -658,14 +732,13 @@ class WeeklyPlanningService:
                     availability=prepared.availability,
                     preferences=prepared.preferences,
                     zones=prepared.zones,
+                    tiers=prepared.tiers,
                 )
                 if repaired_outcome.ok:
-                    plan, outcome, validation_kind = (
-                        repaired,
-                        repaired_outcome,
-                        "repaired",
-                    )
+                    plan, outcome, source = repaired, repaired_outcome, "model_repaired"
                     break
+                fallback_errors = _first_week_validation_errors(repaired_outcome)
+                fallback_reason = "validation_errors"
 
             if attempt == _FIRST_WEEK_REPAIR_ATTEMPTS:
                 plan = _build_first_week_fallback(prepared)
@@ -676,16 +749,24 @@ class WeeklyPlanningService:
                     availability=prepared.availability,
                     preferences=prepared.preferences,
                     zones=prepared.zones,
+                    tiers=prepared.tiers,
                 )
-                validation_kind = "fallback"
+                source = "fallback"
+                fallback_reason = (
+                    "repair_exhausted"
+                    if fallback_reason != "schema_validation_failed"
+                    else fallback_reason
+                )
+                logger.warning(
+                    "first_week_plan_fallback athlete_id=%s reason=%s errors=%s",
+                    str(prepared.athlete_id),
+                    fallback_reason,
+                    fallback_errors,
+                )
                 break
 
-            errors = [
-                {
-                    "code": item.code,
-                    "discipline": item.discipline.value if item.discipline else None,
-                }
-                for item in (outcome.violations if outcome is not None else ())
+            errors = list(fallback_errors) or [
+                {"code": "SCHEMA_VALIDATION_FAILED", "detail": "invalid menu schema"}
             ]
             repair_message = HumanMessage(
                 content=json.dumps(
@@ -695,7 +776,7 @@ class WeeklyPlanningService:
                             "Fix only these validation errors."
                         ),
                         "previous_plan": plan.model_dump(mode="json") if plan else None,
-                        "validation_errors": errors or ["SCHEMA_VALIDATION_FAILED"],
+                        "validation_errors": errors,
                     },
                     separators=(",", ":"),
                 )
@@ -710,7 +791,7 @@ class WeeklyPlanningService:
                     ],
                     config=build_langchain_run_config(metadata),
                 )
-            except Exception:
+            except Exception as error:
                 plan = _build_first_week_fallback(prepared)
                 outcome = validate_first_week_plan(
                     plan,
@@ -719,15 +800,32 @@ class WeeklyPlanningService:
                     availability=prepared.availability,
                     preferences=prepared.preferences,
                     zones=prepared.zones,
+                    tiers=prepared.tiers,
                 )
-                validation_kind = "fallback"
+                source = "fallback"
+                fallback_reason = "repair_provider_error"
+                fallback_errors = (
+                    {"code": "PROVIDER_ERROR", "detail": type(error).__name__},
+                )
+                logger.warning(
+                    "first_week_plan_fallback athlete_id=%s reason=%s errors=%s",
+                    str(prepared.athlete_id),
+                    fallback_reason,
+                    fallback_errors,
+                )
                 break
 
         assert plan is not None and outcome is not None
         result = await self._persist_generated(
             prepared=prepared,
             plan=plan,
-            validation=_validation_snapshot(validation_kind, outcome),
+            validation=_validation_snapshot(
+                "clean" if source == "model" else source,
+                outcome,
+                generation_source=source,
+                fallback_reason=fallback_reason if source == "fallback" else None,
+                fallback_errors=fallback_errors if source == "fallback" else (),
+            ),
             prompt_tokens=current_response.prompt_tokens,
             completion_tokens=current_response.completion_tokens,
         )
@@ -896,6 +994,11 @@ class WeeklyPlanningService:
                 calculations=calculations,
                 disciplines=disciplines,
             )
+            tiers = resolve_first_week_tiers(
+                baseline=self_reported_baseline,
+                readiness=readiness,
+                disciplines=disciplines,
+            )
             prompt_context = {
                 "planner_mode": self.planner_mode,
                 "week_start": week_start.isoformat(),
@@ -983,6 +1086,9 @@ class WeeklyPlanningService:
                     baseline=self_reported_baseline,
                 )
             else:
+                prompt_context["first_week_baseline_tiers"] = {
+                    discipline.value: tier for discipline, tier in tiers.items()
+                }
                 prompt_context["resolved_intensity_zones"] = {
                     discipline.value: zone.model_dump(mode="json")
                     for discipline, zone in zones.items()
@@ -1011,6 +1117,7 @@ class WeeklyPlanningService:
                 evidence_snapshot=evidence_snapshot,
                 input_digest=input_digest,
                 zones=zones,
+                tiers=tiers,
             )
 
     async def _persist_generated(
@@ -1054,7 +1161,11 @@ class WeeklyPlanningService:
                             completion_tokens=completion_tokens,
                         )
                         return WeeklyPlanningResult(
-                            kind="existing", plan=_plan_schema(existing)
+                            kind="existing",
+                            plan=_plan_schema(existing),
+                            generation_source=_stored_generation_source(
+                                existing.validation_jsonb
+                            ),
                         )
                     await plans.supersede_current(
                         athlete_id=prepared.athlete_id,
@@ -1086,6 +1197,7 @@ class WeeklyPlanningService:
                     kind="created",
                     plan=_plan_schema(stored),
                     readiness=prepared.readiness,
+                    generation_source=_stored_generation_source(validation),
                 )
         except IntegrityError:
             # The unique constraint is the final authority for double clicks or
@@ -1097,7 +1209,11 @@ class WeeklyPlanningService:
                 )
                 if existing is not None:
                     return WeeklyPlanningResult(
-                        kind="existing", plan=_plan_schema(existing)
+                        kind="existing",
+                        plan=_plan_schema(existing),
+                        generation_source=_stored_generation_source(
+                            existing.validation_jsonb
+                        ),
                     )
             return WeeklyPlanningResult(kind="unavailable")
 
@@ -1186,7 +1302,7 @@ async def _planned_contexts(
 
 
 def _build_first_week_fallback(prepared: _PlanningInput) -> FirstWeekPlan:
-    """Return a useful RPE-first menu when provider output cannot be used."""
+    """Return a baseline-scaled, explicitly degraded menu when provider output fails."""
 
     availability_names = {
         Discipline.RUNNING: "running",
@@ -1194,7 +1310,7 @@ def _build_first_week_fallback(prepared: _PlanningInput) -> FirstWeekPlan:
         Discipline.SWIMMING: "swimming",
         Discipline.STRENGTH: "strength_training",
     }
-    sessions: list[PlanSession] = []
+    sessions: list[dict[str, object]] = []
     for discipline in prepared.target_disciplines:
         baseline = {
             Discipline.RUNNING: prepared.baseline.running
@@ -1225,11 +1341,14 @@ def _build_first_week_fallback(prepared: _PlanningInput) -> FirstWeekPlan:
             if prepared.preferences is not None
             else None
         )
-        count = (
-            requested
-            if requested is not None and requested > 0
-            else max(1, stated_sessions)
-        )
+        desired_count = requested if requested is not None and requested > 0 else None
+        if discipline is Discipline.STRENGTH:
+            count = desired_count if desired_count is not None else 1
+        else:
+            count = min(
+                desired_count if desired_count is not None else max(1, stated_sessions),
+                max(1, stated_sessions),
+            )
         allowed_name = availability_names.get(discipline)
         max_window = (
             max(
@@ -1247,52 +1366,150 @@ def _build_first_week_fallback(prepared: _PlanningInput) -> FirstWeekPlan:
         if max_window < 5:
             continue
         total_minutes = getattr(baseline, "typical_weekly_duration_minutes", 0)
-        duration = min(
-            max_window, max(5, total_minutes // count if total_minutes else 45)
-        )
-        for _ in range(count):
+        menu_minutes = min(total_minutes or 30, max_window * count)
+        tier = prepared.tiers.get(discipline, "UNPREPARED")
+        for index in range(count):
+            remaining_count = count - index
+            duration = min(
+                max_window,
+                max(5, menu_minutes // remaining_count),
+            )
+            menu_minutes -= duration
+            intensity, purpose, objective, execution = _fallback_session_shape(
+                discipline=discipline,
+                index=index,
+                tier=tier,
+                zone=prepared.zones.get(discipline),
+            )
+            rpe_range = intensity["rpe_range"]
+            assert isinstance(rpe_range, list) and isinstance(rpe_range[1], int)
+            targets: dict[str, int] = {"duration_minutes": duration}
+            if discipline is not Discipline.STRENGTH:
+                targets["rpe"] = rpe_range[1]
             sessions.append(
-                PlanSession(
-                    discipline=discipline,
-                    purpose="Build comfortable first-week consistency.",
-                    intensity={
-                        "metric": "RPE",
-                        "target_range": [2, 3],
-                        "rpe_range": [2, 3],
-                        "guidance": (
-                            "Easy, conversational effort; use feel rather than a test."
-                        ),
-                    },
-                    objective="Complete a comfortable session and record how it felt.",
-                    targets={"duration_minutes": duration, "rpe": 3},
-                    execution=(
-                        "Keep the effort relaxed and stop if symptoms or pain worsen."
-                    ),
-                )
+                {
+                    "discipline": discipline,
+                    "purpose": purpose,
+                    "intensity": intensity,
+                    "objective": objective,
+                    "targets": targets,
+                    "execution": execution,
+                }
             )
     if not sessions:
         discipline = prepared.target_disciplines[0]
+        fallback_targets: dict[str, int] = {"duration_minutes": 30}
+        if discipline is not Discipline.STRENGTH:
+            fallback_targets["rpe"] = 3
         sessions.append(
-            PlanSession(
-                discipline=discipline,
-                purpose="Build gentle familiarity with the discipline.",
-                intensity={
+            {
+                "discipline": discipline,
+                "purpose": "Build gentle familiarity with the discipline.",
+                "intensity": {
                     "metric": "RPE",
                     "target_range": [2, 3],
                     "rpe_range": [2, 3],
                     "guidance": "Easy, conversational effort guided by feel.",
                 },
-                objective="Practice comfortably and record how it felt.",
-                targets={"duration_minutes": 30, "rpe": 3},
-                execution=(
+                "objective": "Practice comfortably and record how it felt.",
+                "targets": fallback_targets,
+                "execution": (
                     "Keep this introductory session easy and stop if symptoms worsen."
                 ),
-            )
+            }
         )
     return make_first_week_plan(
-        FirstWeekPlanPrescription(
-            week_start=prepared.week_start, sessions=tuple(sessions)
+        FirstWeekPlanPrescription.model_validate(
+            {"week_start": prepared.week_start, "sessions": sessions}
         )
+    )
+
+
+def _fallback_session_shape(
+    *,
+    discipline: Discipline,
+    index: int,
+    tier: BaselineTier,
+    zone: ResolvedIntensityZones | None,
+) -> tuple[dict[str, object], str, str, str]:
+    """Create distinct, conservative roles without fabricating a threshold."""
+
+    if (
+        zone is not None
+        and zone.mode == "NUMERIC"
+        and tier in {"DEVELOPING", "TRAINED", "WELL_TRAINED"}
+        and index == 1
+        and zone.moderate is not None
+    ):
+        return (
+            {
+                "metric": zone.metric,
+                "target_range": list(zone.moderate),
+                "rpe_range": [5, 6],
+                "guidance": (
+                    f"Controlled tempo inside the resolved {zone.metric} range; "
+                    "finish with reserve."
+                ),
+            },
+            "Characterize controlled tempo.",
+            "Record how a sustained, controlled tempo feels today.",
+            (
+                "Warm up easily, hold the controlled tempo with relaxed form, "
+                "then cool down."
+            ),
+        )
+    if zone is not None and zone.mode == "NUMERIC" and zone.easy is not None:
+        purpose, objective, execution = _easy_fallback_role(index)
+        return (
+            {
+                "metric": zone.metric,
+                "target_range": list(zone.easy),
+                "rpe_range": [2, 4],
+                "guidance": f"Stay in the resolved easy {zone.metric} range.",
+            },
+            purpose,
+            objective,
+            execution,
+        )
+    purpose, objective, execution = _easy_fallback_role(index)
+    return (
+        {
+            "metric": "RPE",
+            "target_range": [2, 3],
+            "rpe_range": [2, 3],
+            "guidance": "Easy, conversational effort; use feel rather than a test.",
+        },
+        purpose,
+        objective,
+        execution,
+    )
+
+
+def _easy_fallback_role(index: int) -> tuple[str, str, str]:
+    roles = (
+        (
+            "Establish aerobic baseline.",
+            "Complete relaxed aerobic work and record how it feels.",
+            "Keep breathing comfortable and finish with plenty in reserve.",
+        ),
+        (
+            "Practice relaxed movement economy.",
+            "Notice cadence, form, and breathing at an easy effort.",
+            "Stay conversational and use smooth, repeatable movement.",
+        ),
+        (
+            "Build low-stress consistency.",
+            "Finish an easy session feeling able to do more.",
+            "Keep the effort relaxed and stop if symptoms or pain worsen.",
+        ),
+    )
+    purpose, objective, execution = roles[index % len(roles)]
+    if index < len(roles):
+        return purpose, objective, execution
+    return (
+        f"{purpose} Session variation {index + 1}.",
+        f"{objective} This is variation {index + 1}.",
+        execution,
     )
 
 

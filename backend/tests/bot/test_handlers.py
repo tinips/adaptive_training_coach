@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, call
 
 import pytest
 from telegram import Update
+from telegram.constants import ParseMode
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
@@ -86,6 +87,7 @@ async def test_start_handler_delegates_identity_to_service() -> None:
     update.effective_message.reply_text.assert_awaited_once_with(
         messages.WELCOME,
         reply_markup=keyboards.welcome_keyboard(),
+        parse_mode=ParseMode.HTML,
     )
 
 
@@ -113,7 +115,7 @@ async def test_lifecycle_refresh_preserves_inline_controls_without_extra_message
     )
 
     assert update.effective_message.reply_text.await_args_list == [
-        call(messages.WELCOME, reply_markup=inline),
+        call(messages.WELCOME, reply_markup=inline, parse_mode=ParseMode.HTML),
     ]
 
 
@@ -138,6 +140,7 @@ async def test_callback_handler_acknowledges_and_delegates_action() -> None:
     update.callback_query.edit_message_text.assert_awaited_once_with(
         "next",
         reply_markup=None,
+        parse_mode=ParseMode.HTML,
     )
 
 
@@ -157,7 +160,7 @@ async def test_goal_confirmation_shows_processing_before_delegating() -> None:
 
     assert update.callback_query.edit_message_text.await_args_list == [
         call(messages.GOAL_CATALOG_EXPANSION_PROGRESS),
-        call("next", reply_markup=None),
+        call("next", reply_markup=None, parse_mode=ParseMode.HTML),
     ]
 
 
@@ -203,7 +206,24 @@ async def test_callback_edit_failure_falls_back_to_one_new_message() -> None:
     update.effective_message.reply_text.assert_awaited_once_with(
         "replacement",
         reply_markup=None,
+        parse_mode=ParseMode.HTML,
     )
+
+
+@pytest.mark.asyncio
+async def test_deliver_sends_text_chunks_in_order() -> None:
+    update = _update()
+
+    await handlers._deliver(
+        cast(Update, update),
+        TelegramResponse("<b>first</b>", text_chunks=("second", "third")),
+    )
+
+    assert update.effective_message.reply_text.await_args_list == [
+        call("<b>first</b>", reply_markup=None, parse_mode=ParseMode.HTML),
+        call("second", reply_markup=None, parse_mode=ParseMode.HTML),
+        call("third", reply_markup=None, parse_mode=ParseMode.HTML),
+    ]
 
 
 @pytest.mark.asyncio
@@ -287,6 +307,7 @@ async def test_global_error_handler_sends_neutral_message() -> None:
     message.reply_text.assert_awaited_once_with(
         messages.GENERIC_ERROR,
         reply_markup=None,
+        parse_mode=ParseMode.HTML,
     )
     assert "sensitive detail" not in messages.GENERIC_ERROR
 

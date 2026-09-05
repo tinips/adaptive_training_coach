@@ -12,6 +12,7 @@ from app.domain.enums import (
     CapabilityImportance,
     CapabilityKind,
     ContextAssessmentStatus,
+    Discipline,
     ExecutionOptionRole,
     GoalContextRole,
     ProfileSettingsStep,
@@ -23,6 +24,7 @@ from app.schemas.capabilities import (
     ContextExecutionAssessment,
     GoalExecutionAssessment,
 )
+from app.schemas.weekly_plans import FirstWeekPlan, PlanSession
 
 
 def _weekly_availability() -> dict[str, object]:
@@ -52,6 +54,166 @@ def _button_pairs(markup: InlineKeyboardMarkup) -> list[tuple[str, str]]:
         for row in markup.inline_keyboard
         for button in row
         if button.callback_data is not None
+    ]
+
+
+def test_first_week_menu_renders_utf8_glyphs_and_fallback_note() -> None:
+    plan = FirstWeekPlan(
+        week_start=date(2026, 9, 7),
+        sessions=(
+            PlanSession(
+                discipline="RUNNING",
+                purpose="Easy aerobic run.",
+                intensity={
+                    "metric": "RPE",
+                    "target_range": [2, 3],
+                    "rpe_range": [2, 3],
+                    "guidance": "Conversational.",
+                },
+                objective="Finish relaxed.",
+                targets={"duration_minutes": 30},
+                execution="Keep breathing easy.",
+            ),
+        ),
+        guardrails=("Keep it comfortable.",),
+        logging_instructions=("Log RPE.",),
+        sessions_per_discipline={"RUNNING": 1},
+        total_minutes_per_discipline={"RUNNING": 30},
+    )
+
+    rendered = messages.first_week_menu(plan, generation_source="fallback")
+
+    assert "—" in rendered
+    assert "• Keep it comfortable." in rendered
+    assert "• Log RPE." in rendered
+    assert "safe fallback menu" in rendered
+    assert "No fixed schedule" in rendered
+    assert "Purpose: Easy aerobic run." in rendered
+    assert "Finish relaxed." not in rendered
+    assert "Keep breathing easy." not in rendered
+
+
+def test_first_week_menu_splits_over_limit_at_sessions_and_sections() -> None:
+    sessions = tuple(
+        PlanSession(
+            discipline="RUNNING",
+            purpose=f"Controlled session {number}: " + "purpose " * 12,
+            intensity={
+                "metric": "RPE",
+                "target_range": [3, 5],
+                "rpe_range": [3, 5],
+                "guidance": "Steady and controlled. " * 9,
+            },
+            objective="Build useful baseline signal. " * 6,
+            targets={"duration_minutes": 45},
+            execution="Stay in control throughout. " * 12,
+        )
+        for number in range(1, 9)
+    )
+    plan = FirstWeekPlan(
+        week_start=date(2026, 9, 7),
+        sessions=sessions,
+        guardrails=tuple(
+            f"Guardrail {number}: " + "keep this detail in the same section " * 7
+            for number in range(1, 13)
+        ),
+        logging_instructions=tuple(
+            f"Metric {number}: " + "log this unique detail after the session " * 7
+            for number in range(1, 9)
+        ),
+        sessions_per_discipline={"RUNNING": 8},
+        total_minutes_per_discipline={"RUNNING": 360},
+    )
+
+    chunks = messages.first_week_menu_messages(plan)
+
+    assert len(chunks) > 1
+    assert all(len(chunk) <= messages.TELEGRAM_CHUNK_LIMIT for chunk in chunks)
+    assert chunks[0].startswith("Your first-week training menu (2026-09-07)")
+    assert all("Your first-week training menu" not in chunk for chunk in chunks[1:])
+    assert all("\u2014" in chunk or "\u2022" in chunk for chunk in chunks)
+    for number in range(1, 9):
+        marker = f"<b>{number}. Running</b>"
+        assert sum(marker in chunk for chunk in chunks) == 1
+    guardrails_chunk = next(
+        chunk for chunk in chunks if "Placement guardrails" in chunk
+    )
+    logging_chunk = next(chunk for chunk in chunks if "What to log" in chunk)
+    assert "\u2022 Guardrail 1:" in guardrails_chunk
+    assert "\u2022 Guardrail 12:" in guardrails_chunk
+    assert "\u2022 Metric 1:" in logging_chunk
+    assert "\u2022 Metric 8:" in logging_chunk
+
+
+def test_first_week_menu_compacts_metric_cards_and_deduplicates_logging() -> None:
+    plan = FirstWeekPlan(
+        week_start=date(2026, 9, 7),
+        sessions=(
+            PlanSession(
+                discipline="RUNNING",
+                purpose="Calibrate easy aerobic feel.",
+                intensity={
+                    "metric": "PACE_SECONDS_PER_KM",
+                    "target_range": [330, 375],
+                    "rpe_range": [3, 4],
+                    "guidance": "Long guidance stays in the saved session.",
+                },
+                objective="This redundant objective is hidden.",
+                targets={"duration_minutes": 45},
+                execution="This long execution paragraph is hidden from the menu.",
+            ),
+        ),
+        guardrails=("Keep it comfortable.",),
+        logging_instructions=(
+            "Log duration and RPE.",
+            "Record time and perceived effort.",
+            "Log any pain or unusual fatigue.",
+            "Log the actual day and time.",
+            "Record actual day and time completed.",
+        ),
+        sessions_per_discipline={"RUNNING": 1},
+        total_minutes_per_discipline={"RUNNING": 45},
+    )
+
+    rendered = messages.first_week_menu(plan)
+
+    assert "<b>1. Running</b> · 45 min · Easy (RPE 3-4, 5:30-6:15/km)" in rendered
+    assert "Purpose: Calibrate easy aerobic feel." in rendered
+    assert "…" not in rendered
+    assert "redundant objective" not in rendered
+    assert "long execution paragraph" not in rendered
+    assert rendered.count("Log duration and RPE.") == 1
+    assert "Record time and perceived effort." not in rendered
+    assert "Log any pain or unusual fatigue." in rendered
+    assert "Log the actual day and time." in rendered
+    assert "Record actual day and time completed." not in rendered
+
+
+def test_first_week_menu_interleaves_disciplines() -> None:
+    running = PlanSession(
+        discipline="RUNNING",
+        purpose="Build easy running familiarity.",
+        intensity={
+            "metric": "RPE",
+            "target_range": [2, 3],
+            "rpe_range": [2, 3],
+            "guidance": "Easy.",
+        },
+        objective="Run easily.",
+        targets={"duration_minutes": 30},
+        execution="Keep it easy.",
+    )
+    cycling = running.model_copy(update={"discipline": Discipline.CYCLING})
+
+    interleaved = messages._interleaved_menu_sessions(
+        (running, running, cycling, cycling)
+    )
+
+    assert [session.discipline for session in interleaved] == [
+        Discipline.RUNNING,
+        Discipline.CYCLING,
+        Discipline.RUNNING,
+        Discipline.CYCLING,
     ]
 
 

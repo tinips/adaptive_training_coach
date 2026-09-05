@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     llm_api_key: SecretStr | None = None
     llm_base_url: str | None = "https://api.deepseek.com"
     llm_model: str = "deepseek-v4-flash"
+    first_week_llm_model: str | None = None
     llm_min_confidence: float = Field(default=0.75, ge=0, le=1)
     llm_other_requests_per_hour: int = Field(default=10, ge=1, le=100)
 
@@ -107,6 +108,7 @@ class Settings(BaseSettings):
             "default_bot_language": self.default_bot_language,
             "llm_mode": self.llm_mode,
             "llm_model": self.llm_model,
+            "first_week_llm_model": self.first_week_llm_model,
             "langfuse_enabled": self.langfuse_enabled,
             "tcx_import_enabled": self.tcx_import_enabled,
             "fitness_window_days": self.fitness_window_days,

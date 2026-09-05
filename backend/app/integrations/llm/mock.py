@@ -162,15 +162,9 @@ def _fake_weekly_prescription(request_json: str) -> dict[str, object]:
         "execution": "Easy warm-up, steady main set, easy cool-down.",
     }
     if is_first_week:
-        preferences = request.get("preferences")
-        desired = (
-            preferences.get("desired_weekly_sessions", {}).get(discipline, 1)
-            if isinstance(preferences, dict)
-            else 1
-        )
         return {
             "week_start": week_start.isoformat(),
-            "sessions": [session for _ in range(desired)],
+            "sessions": _fake_first_week_sessions(request),
             "guardrails": [],
             "logging_instructions": [],
             "tests": [],
@@ -180,6 +174,146 @@ def _fake_weekly_prescription(request_json: str) -> dict[str, object]:
         "week_start": week_start.isoformat(),
         "sessions": [scheduled_session for _ in range(3)],
     }
+
+
+def _fake_first_week_sessions(request: dict[str, object]) -> list[dict[str, object]]:
+    """Return varied, tier-aware menus so local planning tests use the model path."""
+
+    preferences = request.get("preferences")
+    desired_by_discipline = (
+        preferences.get("desired_weekly_sessions", {})
+        if isinstance(preferences, dict)
+        and isinstance(preferences.get("desired_weekly_sessions"), dict)
+        else {}
+    )
+    tiers = request.get("first_week_baseline_tiers")
+    tier_by_discipline = tiers if isinstance(tiers, dict) else {}
+    zones = request.get("resolved_intensity_zones")
+    zones_by_discipline = zones if isinstance(zones, dict) else {}
+    disciplines = request.get("planned_disciplines")
+    planned = disciplines if isinstance(disciplines, list) else []
+    sessions: list[dict[str, object]] = []
+    for raw_discipline in planned:
+        if not isinstance(raw_discipline, str):
+            continue
+        tier = str(tier_by_discipline.get(raw_discipline, "UNPREPARED"))
+        desired = desired_by_discipline.get(raw_discipline, 1)
+        count = desired if isinstance(desired, int) and desired > 0 else 1
+        if tier == "UNPREPARED":
+            count = 1
+        zone = zones_by_discipline.get(raw_discipline)
+        for index in range(count):
+            sessions.append(
+                _fake_first_week_session(
+                    discipline=raw_discipline,
+                    index=index,
+                    tier=tier,
+                    zone=zone if isinstance(zone, dict) else None,
+                )
+            )
+    return sessions or [
+        {
+            "discipline": "OTHER",
+            "purpose": "Build gentle familiarity.",
+            "objective": "Complete a short, easy session.",
+            "intensity": {
+                "metric": "RPE",
+                "target_range": [2, 3],
+                "rpe_range": [2, 3],
+                "guidance": "Easy, conversational effort.",
+            },
+            "targets": {"duration_minutes": 30, "rpe": 3},
+            "execution": "Keep it relaxed and finish with plenty in reserve.",
+        }
+    ]
+
+
+def _fake_first_week_session(
+    *,
+    discipline: str,
+    index: int,
+    tier: str,
+    zone: dict[str, object] | None,
+) -> dict[str, object]:
+    controlled = (
+        zone is not None
+        and zone.get("mode") == "NUMERIC"
+        and index == 1
+        and tier in {"DEVELOPING", "TRAINED", "WELL_TRAINED"}
+        and isinstance(zone.get("moderate"), list)
+    )
+    if controlled:
+        assert zone is not None
+        intensity = {
+            "metric": zone["metric"],
+            "target_range": zone["moderate"],
+            "rpe_range": [5, 6],
+            "guidance": "Controlled tempo in the resolved zone; finish with reserve.",
+        }
+        purpose = "Characterize controlled tempo."
+        objective = "Record how a sustained controlled effort feels today."
+        execution = "Warm up easily, hold a controlled tempo, then cool down."
+    elif (
+        zone is not None
+        and zone.get("mode") == "NUMERIC"
+        and isinstance(zone.get("easy"), list)
+    ):
+        intensity = {
+            "metric": zone["metric"],
+            "target_range": zone["easy"],
+            "rpe_range": [2, 4],
+            "guidance": "Stay within the resolved easy zone.",
+        }
+        purpose, objective, execution = _fake_easy_role(index)
+    else:
+        intensity = {
+            "metric": "RPE",
+            "target_range": [2, 3],
+            "rpe_range": [2, 3],
+            "guidance": "Easy, conversational effort guided by feel.",
+        }
+        purpose, objective, execution = _fake_easy_role(index)
+    rpe_range = intensity["rpe_range"]
+    assert isinstance(rpe_range, list) and isinstance(rpe_range[1], int)
+    targets: dict[str, int] = {"duration_minutes": 45}
+    if discipline != "STRENGTH":
+        targets["rpe"] = rpe_range[1]
+    return {
+        "discipline": discipline,
+        "purpose": purpose,
+        "objective": objective,
+        "intensity": intensity,
+        "targets": targets,
+        "execution": execution,
+    }
+
+
+def _fake_easy_role(index: int) -> tuple[str, str, str]:
+    roles = (
+        (
+            "Establish aerobic baseline.",
+            "Complete relaxed aerobic work and record how it feels.",
+            "Keep breathing comfortable and finish with plenty in reserve.",
+        ),
+        (
+            "Practice relaxed movement economy.",
+            "Notice form and breathing at an easy effort.",
+            "Stay conversational and use smooth, repeatable movement.",
+        ),
+        (
+            "Build low-stress consistency.",
+            "Finish the easy work feeling able to do more.",
+            "Keep the effort relaxed and stop if symptoms worsen.",
+        ),
+    )
+    purpose, objective, execution = roles[index % len(roles)]
+    if index < len(roles):
+        return purpose, objective, execution
+    return (
+        f"{purpose} Session variation {index + 1}.",
+        f"{objective} This is variation {index + 1}.",
+        execution,
+    )
 
 
 def _fake_availability(messages: list[BaseMessage]) -> dict[str, object]:

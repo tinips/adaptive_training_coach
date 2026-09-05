@@ -587,7 +587,14 @@ class CoachBotApplicationService:
         viewing: bool,
     ) -> TelegramResponse:
         if result.kind in {"created", "existing"} and result.plan is not None:
-            return TelegramResponse(messages.weekly_plan(result.plan))
+            rendered_messages = messages.weekly_plan_messages(
+                result.plan,
+                generation_source=result.generation_source,
+            )
+            return TelegramResponse(
+                rendered_messages[0],
+                text_chunks=rendered_messages[1:],
+            )
         if result.kind == "insufficient" and result.readiness is not None:
             return TelegramResponse(messages.weekly_plan_readiness(result.readiness))
         return TelegramResponse(

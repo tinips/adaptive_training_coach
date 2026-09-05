@@ -27,3 +27,4 @@ class TelegramResponse:
     button_rows: tuple[tuple[TelegramButtonSpec, ...], ...] = ()
     clear_agent_thread: bool = False
     refresh_user_keyboard: bool = False
+    text_chunks: tuple[str, ...] = ()

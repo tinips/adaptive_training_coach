@@ -9,9 +9,15 @@ from typing import Any
 
 from app.domain.enums import ProfileSettingsStep
 from app.schemas.capabilities import CapabilityReview, GoalExecutionAssessment
-from app.schemas.weekly_plans import FirstWeekPlan, PlanReadiness, WeeklyPlan
+from app.schemas.weekly_plans import (
+    FirstWeekPlan,
+    PlanReadiness,
+    PlanSession,
+    WeeklyPlan,
+)
 
 TELEGRAM_MESSAGE_LIMIT = 4096
+TELEGRAM_CHUNK_LIMIT = 3900
 _TRUNCATED_MARKER = "\u2026 [truncated for Telegram]"
 
 GENERIC_ERROR = (
@@ -318,17 +324,29 @@ def weekly_plan_readiness(readiness: PlanReadiness) -> str:
     )
 
 
-def weekly_plan(plan: WeeklyPlan | FirstWeekPlan) -> str:
+def weekly_plan(
+    plan: WeeklyPlan | FirstWeekPlan,
+    *,
+    generation_source: str | None = None,
+) -> str:
     """Render the saved seven-day structure compactly for Telegram."""
 
     if isinstance(plan, FirstWeekPlan):
-        return first_week_menu(plan)
+        return first_week_menu(plan, generation_source=generation_source)
 
-    lines = [f"Your plan for the week of {plan.week_start.isoformat()}"]
+    rendered_messages = weekly_plan_messages(plan, generation_source=generation_source)
+    if len(rendered_messages) != 1:
+        raise ValueError("Weekly plan needs multiple Telegram messages")
+    return rendered_messages[0]
+
+
+def _ongoing_weekly_plan_messages(plan: WeeklyPlan) -> tuple[str, ...]:
+    header = f"Your plan for the week of {plan.week_start.isoformat()}"
+    day_blocks: list[str] = []
     for day in plan.days:
         heading = day.date.strftime("%A %d %b")
         if not day.sessions:
-            lines.append(f"\n<b>{heading}</b> — {escape(day.rest_note or 'Rest')}")
+            day_blocks.append(f"<b>{heading}</b> — {escape(day.rest_note or 'Rest')}")
             continue
         rendered = []
         for session in day.sessions:
@@ -341,29 +359,158 @@ def weekly_plan(plan: WeeklyPlan | FirstWeekPlan) -> str:
                 f"  {escape(session.intensity.guidance)}\n"
                 f"  {escape(session.execution)}"
             )
-        lines.append(f"\n<b>{heading}</b>\n" + "\n".join(rendered))
-    return _assert_telegram_length("\n".join(lines))
+        day_blocks.append(f"<b>{heading}</b>\n" + "\n".join(rendered))
+    return _chunk_telegram_blocks(header, day_blocks, separator="\n\n")
 
 
-def first_week_menu(plan: FirstWeekPlan) -> str:
-    """Render the first-week probe as an athlete-placed session menu."""
+def weekly_plan_messages(
+    plan: WeeklyPlan | FirstWeekPlan,
+    *,
+    generation_source: str | None = None,
+) -> tuple[str, ...]:
+    """Render a plan as ordered, Telegram-safe messages."""
 
-    lines = [f"Your first-week training menu ({plan.week_start.isoformat()})"]
-    for number, session in enumerate(plan.sessions, start=1):
-        rpe_range = session.intensity.rpe_range
-        lines.append(
-            f"\n<b>{number}. {escape(session.discipline.value.title())}</b> â€” "
-            f"{escape(session.purpose)} ({session.targets.duration_minutes} min, "
-            f"RPE {rpe_range[0]}-{rpe_range[1]})\n"
-            f"  {escape(session.objective)}\n"
-            f"  {escape(session.intensity.guidance)}\n"
-            f"  {escape(session.execution)}"
+    if isinstance(plan, FirstWeekPlan):
+        return first_week_menu_messages(plan, generation_source=generation_source)
+    return _ongoing_weekly_plan_messages(plan)
+
+
+def first_week_menu(
+    plan: FirstWeekPlan, *, generation_source: str | None = None
+) -> str:
+    """Render a first-week menu when it fits in one Telegram message."""
+
+    rendered_messages = first_week_menu_messages(
+        plan, generation_source=generation_source
+    )
+    if len(rendered_messages) != 1:
+        raise ValueError("First-week menu needs multiple Telegram messages")
+    return rendered_messages[0]
+
+
+def first_week_menu_messages(
+    plan: FirstWeekPlan, *, generation_source: str | None = None
+) -> tuple[str, ...]:
+    """Render an athlete-placed first-week menu in session-safe chunks."""
+
+    header = (
+        f"Your first-week training menu ({plan.week_start.isoformat()})\n"
+        "No fixed schedule — fit these sessions into your week as best you can."
+    )
+    session_blocks: list[str] = []
+    for number, session in enumerate(
+        _interleaved_menu_sessions(plan.sessions), start=1
+    ):
+        session_blocks.append(
+            f"<b>{number}. {escape(session.discipline.value.title())}</b> · "
+            f"{session.targets.duration_minutes} min · "
+            f"{_intensity_label(session)} ({_intensity_range(session)})\n"
+            f"  Purpose: {escape(session.purpose)}"
         )
-    lines.append("\n<b>Placement guardrails</b>")
-    lines.extend(f"â€¢ {escape(rule)}" for rule in plan.guardrails)
-    lines.append("\n<b>What to log</b>")
-    lines.extend(f"â€¢ {escape(item)}" for item in plan.logging_instructions)
-    return _assert_telegram_length("\n".join(lines))
+
+    trailing_blocks: list[str] = []
+    if generation_source == "fallback":
+        trailing_blocks.append(
+            "<i>Note: this is a safe fallback menu because the coached plan "
+            "could not be validated. Your logged sessions will improve the "
+            "next one.</i>"
+        )
+    trailing_blocks.extend(
+        (
+            "<b>Placement guardrails</b>\n"
+            + "\n".join(f"• {escape(rule)}" for rule in plan.guardrails),
+            "<b>What to log</b>\n"
+            + "\n".join(
+                f"• {escape(item)}"
+                for item in _deduplicated_logging_items(plan.logging_instructions)
+            ),
+        )
+    )
+    return _chunk_telegram_blocks(header, (*session_blocks, *trailing_blocks))
+
+
+def _intensity_label(session: PlanSession) -> str:
+    """Return a concise presentation label without changing the prescription."""
+
+    upper_rpe = session.intensity.rpe_range[1]
+    if upper_rpe <= 4:
+        return "Easy"
+    if upper_rpe <= 6:
+        return "Moderate"
+    if upper_rpe <= 8:
+        return "Controlled tempo"
+    return "Hard"
+
+
+def _intensity_range(session: PlanSession) -> str:
+    """Format the resolved target and RPE range for one compact session card."""
+
+    intensity = session.intensity
+    rpe = f"RPE {intensity.rpe_range[0]}-{intensity.rpe_range[1]}"
+    if intensity.metric == "RPE":
+        return rpe
+
+    lower, upper = intensity.target_range
+    if intensity.metric == "POWER_WATTS":
+        target = f"{lower:g}-{upper:g} W"
+    elif intensity.metric == "HEART_RATE_BPM":
+        target = f"{lower:g}-{upper:g} bpm"
+    elif intensity.metric == "PACE_SECONDS_PER_KM":
+        target = f"{_format_seconds(lower)}-{_format_seconds(upper)}/km"
+    else:
+        target = f"{_format_seconds(lower)}-{_format_seconds(upper)}/100m"
+    return f"{rpe}, {target}"
+
+
+def _format_seconds(value: float) -> str:
+    total_seconds = round(value)
+    return f"{total_seconds // 60}:{total_seconds % 60:02d}"
+
+
+def _interleaved_menu_sessions(
+    sessions: Sequence[PlanSession],
+) -> tuple[PlanSession, ...]:
+    """Show one session from each discipline before repeating a discipline."""
+
+    by_discipline: dict[object, list[PlanSession]] = {}
+    for session in sessions:
+        by_discipline.setdefault(session.discipline, []).append(session)
+
+    interleaved: list[PlanSession] = []
+    while any(by_discipline.values()):
+        for group in by_discipline.values():
+            if group:
+                interleaved.append(group.pop(0))
+    return tuple(interleaved)
+
+
+def _deduplicated_logging_items(items: Sequence[str]) -> tuple[str, ...]:
+    """Remove repeated duration/RPE requests while retaining unique metrics."""
+
+    retained: list[str] = []
+    seen_exact: set[str] = set()
+    seen_categories: set[str] = set()
+    for item in items:
+        normalized = " ".join(item.lower().split())
+        if normalized in seen_exact:
+            continue
+        categories = {
+            category
+            for category, terms in {
+                "duration": ("duration", "minute", "length"),
+                "rpe": ("rpe", "perceived effort", "effort rating"),
+                "feel": ("how it felt", "session felt", "effort felt"),
+                "metrics": ("pace", "power", "heart rate", "heart-rate"),
+                "schedule": ("actual day", "day and time", "day/time"),
+            }.items()
+            if any(term in normalized for term in terms)
+        }
+        if categories and categories.issubset(seen_categories):
+            continue
+        retained.append(item)
+        seen_exact.add(normalized)
+        seen_categories.update(categories)
+    return tuple(retained)
 
 
 PROFILE_SETTINGS_MENU = "Choose a profile setting to change."
@@ -882,6 +1029,30 @@ def _escaped_prefix(value: str, budget: int) -> str:
         else:
             high = midpoint - 1
     return escape(value[:low])
+
+
+def _chunk_telegram_blocks(
+    header: str,
+    blocks: Sequence[str],
+    *,
+    separator: str = "\n",
+) -> tuple[str, ...]:
+    """Pack atomic menu blocks without exceeding a conservative Telegram budget."""
+
+    if len(header) > TELEGRAM_CHUNK_LIMIT:
+        raise ValueError("Telegram message header exceeds the chunk limit")
+
+    chunks = [header]
+    for block in blocks:
+        if len(block) > TELEGRAM_CHUNK_LIMIT:
+            raise ValueError("A Telegram menu block exceeds the chunk limit")
+        current = chunks[-1]
+        candidate = f"{current}{separator}{block}"
+        if len(candidate) <= TELEGRAM_CHUNK_LIMIT:
+            chunks[-1] = candidate
+        else:
+            chunks.append(block)
+    return tuple(chunks)
 
 
 def _assert_telegram_length(message: str) -> str:

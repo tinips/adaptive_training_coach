@@ -469,8 +469,9 @@ async def test_first_week_prompt_contains_all_confirmed_onboarding_context(
     assert isinstance(first_week_result.plan, FirstWeekPlan)
     first_session = first_week_result.plan.sessions[0]
     assert first_session.purpose
-    assert first_session.intensity.metric == "RPE"
-    assert first_session.intensity.rpe_range == (2, 3)
+    assert first_session.intensity.metric == "PACE_SECONDS_PER_KM"
+    assert first_session.intensity.rpe_range == (2, 4)
+    assert first_week_result.generation_source == "model"
     assert first_week_result.plan.tests == ()
     assert first_week_result.plan.guardrails
     assert first_week_result.plan.logging_instructions
@@ -503,6 +504,135 @@ async def test_first_week_schema_failure_persists_a_safe_menu_fallback(
     assert isinstance(result.plan, FirstWeekPlan)
     assert result.plan.plan_kind == "FIRST_WEEK_MENU"
     assert result.plan.guardrails
+    assert result.generation_source == "fallback"
+    async with factory() as session:
+        stored = await session.scalar(select(WeeklyTrainingPlan))
+    assert stored is not None
+    assert stored.validation_jsonb["generation_source"] == "fallback"
+    assert stored.validation_jsonb["fallback_reason"] == "schema_validation_failed"
+
+
+@pytest.mark.asyncio
+async def test_first_week_fit_athlete_gets_distinct_numeric_model_menu(
+    database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, factory = database
+    monkeypatch.setattr("app.services.weekly_planning.service.utc_now", lambda: NOW)
+    async with factory.begin() as session:
+        athlete_id = await _seed_target_goal(
+            session,
+            discipline=Discipline.CYCLING,
+            supporting_discipline=Discipline.RUNNING,
+        )
+        goal = await session.scalar(select(TrainingGoal))
+        assert goal is not None
+        session.add(
+            AthleteSelfReportedBaseline(
+                athlete_id=athlete_id,
+                goal_signature=(
+                    f"{goal.goal_template_id}|{goal.supporting_goal_template_id}"
+                ),
+                baseline_jsonb={
+                    "running": {
+                        "typical_weekly_sessions": 3,
+                        "typical_weekly_duration_minutes": 180,
+                        "longest_recent_run_minutes": 75,
+                        "recent_race_result": {
+                            "distance_km": 10,
+                            "duration_seconds": 3_000,
+                        },
+                    },
+                    "cycling": {
+                        "typical_weekly_sessions": 2,
+                        "typical_weekly_duration_minutes": 120,
+                        "longest_recent_ride_minutes": 75,
+                        "riding_environment": "BOTH",
+                        "riding_confidence": "CONFIDENT",
+                        "recent_ftp_watts": 240,
+                    },
+                    "preferences": {
+                        "coaching_style": "DEMANDING",
+                        "desired_weekly_sessions": {
+                            "RUNNING": 2,
+                            "CYCLING": 2,
+                        },
+                    },
+                },
+            )
+        )
+
+    result = await FirstWeekPlanner(
+        session_factory=factory,
+        settings=_settings(),
+        model=DeterministicFakeOnboardingModel(),
+    ).generate_next_week(_identity())
+
+    assert result.kind == "created"
+    assert result.generation_source == "model"
+    assert isinstance(result.plan, FirstWeekPlan)
+    assert len(result.plan.sessions) == 4
+    assert {session.intensity.metric for session in result.plan.sessions} == {
+        "POWER_WATTS",
+        "PACE_SECONDS_PER_KM",
+    }
+    assert any(
+        session.intensity.rpe_range == (5, 6) for session in result.plan.sessions
+    )
+    assert len(
+        {
+            (
+                session.discipline,
+                session.purpose,
+                session.intensity.target_range,
+                session.execution,
+            )
+            for session in result.plan.sessions
+        }
+    ) == len(result.plan.sessions)
+
+
+@pytest.mark.asyncio
+async def test_first_week_untrained_athlete_gets_easy_rpe_model_menu(
+    database: tuple[AsyncEngine, async_sessionmaker[AsyncSession]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, factory = database
+    monkeypatch.setattr("app.services.weekly_planning.service.utc_now", lambda: NOW)
+    async with factory.begin() as session:
+        athlete_id = await _seed_target_goal(session)
+        goal = await session.scalar(select(TrainingGoal))
+        assert goal is not None
+        session.add(
+            AthleteSelfReportedBaseline(
+                athlete_id=athlete_id,
+                goal_signature=str(goal.goal_template_id),
+                baseline_jsonb={
+                    "running": {
+                        "typical_weekly_sessions": 0,
+                        "typical_weekly_duration_minutes": 0,
+                        "longest_recent_run_minutes": 0,
+                    },
+                    "preferences": {
+                        "coaching_style": "DEMANDING",
+                        "desired_weekly_sessions": {"RUNNING": 3},
+                    },
+                },
+            )
+        )
+
+    result = await FirstWeekPlanner(
+        session_factory=factory,
+        settings=_settings(),
+        model=DeterministicFakeOnboardingModel(),
+    ).generate_next_week(_identity())
+
+    assert result.kind == "created"
+    assert result.generation_source == "model"
+    assert isinstance(result.plan, FirstWeekPlan)
+    assert len(result.plan.sessions) == 1
+    assert result.plan.sessions[0].intensity.metric == "RPE"
+    assert result.plan.sessions[0].intensity.rpe_range == (2, 3)
 
 
 @pytest.mark.asyncio

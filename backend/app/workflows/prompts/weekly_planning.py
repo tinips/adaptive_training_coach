@@ -12,7 +12,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from app.schemas.availability import ConfirmedWeeklyAvailability
 
 ONGOING_WEEKLY_PLANNER_PROMPT_VERSION: Final = 10
-FIRST_WEEK_PLANNER_PROMPT_VERSION: Final = 3
+FIRST_WEEK_PLANNER_PROMPT_VERSION: Final = 7
 # Backward-compatible name for callers that use the ongoing planner.
 WEEKLY_PLANNER_PROMPT_VERSION: Final = ONGOING_WEEKLY_PLANNER_PROMPT_VERSION
 
@@ -150,11 +150,28 @@ session duration from the baseline and available windows rather than assuming a 
 duration. Where it fits the recovery and discipline constraints, use longer windows
 (such as weekends) for sessions that benefit from them.
 
+For the first-week menu overview, purpose is the only displayed why line. Write it as
+one concise, complete sentence, normally 80-120 characters and never over 120. End it
+naturally with punctuation; never use an ellipsis, fragments, or a second sentence.
+objective and execution remain stored coaching detail and are not displayed in the
+overview.
+
+For strength, use duration only in targets. Do not prescribe sets, repetitions,
+loads, percentages, or a numeric RPE target anywhere in strength targets or
+execution. Keep the structured intensity as easy, and describe only controlled form
+and stopping with reserve.
+A valid strength session is: {"discipline":"STRENGTH","purpose":"Build controlled
+full-body movement quality.","intensity":{"metric":"RPE","target_range":[3,4],
+"rpe_range":[3,4],"guidance":"Easy, controlled form with reserve."},"objective":
+"Practice relaxed, stable movement.","targets":{"duration_minutes":30},"execution":
+"Use controlled form throughout and finish with plenty in reserve."}.
+
 availability_constraints is non-negotiable. Ensure every individual menu session fits
 at least one allowed discipline/window, but do not name days or times. Respect
 equipment/access and health limitations. Include concise guardrails and explicit
 logging instructions: record actual day/time, duration, RPE, how it felt, and any
-available pace/power/heart-rate. tests must be empty. All swimming this week is in a
+available pace/power/heart-rate. Use at most five distinct logging instructions; do
+not create one per session. tests must be empty. All swimming this week is in a
 pool; never plan open-water swimming. For untrained swimming, use breathing, body
 position, short 25m repeats, and generous rest; never prescribe continuous-distance or
 pace targets."""

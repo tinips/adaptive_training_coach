@@ -36,6 +36,15 @@ def test_goal_model_factory_selects_live_provider_without_invoking_it() -> None:
     assert model.model_name == "live-goal"
 
 
+def test_goal_model_factory_accepts_a_first_week_model_override() -> None:
+    model = create_goal_extraction_model(
+        Settings(environment="test", llm_mode="mock", llm_model="default"),
+        model_name="first-week-only",
+    )
+
+    assert model.model_name == "first-week-only"
+
+
 def test_live_adapter_recovers_valid_json_when_langchain_parsed_is_empty() -> None:
     output, malformed = _recover_structured_json(
         parsed=None,

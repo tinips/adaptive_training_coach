@@ -14,6 +14,7 @@ from telegram import (
     InlineKeyboardMarkup,
     Update,
 )
+from telegram.constants import ParseMode
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import ContextTypes
 
@@ -513,19 +514,38 @@ async def _deliver(update: Update, response: TelegramResponse) -> None:
 
         reply_markup = dynamic_keyboard(response.button_rows)
 
+    rendered_messages = (response.text, *response.text_chunks)
+    final_reply_markup = reply_markup or response.user_keyboard
+
     if response.edit_existing and query is not None:
         try:
             await query.edit_message_text(
-                response.text,
-                reply_markup=reply_markup,
+                rendered_messages[0],
+                reply_markup=reply_markup if len(rendered_messages) == 1 else None,
+                parse_mode=ParseMode.HTML,
             )
+            if len(rendered_messages) == 1:
+                return
+            for index, text in enumerate(rendered_messages[1:], start=1):
+                await message.reply_text(
+                    text,
+                    reply_markup=(
+                        final_reply_markup
+                        if index == len(rendered_messages) - 1
+                        else None
+                    ),
+                )
             return
         except BadRequest as exc:
             if "message is not modified" in str(exc).lower():
                 return
             logger.info("Telegram message edit unavailable; sending a new message")
 
-    await message.reply_text(
-        response.text,
-        reply_markup=reply_markup or response.user_keyboard,
-    )
+    for index, text in enumerate(rendered_messages):
+        await message.reply_text(
+            text,
+            reply_markup=(
+                final_reply_markup if index == len(rendered_messages) - 1 else None
+            ),
+            parse_mode=ParseMode.HTML,
+        )

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -72,6 +72,12 @@ class IntensityTarget(_WeeklyPlanSchema):
         return self.rpe_range[1] >= 7
 
 
+class StrengthSessionTargets(_WeeklyPlanSchema):
+    """Strength menus intentionally expose duration, and no dosage targets."""
+
+    duration_minutes: int = Field(ge=5, le=360)
+
+
 class PlanSession(_WeeklyPlanSchema):
     """One concise, actionable training session shown to the athlete."""
 
@@ -87,6 +93,46 @@ class PlanSession(_WeeklyPlanSchema):
         if self.targets.duration_minutes is None:
             raise ValueError("sessions require targets.duration_minutes")
         return self
+
+
+class FirstWeekEnduranceSession(PlanSession):
+    """A first-week endurance session with the normal metric target vocabulary."""
+
+    discipline: Literal[
+        Discipline.RUNNING,
+        Discipline.CYCLING,
+        Discipline.SWIMMING,
+    ]
+
+
+class FirstWeekStrengthSession(PlanSession):
+    """A first-week strength session with a duration-only target contract."""
+
+    discipline: Literal[Discipline.STRENGTH]
+    targets: StrengthSessionTargets  # type: ignore[assignment]
+
+
+FirstWeekSession = Annotated[
+    FirstWeekEnduranceSession | FirstWeekStrengthSession,
+    Field(discriminator="discipline"),
+]
+
+
+def _coerce_first_week_sessions(value: object) -> object:
+    """Accept legacy in-process PlanSession instances at the menu boundary."""
+
+    if not isinstance(value, dict):
+        return value
+    sessions = value.get("sessions")
+    if not isinstance(sessions, (list, tuple)):
+        return value
+    normalized = [
+        session.model_dump(mode="python")
+        if isinstance(session, PlanSession)
+        else session
+        for session in sessions
+    ]
+    return {**value, "sessions": normalized}
 
 
 class SessionPrescription(PlanSession):
@@ -131,10 +177,15 @@ class FirstWeekPlanPrescription(_WeeklyPlanSchema):
     """Unscheduled probe sessions proposed by the first-week coach."""
 
     week_start: date
-    sessions: tuple[PlanSession, ...] = Field(min_length=1, max_length=14)
+    sessions: tuple[FirstWeekSession, ...] = Field(min_length=1, max_length=14)
     guardrails: tuple[str, ...] = Field(default=(), max_length=12)
     logging_instructions: tuple[str, ...] = Field(default=(), max_length=8)
     tests: tuple[str, ...] = Field(default=(), max_length=0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_legacy_sessions(cls, value: object) -> object:
+        return _coerce_first_week_sessions(value)
 
 
 class FirstWeekPlan(_WeeklyPlanSchema):
@@ -142,12 +193,17 @@ class FirstWeekPlan(_WeeklyPlanSchema):
 
     plan_kind: Literal["FIRST_WEEK_MENU"] = "FIRST_WEEK_MENU"
     week_start: date
-    sessions: tuple[PlanSession, ...] = Field(min_length=1, max_length=14)
+    sessions: tuple[FirstWeekSession, ...] = Field(min_length=1, max_length=14)
     guardrails: tuple[str, ...] = Field(min_length=1, max_length=12)
     logging_instructions: tuple[str, ...] = Field(min_length=1, max_length=8)
     tests: tuple[str, ...] = Field(default=(), max_length=0)
     sessions_per_discipline: dict[Discipline, int]
     total_minutes_per_discipline: dict[Discipline, int]
+
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_legacy_sessions(cls, value: object) -> object:
+        return _coerce_first_week_sessions(value)
 
     @model_validator(mode="after")
     def require_accurate_summaries(self) -> FirstWeekPlan:
