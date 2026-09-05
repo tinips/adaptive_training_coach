@@ -57,6 +57,14 @@ class ManualWorkoutImportRequest(_StrictManualImportSchema):
     calories_total_kcal: float | None = Field(default=None, ge=0)
     average_heart_rate: float | None = Field(default=None, ge=0, le=300)
     max_heart_rate: float | None = Field(default=None, ge=0, le=300)
+    average_pace_seconds_per_km: float | None = Field(default=None, ge=0)
+    average_pace_seconds_per_100m: float | None = Field(default=None, ge=0)
+    average_speed_kph: float | None = Field(default=None, ge=0)
+    max_speed_kph: float | None = Field(default=None, ge=0)
+    average_power_watts: float | None = Field(default=None, ge=0)
+    max_power_watts: float | None = Field(default=None, ge=0)
+    average_cadence: float | None = Field(default=None, ge=0)
+    max_cadence: float | None = Field(default=None, ge=0)
     swimming: ManualSwimmingDetails | None = None
 
     @model_validator(mode="after")
