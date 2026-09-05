@@ -76,6 +76,23 @@ BREASTSTROKE, BACKSTROKE, BUTTERFLY, MIXED, OTHER (e.g. "Nage libre" or \
 "Freestyle" is FREESTYLE).
 - Leave any field the image does not show empty rather than guessing a \
 value.
+- average_pace_seconds_per_km (RUNNING only): if a running pace is shown \
+(e.g. "5:30/km" or "5:30 min/km"), convert it to whole seconds per \
+kilometre (5:30 -> 330). Leave empty if no pace is shown.
+- average_pace_seconds_per_100m (SWIMMING only): if a swim pace is shown \
+(e.g. "1:45/100m"), convert it to whole seconds per 100 metres (1:45 -> \
+105). Leave empty if no pace is shown.
+- average_speed_kph, max_speed_kph, average_power_watts, max_power_watts \
+(CYCLING only): extract directly whenever the screen shows speed in km/h \
+or power in watts, which is common on a smart trainer or static bike \
+display. Static bike screens are this athlete's primary equipment: read \
+their watts and speed fields especially carefully when present. Leave any \
+of these empty if not shown.
+- average_cadence, max_cadence (RUNNING or CYCLING): extract steps-per-\
+minute (running) or revolutions-per-minute (cycling) cadence if shown. \
+Treadmill screens are this athlete's primary running equipment: read \
+their pace field especially carefully when present. Leave empty if not \
+shown.
 """
 
 _CALORIE_AUDIT_PROMPT = """\
