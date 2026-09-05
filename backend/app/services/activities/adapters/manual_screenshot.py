@@ -38,6 +38,14 @@ def from_manual_screenshot(payload: ManualWorkoutImportRequest) -> ActivityImpor
         calories_kcal=payload.calories_active_kcal or payload.calories_total_kcal,
         average_heart_rate=payload.average_heart_rate,
         max_heart_rate=payload.max_heart_rate,
+        average_pace_seconds_per_km=payload.average_pace_seconds_per_km,
+        average_pace_seconds_per_100m=payload.average_pace_seconds_per_100m,
+        average_speed_kph=payload.average_speed_kph,
+        max_speed_kph=payload.max_speed_kph,
+        average_power_watts=payload.average_power_watts,
+        max_power_watts=payload.max_power_watts,
+        average_cadence=payload.average_cadence,
+        max_cadence=payload.max_cadence,
         swimming_environment=(
             SwimmingEnvironment(payload.swimming.environment)
             if payload.swimming is not None
