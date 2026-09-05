@@ -59,7 +59,7 @@ def _resolve_discipline(
             baseline.cycling.recent_ftp_watts if baseline and baseline.cycling else None
         )
         if ftp is not None:
-            return _power_zones(ftp)
+            return power_zones(ftp)
     if discipline is Discipline.RUNNING:
         race = (
             baseline.running.recent_race_result
@@ -67,7 +67,7 @@ def _resolve_discipline(
             else None
         )
         if race is not None:
-            return _running_pace_zones(race.duration_seconds / race.distance_km)
+            return running_pace_zones(race.duration_seconds / race.distance_km)
     if discipline is Discipline.SWIMMING:
         threshold = (
             baseline.swimming.recent_400m_seconds
@@ -75,9 +75,7 @@ def _resolve_discipline(
             else None
         )
         if threshold is not None:
-            return _swim_pace_zones(threshold / 4)
-    if calculation is not None and calculation.reliable_max_hr_bpm is not None:
-        return _heart_rate_zones(calculation.reliable_max_hr_bpm)
+            return swim_pace_zones(threshold / 4)
     return ResolvedIntensityZones(
         mode="RPE_FALLBACK",
         metric="RPE",
@@ -88,7 +86,7 @@ def _resolve_discipline(
     )
 
 
-def _power_zones(ftp: int) -> ResolvedIntensityZones:
+def power_zones(ftp: int) -> ResolvedIntensityZones:
     return ResolvedIntensityZones(
         mode="NUMERIC",
         metric="POWER_WATTS",
@@ -101,7 +99,7 @@ def _power_zones(ftp: int) -> ResolvedIntensityZones:
     )
 
 
-def _running_pace_zones(race_pace: float) -> ResolvedIntensityZones:
+def running_pace_zones(race_pace: float) -> ResolvedIntensityZones:
     return ResolvedIntensityZones(
         mode="NUMERIC",
         metric="PACE_SECONDS_PER_KM",
@@ -112,7 +110,7 @@ def _running_pace_zones(race_pace: float) -> ResolvedIntensityZones:
     )
 
 
-def _swim_pace_zones(threshold_pace: float) -> ResolvedIntensityZones:
+def swim_pace_zones(threshold_pace: float) -> ResolvedIntensityZones:
     return ResolvedIntensityZones(
         mode="NUMERIC",
         metric="SWIM_PACE_SECONDS_PER_100M",
@@ -123,14 +121,19 @@ def _swim_pace_zones(threshold_pace: float) -> ResolvedIntensityZones:
     )
 
 
-def _heart_rate_zones(max_hr: float) -> ResolvedIntensityZones:
-    return ResolvedIntensityZones(
-        mode="NUMERIC",
-        metric="HEART_RATE_BPM",
-        easy=(round(max_hr * 0.60), round(max_hr * 0.75)),
-        moderate=(round(max_hr * 0.76), round(max_hr * 0.85)),
-        hard=(round(max_hr * 0.86), round(max_hr * 0.92)),
-        guidance=(
-            "Heart-rate ranges use reliable recent heart-rate evidence, not a test."
-        ),
+def hr_zone_bands(
+    max_hr: float,
+) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float]]:
+    """Shared easy/moderate/hard percent-of-max-HR bands (60-75/76-85/86-92%).
+
+    Not used anywhere in this module any more (the observed-HR prescription
+    fallback was removed above) -- exported purely so the display-only
+    age-based reference zones in app/services/athlete_zones.py use the exact
+    same percentages without duplicating them.
+    """
+
+    return (
+        (round(max_hr * 0.60), round(max_hr * 0.75)),
+        (round(max_hr * 0.76), round(max_hr * 0.85)),
+        (round(max_hr * 0.86), round(max_hr * 0.92)),
     )
