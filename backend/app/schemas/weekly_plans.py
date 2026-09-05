@@ -72,6 +72,22 @@ class IntensityTarget(_WeeklyPlanSchema):
         return self.rpe_range[1] >= 7
 
 
+class PrescribedIntensityTarget(IntensityTarget):
+    """Model-facing intensity: heart rate is shown to the athlete, never prescribed.
+
+    Heart rate stays available on the persisted ``IntensityTarget`` so plans
+    written before this narrowing still load; dropping it here removes it from
+    the JSON schema the coach model fills, so no new plan can carry it.
+    """
+
+    metric: Literal[
+        "RPE",
+        "POWER_WATTS",
+        "PACE_SECONDS_PER_KM",
+        "SWIM_PACE_SECONDS_PER_100M",
+    ]
+
+
 class StrengthSessionTargets(_WeeklyPlanSchema):
     """Strength menus intentionally expose duration, and no dosage targets."""
 
@@ -138,6 +154,7 @@ def _coerce_first_week_sessions(value: object) -> object:
 class SessionPrescription(PlanSession):
     """Coach-authored session intent before deterministic calendar placement."""
 
+    intensity: PrescribedIntensityTarget
     priority: Literal["ESSENTIAL", "IMPORTANT", "OPTIONAL"] = "IMPORTANT"
     preferred_weekdays: tuple[
         Literal[

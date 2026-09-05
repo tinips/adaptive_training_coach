@@ -30,13 +30,3 @@ def test_zones_view_renders_hr_pace_and_power_with_min_sec() -> None:
     assert "4:37/km" in text
     assert "277-315" not in text  # never show the raw seconds-per-km bounds
     assert "no numeric source" in text.lower()  # swimming has no baseline
-
-
-def test_zones_view_notes_missing_birth_year() -> None:
-    zones = AthleteDisplayZones(
-        heart_rate=None, running=None, cycling=None, swimming=None
-    )
-
-    text = zones_view(zones)
-
-    assert "birth year" in text.lower() or "profile" in text.lower()

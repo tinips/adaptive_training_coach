@@ -127,6 +127,7 @@ def validate_plan(
                     "hard session in a discipline with no stated or evidenced volume",
                 )
             )
+        violations.extend(_heart_rate_prescription_violations(session, day))
         violations.extend(
             _unsupported_target_violations(day, session, baseline, readiness_counts)
         )
@@ -231,6 +232,7 @@ def validate_first_week_plan(
         session.discipline for session in plan.sessions
     )
     for session in plan.sessions:
+        violations.extend(_heart_rate_prescription_violations(session, None))
         violations.extend(_first_week_purpose_violations(session))
         violations.extend(
             _first_week_zone_violations(session, zones.get(session.discipline))
@@ -721,6 +723,29 @@ def _is_zero_baseline(
         and _duration_total(stated) == 0
         and evidenced_sessions == 0
     )
+
+
+def _heart_rate_prescription_violations(
+    session: PlanSession, day: date | None
+) -> list[PlanViolation]:
+    """Shared no-HR guard for every planner: HR verifies effort, never prescribes it.
+
+    Generation cannot reach this on the ongoing path, where the model-facing
+    ``PrescribedIntensityTarget`` has no heart-rate metric at all. It still
+    guards code-built and previously stored plans, which use the wider
+    persisted ``IntensityTarget``.
+    """
+
+    if session.intensity.metric != "HEART_RATE_BPM":
+        return []
+    return [
+        PlanViolation(
+            "HEART_RATE_PRESCRIBED",
+            session.discipline,
+            day,
+            "heart rate is a verification metric and is never prescribed",
+        )
+    ]
 
 
 def _unsupported_target_violations(

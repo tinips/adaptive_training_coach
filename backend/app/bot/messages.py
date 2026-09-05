@@ -736,9 +736,7 @@ def zones_view(zones: AthleteDisplayZones) -> str:
         lines.append(f"  Moderate: {hr.moderate[0]:.0f}-{hr.moderate[1]:.0f} bpm")
         lines.append(f"  Hard: {hr.hard[0]:.0f}-{hr.hard[1]:.0f} bpm")
         lines.append(f"  {hr.caveat}")
-    else:
-        lines.append("Heart rate: add your birth year in /profile to see this.")
-    lines.append("")
+        lines.append("")
     lines.append(_zone_line("Running pace", zones.running, unit_label="/km"))
     lines.append(_zone_line("Cycling power", zones.cycling, unit_label=" W"))
     lines.append(_zone_line("Swimming pace", zones.swimming, unit_label="/100m"))

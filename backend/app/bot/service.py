@@ -156,6 +156,7 @@ class CoachBotApplicationService:
             "/plan_next_week",
             "/view_weekly_plan",
             "/delete_weekly_plan",
+            "/zones",
             "/cancel",
             "/delete_me",
         }

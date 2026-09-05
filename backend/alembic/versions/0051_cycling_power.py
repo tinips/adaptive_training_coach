@@ -33,8 +33,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    with op.batch_alter_table("cycling_workout_details") as batch:
-        batch.drop_constraint("max_power_nonnegative", type_="check")
-        batch.drop_constraint("average_power_nonnegative", type_="check")
-        batch.drop_column("max_power_watts")
-        batch.drop_column("average_power_watts")
+    raise NotImplementedError(
+        "Captured cycling power is not destructively downgraded."
+    )

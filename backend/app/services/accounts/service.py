@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -18,6 +19,8 @@ from app.services.athlete_zones import (
     resolve_athlete_display_zones,
 )
 from app.services.profiles import ProfileService
+
+logger = logging.getLogger(__name__)
 
 
 class AccountServiceError(RuntimeError):
@@ -93,6 +96,10 @@ class AccountQueryService:
                     saved_baseline.baseline_jsonb
                 )
             except ValidationError:
+                logger.warning(
+                    "zones_self_reported_baseline_invalid athlete_id=%s",
+                    str(user_id),
+                )
                 baseline = None
         return resolve_athlete_display_zones(
             birth_year=profile.birth_year,
