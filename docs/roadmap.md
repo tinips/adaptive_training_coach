@@ -4,6 +4,28 @@ Status was verified against `main` on 2026-09-07. Code is the source of truth.
 `BUILT` does not imply production reachability; dormant capabilities are called
 out explicitly. The documentation map is in `docs/README.md`.
 
+## Build order (start here)
+
+The simple version. Everything below this section is supporting detail, gates,
+and rules for each step — read it before executing a step, not before deciding
+what step is next.
+
+1. ~~Fix repair regression~~ — **done** (2026-09-07). The first-week repair
+   loop no longer raises on an ordinary, non-HR repair. See
+   [Locked decisions](decisions/locked.md).
+2. Approve E6/E7 evaluator tables — `OPEN DECISION`, blocks step 3. See
+   [Open decisions](decisions/open.md).
+3. First-week evaluator — `DESIGNED`, not implemented. See
+   [First-week evaluator](briefs/backlog/first-week-evaluator.md).
+4. Fitness history — `PROPOSED`, not implemented. See
+   [Fitness state](briefs/backlog/fitness-state.md).
+5. General Planner phases — `DESIGNED`, not implemented. See
+   [General Planner phase foundation](briefs/backlog/general-planner-phase-foundation.md).
+6. Wire `OngoingWeeklyPlanner` — `BUILT` as a service, not production-wired.
+7. Stage Planner — `DESIGNED`, not implemented.
+8. CTL/TSS and advanced adaptation — later; `PROPOSED`. See
+   [Training-load model](design/load-model.md).
+
 ## Current production boundary
 
 | Capability | Status |
@@ -26,7 +48,7 @@ The previously documented “Astra branch” is not present among current local 
 remote branches and is not evidence of completion. The fixes once described as
 “not yet committed” are in commit `5d16036`; that wording was stale.
 
-## Priority 0 — HR prescription invariant
+## Priority 0 — HR prescription invariant (done)
 
 Status: `BUILT` and covered for both weekly prescription paths.
 
@@ -34,6 +56,17 @@ Both model-facing weekly prescription schemas exclude HR intensity,
 `average_hr_bpm`, and `hr_range_bpm`. Wider persisted types retain legacy-load
 compatibility, and the existing validator remains defense in depth. Completed
 workout HR remains valid evidence.
+
+That narrowing had a follow-on defect: rebuilding the narrow prescription
+after first-week repair round-tripped through the wide, persisted session
+type, which dumps `average_hr_bpm`/`hr_range_bpm` even when unset. The narrow
+schema forbids those keys outright, so any ordinary (non-HR) repair on a
+running/cycling/swimming session raised an unhandled error instead of
+producing `model_repaired` or a safe `fallback`. Fixed 2026-09-07: the
+reconstruction now removes those legacy-only keys explicitly, and
+`HEART_RATE_PRESCRIBED` was added to first-week repair's own safety-clearing
+codes so a legacy HR-prescribed session also repairs clean. Regression-tested
+and verified live against the rebuilt bot image.
 
 ## Milestone 1 — first-week evaluator
 

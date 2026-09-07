@@ -645,6 +645,7 @@ def _repair_first_week_menu(
         "FIRST_WEEK_ZONE_CONFLICT",
         "HARD_ON_ZERO_BASELINE",
         "UNSUPPORTED_TARGET",
+        "HEART_RATE_PRESCRIBED",
     }:
         for raw in raw_sessions:
             if not isinstance(raw, dict):
@@ -677,15 +678,25 @@ def _repair_first_week_menu(
             duration = targets.get("duration_minutes")
             raw["targets"] = {"duration_minutes": duration}
             raw["execution"] = _strip_strength_prescription(execution_text)
-    sessions = tuple(
-        _FIRST_WEEK_SESSION_ADAPTER.validate_python(raw) for raw in raw_sessions
-    )
+    for raw in raw_sessions:
+        if not isinstance(raw, dict):
+            continue
+        # The narrow model-facing prescription forbids these keys outright, even
+        # when the value is None, so they must be removed rather than nulled.
+        # Every session goes through this regardless of which code fired above:
+        # a wide, persisted session dumps them whether or not it ever carried a
+        # real HR prescription.
+        targets = _targets(raw)
+        targets.pop("average_hr_bpm", None)
+        targets.pop("hr_range_bpm", None)
     return make_first_week_plan(
-        FirstWeekPlanPrescription(
-            week_start=plan.week_start,
-            sessions=sessions,
-            guardrails=plan.guardrails,
-            logging_instructions=plan.logging_instructions,
+        FirstWeekPlanPrescription.model_validate(
+            {
+                "week_start": plan.week_start,
+                "sessions": raw_sessions,
+                "guardrails": plan.guardrails,
+                "logging_instructions": plan.logging_instructions,
+            }
         )
     )
 

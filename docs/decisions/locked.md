@@ -43,7 +43,10 @@ are defined in `docs/README.md`.
   The wider persisted types remain compatible with legacy plans, and shared
   validation still rejects legacy HR prescriptions.
 - `BUILT` — generation uses validate, bounded repair (at most two model repair
-  calls), then deterministic fallback with generation provenance.
+  calls), then deterministic fallback with generation provenance. Code-level
+  repair reconstruction is crash-safe for every discipline: an ordinary,
+  non-HR repair on a running/cycling/swimming session no longer raises an
+  unhandled error (fixed 2026-09-07; regression-tested).
 
 ## HR
 

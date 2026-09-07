@@ -395,6 +395,188 @@ def test_first_week_fallback_honors_requested_strength_frequency_and_is_valid() 
     ).ok
 
 
+def _endurance_session(
+    discipline: str, intensity: dict[str, object], targets: dict[str, object]
+) -> dict[str, object]:
+    return {
+        "discipline": discipline,
+        "purpose": "Build steady aerobic volume.",
+        "intensity": intensity,
+        "objective": "Cover the distance at the prescribed effort.",
+        "targets": targets,
+        "execution": "Keep the effort controlled throughout.",
+    }
+
+
+def test_repair_an_rpe_endurance_session_with_a_zone_conflict_does_not_crash() -> None:
+    """A plain, non-HR repair on an endurance session must not raise.
+
+    Regression test: reconstructing the narrow first-week prescription from a
+    wide persisted session used to dump every ``SessionTargets`` field,
+    including ``average_hr_bpm``/``hr_range_bpm`` as ``None``, which the
+    ``extra="forbid"`` prescription schema rejected outright.
+    """
+
+    week_start = date(2026, 9, 7)
+    prescription = FirstWeekPlanPrescription.model_validate(
+        {
+            "week_start": week_start,
+            "sessions": [
+                _endurance_session(
+                    "RUNNING",
+                    {
+                        "metric": "RPE",
+                        "target_range": [6, 7],
+                        "rpe_range": [6, 7],
+                        "guidance": "Push harder than intended.",
+                    },
+                    {"duration_minutes": 40},
+                )
+            ],
+        }
+    )
+    plan = make_first_week_plan(prescription)
+    violation = PlanViolation(
+        "FIRST_WEEK_ZONE_CONFLICT", Discipline.RUNNING, None, "outside resolved zone"
+    )
+
+    repaired = repair_plan(plan, [violation], baseline=None)
+
+    assert isinstance(repaired, FirstWeekPlan)
+    session = repaired.sessions[0]
+    assert session.intensity.metric == "RPE"
+    assert session.intensity.rpe_range == (2, 3)
+    assert session.targets.duration_minutes == 40
+
+
+def test_repair_a_pace_endurance_session_clears_the_pace_target() -> None:
+    week_start = date(2026, 9, 7)
+    prescription = FirstWeekPlanPrescription.model_validate(
+        {
+            "week_start": week_start,
+            "sessions": [
+                _endurance_session(
+                    "RUNNING",
+                    {
+                        "metric": "PACE_SECONDS_PER_KM",
+                        "target_range": [300, 320],
+                        "rpe_range": [6, 7],
+                        "guidance": "Hold this pace.",
+                    },
+                    {"duration_minutes": 40, "pace_seconds_per_km": 310},
+                )
+            ],
+        }
+    )
+    plan = make_first_week_plan(prescription)
+    violation = PlanViolation(
+        "HARD_ON_ZERO_BASELINE", Discipline.RUNNING, None, "no evidenced volume"
+    )
+
+    repaired = repair_plan(plan, [violation], baseline=None)
+
+    assert isinstance(repaired, FirstWeekPlan)
+    session = repaired.sessions[0]
+    assert session.intensity.metric == "RPE"
+    assert session.targets.pace_seconds_per_km is None
+    assert session.targets.duration_minutes == 40
+
+
+def test_repair_removes_a_legacy_heart_rate_prescription_without_crashing() -> None:
+    """A stored session that already carries an HR prescription must repair clean.
+
+    ``PlanSession``/``FirstWeekPlan`` stay wide to load legacy plans, so this
+    shape is reachable even though generation can no longer produce it.
+    """
+
+    week_start = date(2026, 9, 7)
+    plan = FirstWeekPlan.model_validate(
+        {
+            "week_start": week_start,
+            "sessions": [
+                {
+                    "discipline": "RUNNING",
+                    "purpose": "Hold a heart-rate target.",
+                    "intensity": {
+                        "metric": "HEART_RATE_BPM",
+                        "target_range": [130, 145],
+                        "rpe_range": [3, 4],
+                        "guidance": "Hold this heart rate.",
+                    },
+                    "objective": "Run at the prescribed heart rate.",
+                    "targets": {
+                        "duration_minutes": 40,
+                        "average_hr_bpm": 138,
+                        "hr_range_bpm": [130, 145],
+                    },
+                    "execution": "Keep the effort controlled throughout.",
+                }
+            ],
+            "guardrails": ["Keep the session controlled."],
+            "logging_instructions": ["Record the completed workout."],
+            "sessions_per_discipline": {"RUNNING": 1},
+            "total_minutes_per_discipline": {"RUNNING": 40},
+        }
+    )
+    violation = PlanViolation(
+        "HEART_RATE_PRESCRIBED", Discipline.RUNNING, None, "intensity.metric"
+    )
+
+    repaired = repair_plan(plan, [violation], baseline=None)
+
+    assert isinstance(repaired, FirstWeekPlan)
+    session = repaired.sessions[0]
+    assert session.intensity.metric == "RPE"
+    assert session.targets.average_hr_bpm is None
+    assert session.targets.hr_range_bpm is None
+
+
+def test_repair_still_strips_strength_execution_alongside_an_endurance_repair() -> None:
+    """Mixed menus: an endurance repair must not disturb the strength repair path."""
+
+    week_start = date(2026, 9, 7)
+    prescription = FirstWeekPlanPrescription.model_validate(
+        {
+            "week_start": week_start,
+            "sessions": [
+                _endurance_session(
+                    "RUNNING",
+                    {
+                        "metric": "RPE",
+                        "target_range": [6, 7],
+                        "rpe_range": [6, 7],
+                        "guidance": "Push harder than intended.",
+                    },
+                    {"duration_minutes": 40},
+                ),
+                _strength_session("Complete 3 sets of 10 reps at a moderate load."),
+            ],
+        }
+    )
+    plan = make_first_week_plan(prescription)
+    violations = [
+        PlanViolation(
+            "FIRST_WEEK_ZONE_CONFLICT",
+            Discipline.RUNNING,
+            None,
+            "outside resolved zone",
+        ),
+        PlanViolation(
+            "STRENGTH_OVER_SPECIFIED",
+            Discipline.STRENGTH,
+            None,
+            "sets/reps in execution",
+        ),
+    ]
+
+    repaired = repair_plan(plan, violations, baseline=None)
+
+    assert isinstance(repaired, FirstWeekPlan)
+    running, strength = repaired.sessions
+    assert running.intensity.metric == "RPE"
+    assert strength.execution == _STRENGTH_FALLBACK_EXECUTION
+
+
 def _strength_readiness(week_start: date) -> PlanReadiness:
     return PlanReadiness(
         week_start=week_start,
