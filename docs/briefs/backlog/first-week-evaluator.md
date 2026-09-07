@@ -1,115 +1,330 @@
 # Implementation Brief: First-Week Evaluator
 
-Status: **implementation-ready, not executed.** This brief does not resolve the open product questions listed below — implementation should not start until those are answered. See `docs/design/first-week-evaluator.md` and `docs/design/fitness-state.md` for the full design this brief implements.
+Status: `DESIGNED` work package, not executed. The HR-prescription prerequisite
+is `BUILT`. Full evaluator implementation remains blocked on approval of the E6
+numerical tolerances and E7 signal/coverage thresholds.
 
----
+## Outcome
 
-## Goal
+Deliver a first-week evaluation loop that lets an athlete explicitly associate
+workout actuals with menu sessions, computes deterministic session and weekly
+facts, persists an auditable outcome, and provides versioned evidence that later
+fitness-state and planner-feedback milestones may consume.
 
-Give the first-week planner a working evaluation loop: let the athlete link a logged workout to a first-week planned session, deterministically compare planned vs. actual, aggregate the week, persist the outcome, and start a fitness-state history — so a future planner (general planner, or the ongoing weekly planner in the meantime) has real `last_week_feedback` to read instead of nothing.
+The evaluator does not design the next plan, diagnose health, use an LLM, infer
+a final workout/session match, or treat missed work as zero fitness.
 
-## Non-goals (explicitly out of scope for this milestone)
+## Current implementation baseline
 
-- General planner or stage planner (separate roadmap items, after this).
-- CTL/TSS activation (Mode C) or any load-math-driven adaptation.
-- Changing the ongoing planner's existing `compare_week()` matching mechanism — that stays as-is unless a future decision says otherwise (see open question below).
-- Any UI/UX polish beyond what's needed to expose the linking step and the weekly summary (Astra's branch, not this brief).
-- Vacation/recovery handling or phase re-cutting.
+| Area | Status | Ground truth |
+|---|---|---|
+| First-week plan | `BUILT` and production-wired | `FirstWeekPlanner` generates an unscheduled `FirstWeekPlan` and persists it in `WeeklyTrainingPlan.plan_jsonb` with schema version 4. |
+| Planned-session identity | Code-generated UUID `DESIGNED`; not implemented | `PlanSession` has no id today. Array ordinal is explicitly not permanent identity. |
+| Workout actuals | `BUILT` and production-wired behind settings | Screenshot and TCX create `Workout` rows with no plan/session link when enabled; screenshot import defaults off and TCX import defaults on. Discipline detail rows can store pace, speed, cycling power, and average/max HR. |
+| Actual effort | Objective-metric policy `DESIGNED` | V1 does not require actual RPE. Optional feel text is not currently persisted and must not enter planner prompts automatically. |
+| Actual evidence projection | Partially `BUILT` | `FitnessWorkoutEvidence` exposes duration, moving duration, distance, and timestamped HR observations; the dated comparator derives pace from duration/distance. The projection omits cycling power/speed and numeric summary HR. |
+| No-HR prescription guard | `BUILT` | Both model-facing weekly prescriptions exclude HR intensity and HR target fields; wider persisted types remain for legacy reads. |
+| Dated-plan comparator | `BUILT`, dormant | `compare_week()` performs greedy nearest-same-discipline-date matching. `compare_finished_week()` can upsert its result, but no production caller invokes it. |
+| First-week comparator | `DESIGNED`; no implementation | `compare_finished_week()` returns `None` for `FirstWeekPlan`. |
+| Outcome storage | First-week shape `DESIGNED`; not implemented | Use immutable versioned records; do not reuse the overwrite-oriented dated `WeekComparison` shape. |
+| Fitness-state history and feedback | Deferred; no implementation | No snapshot model/table/repository or `last_week_feedback` contract/consumer exists, and neither blocks this brief. |
 
----
+## Locked behavior (`DESIGNED`)
 
-## Current implementation, as discovered from the repo (ground truth, verified 2026-09-05)
+- The athlete confirms the workout-to-first-week-session link; nearest-date
+  inference is not the final matcher.
+- A workout links to at most one first-week planned session, and each session
+  has at most one primary workout used by v1 evaluation.
+- Every planned session receives a code-generated UUID. Plan revisions preserve
+  it only for the same intended session and explicitly replace it otherwise.
+- Relinking is allowed before evaluation; later correction creates a
+  superseding immutable evaluation revision. Secondary matching is deferred.
+- Eligibility is athlete-local Monday–Sunday; unresolved duplicates are
+  excluded.
+- Unlinked planned sessions are visible as `MISSED`; eligible unlinked workouts
+  are visible as `EXTRA`.
+- `CANCELLED_AGREED` is future-only and requires a confirmed plan change; it is
+  never inferred from absence.
+- Missed sessions are excluded from capability math and are never substituted
+  as zero performance.
+- Completion is `MATCHED / (MATCHED + MISSED)`; capability is matched-only.
+- V1 uses duration, running/swimming pace, stationary-cycling power, and
+  average/max HR when available. Speed/cadence are contextual. Missing HR or
+  the relevant pace/power metric yields `NOT_COMPARABLE`.
+- Actual RPE is not required. Optional feel text is neither required nor sent
+  automatically to planner prompts.
+- Evaluation is manually triggered and idempotent after link review.
+- Intensity intent is evaluated before extra volume.
+- HR is a soft, approximate effort signal and never automatically changes a
+  zone or fitness state.
+- Evaluation and suggested signal are deterministic; no LLM call is permitted.
+- The evaluator emits facts plus a suggested signal. A planner makes the later
+  planning choice.
+- Evaluation retains enough versioned provenance for the separately selected
+  fitness-state storage approach.
 
-- First-week plans are generated and persisted (`WeeklyTrainingPlan`, `plan_jsonb`) with **no stable per-session identifier** — `PlanSession` has none, and the whole plan is one JSON blob.
-- `Workout` rows (actuals) carry **no foreign key** to any plan or session — matching, whatever its mechanism, must be computed and stored independently of the `Workout` table's own schema, or `Workout` needs a new nullable link column (see persistence section).
-- `compare_finished_week()` (`backend/app/services/weekly_planning/service.py`) already special-cases `FirstWeekPlan` by returning `None` — this is the exact point where first-week evaluation logic needs to be added.
-- `compare_week()` (`backend/app/services/weekly_planning/comparison.py`) is a **working, different mechanism** for the ongoing planner: greedy nearest-same-discipline-date matching. It is not reused as-is for first-week (no dates to match against) but its module is a reasonable place for a sibling first-week comparison function, and its `TargetOutcome`/`SessionOutcome`/`WeekComparison`-style Pydantic result shapes are a reasonable pattern to mirror for consistency.
-- `weekly_plan_outcomes` table + `WeeklyPlanOutcomeRepository` (`BUILT`) already provide one-row-per-athlete-per-week upsert persistence with a JSON payload column (`comparison_jsonb`) and a unique constraint on `(athlete_id, week_start)`. Whether first-week outcomes reuse this exact table is an open question (below) — but the *pattern* (JSON payload, upsert, one row per athlete-week) is proven and should be followed even if a new table is needed.
-- No fitness-snapshot table exists anywhere. `athlete_self_reported_baselines` is mutable, one row per athlete, no history.
-- `format_pace_min_sec()`, `athlete_zones.py`'s `ReferenceHeartRateZones`, and the zone-resolution formulas in `zones.py` are all reusable as-is for the comparison math — no new unit conventions should be introduced.
+## Locked signal vocabulary
 
----
+Status: `DESIGNED`; the exact rule table remains `PROPOSED`. Values are
+`ABSORBED_WELL`, `ON_TRACK`,
+`WATCH_EFFORT`, `BACK_OFF`, and `INSUFFICIENT_EVIDENCE`.
 
-## Locked decisions this brief must respect
+## Phase 0 — required decisions
 
-(Full text: `docs/decisions/locked.md`, Evaluator section.)
+Status: two `OPEN DECISION` gates remain. Approve or amend the proposed tables
+in `docs/decisions/open.md` before implementing any evaluator behavior:
 
-- Matching: athlete-explicit linking, not date/greedy inference.
-- Missed sessions: discarded from comparison math, never penalized, never deleted from the record.
-- HR effort check: soft flag only, never auto-adjusts zones.
-- Judge by intent (intensity) first, volume second.
-- Evaluator emits facts + suggested signal; it does not make the planning decision.
-- `overall_signal` (or equivalent) computed by a deterministic rule table, not an LLM call.
+1. E6 numerical tolerances, HR-quality limits, and the structured
+   RPE-range-to-reference-HR-band mapping.
+2. E7 deterministic signal precedence, thresholds, and minimum comparable
+   coverage.
 
-## Remaining product questions (do not resolve without asking — see `docs/decisions/open.md`)
+Fitness state, `last_week_feedback`, ongoing-comparator convergence, and future
+planner/load policy are explicitly downstream and do not block this brief.
 
-1. Evaluation trigger: manual "Evaluate week" button, automatic at week-end, or both?
-2. How should completion rate treat an intentionally-cancelled (vs. simply missed) session?
-3. Should linking happen immediately after screenshot import, or as a separate later step?
-4. Exact `last_week_feedback` field list?
-5. Is the first fitness snapshot created after evaluation, or seeded at onboarding?
-6. Is the first-week matching decision (explicit linking) meant to stay permanently different from the ongoing planner's greedy-date matching, or should the ongoing planner eventually converge on explicit linking too?
-7. Does the first-week outcome reuse `weekly_plan_outcomes`, or need a distinct table?
+## Non-goals
 
----
+- General Planner, Stage Planner, phase cutting, or phase re-cutting.
+- Wiring the ongoing planner into production.
+- Changing the ongoing `compare_week()` algorithm.
+- CTL, TSS, training-load activation, vacation/recovery policy, or medical
+  interpretation.
+- Fitness-state tables, state update rules, or observed-tier progression; those
+  belong to `docs/briefs/backlog/fitness-state.md`.
+- Automatic matching presented as athlete-confirmed truth.
+- Broad workout or database cleanup.
+- UI polish beyond the approved link/effort/evaluate/review path.
 
-## Proposed architecture
+## Proposed implementation shape
 
-New module, mirroring the existing `weekly_planning` package structure rather than inventing a new location:
+Status: `PROPOSED` technical decomposition. Exact names may change while
+preserving boundaries.
 
-- `backend/app/services/weekly_planning/first_week_evaluation.py` (new) — the deterministic comparison + aggregation functions, analogous to `comparison.py` but for first-week menus (no dates, explicit links instead).
-- A new repository method or small new repository for reading/writing the athlete → workout → planned-session link (exact shape depends on question 7's resolution).
-- `WeeklyPlanningService` gains the linking + evaluation entry points, replacing today's unconditional `None` return for `FirstWeekPlan` in `compare_finished_week()` — or a new sibling method, if triggering (question 1) ends up wanting a distinct manual entry point rather than reusing the existing automatic one.
+```mermaid
+flowchart LR
+    P["Persisted FirstWeekPlan"]
+    W["Owned Workout actuals"]
+    R["Stable session-reference resolver"]
+    L["Owned link repository/service"]
+    X["Evaluator evidence projection"]
+    C["Pure per-session comparison"]
+    A["Pure weekly aggregation"]
+    O["Outcome repository"]
+    F["last_week_feedback reader"]
+    S["Fitness-state input port<br/>separate brief"]
 
-## Persistence requirements (without assuming table shapes)
+    P --> R --> L
+    W --> L
+    W --> X
+    L --> C
+    X --> C --> A --> O --> F
+    O --> S
+```
 
-State that must exist somewhere, without prescribing exact tables:
+Keep pure calculations separate from persistence and delivery. The service
+orchestrates ownership checks, link state, week closure, calculation, and an
+atomic/idempotent persistence operation. Telegram handlers remain thin.
 
-- A durable link from one `Workout` row to one identified planned session, created by explicit athlete action, not inferred. Two plausible shapes: (a) a new nullable FK-like column on `Workout` (or a small join table) pointing at a new stable session identifier; (b) a link recorded on the outcome/comparison side instead, keyed by `(workout_id, session_id)` pairs in a JSON payload. Either can satisfy the locked decision; which one depends on how the stable session identifier (below) is implemented.
-- A stable identifier for each planned session within a `WeeklyTrainingPlan`'s `plan_jsonb`. This likely means adding a `session_id` (UUID, assigned at generation time, before the plan is ever shown to the athlete) to `PlanSession` in the schema, then propagating it through generation, validation, and rendering. This is a schema change to `backend/app/schemas/weekly_plans.py` and is the first implementation step — nothing else here can be built without it.
-- One persisted deterministic comparison result per athlete per evaluated first week (matched/missed/extra sessions, per-session target outcomes, weekly aggregate, suggested signal) — following the `weekly_plan_outcomes` upsert pattern, in that table or a sibling one (question 7).
-- One persisted fitness-state row per athlete per evaluated week, append-only (per `docs/design/fitness-state.md`'s recommendation) — new table, exact columns deferred until `last_week_feedback`'s field list (question 4) is resolved, since the snapshot's fields are downstream of what the evaluator produces.
-- A `last_week_feedback` value readable by a future planner — likely derived from the two persisted rows above at read time, rather than a third copy of the same data, but this is an implementation choice once question 4 is answered.
+## Deterministic versus LLM responsibility
 
----
+| Concern | Owner |
+|---|---|
+| Identity, ownership, linking constraints, calculations, classification, aggregation, signal, persistence | `DETERMINISTIC CODE` |
+| Link/evaluate/review choices | Athlete through the approved UI |
+| Concrete next-week session design | Future Weekly Planner `LLM`, outside this brief |
+| Numerical tolerances and signal/coverage thresholds | `PRODUCT DECISION` before implementation |
 
-## TDD task order
+The evaluator makes no LLM call. Athlete-facing explanations are rendered from
+deterministic facts/reason codes and approved templates.
 
-Write tests first for each step; do not proceed to the next step until the current one's tests pass.
+The HR target-field prerequisite is complete: both model-facing weekly
+prescriptions reject HR intensity and target fields, tests cover both paths,
+and wider persisted types retain legacy compatibility.
 
-1. **Schema:** `PlanSession` gains a stable `session_id`. Test: generating a first-week plan produces sessions with unique, stable ids that survive a round-trip through validation and persistence (`plan_jsonb` serialize/deserialize).
-2. **Linking:** a service method that records an athlete's explicit link between a `workout_id` and a `session_id`, rejecting a link to a session from a different athlete's plan or a nonexistent session id. Test: valid link succeeds; cross-athlete and invalid-session-id links are rejected; re-linking the same workout to a different session updates rather than duplicates.
-3. **Per-session comparison:** pure function, given a linked (planned session, workout) pair, returns the deterministic `TargetOutcome`-style comparison per `docs/design/first-week-evaluator.md`'s metric list. Test each worked-example scenario from that document (aerobic-efficiency positive signal, `OVERCOOKED`, ambiguous-fatigue) as a fixture, plus a session with no comparable targets (e.g. RPE-fallback discipline with no numeric metric at all) to confirm it degrades to intent-only comparison rather than erroring.
-4. **Missed/extra classification:** given a plan's full session set and the set of linked workouts, classify unlinked sessions `MISSED` and unlinked workouts `EXTRA`. Test: a session with a link is neither; a workout linked to nothing is `EXTRA`; a session with nothing linked to it is `MISSED`; both can be true simultaneously in the same week without conflict.
-5. **Weekly aggregation:** given the full set of per-session comparisons plus missed/extra counts, compute the aggregate facts and the deterministic suggested signal (`ABSORBED_WELL`/`ON_TRACK`/`WATCH_EFFORT`/`BACK_OFF`). Test each signal's boundary condition explicitly (define the rule table as part of this step, in code and in a test that pins its behavior, not just in prose).
-6. **Persistence:** the evaluation result upserts correctly (idempotent re-run for the same athlete-week produces the same row, not a duplicate), respects the chosen table/schema, and is retrievable by athlete + week.
-7. **Fitness snapshot:** given a persisted evaluation result, append a new fitness-state row; test that this is truly append-only (re-running the same week's evaluation does not create a duplicate snapshot, but does not overwrite the prior week's row either) and that a multi-week history is readable in order.
-8. **`last_week_feedback` contract:** a read function producing the agreed field list (once question 4 is resolved) from the two persisted rows above. Test the shape is stable and handles the "no prior week" case (a brand-new athlete) without erroring.
-9. **Trigger wiring:** whichever mechanism question 1 resolves to (manual command, automatic check, or both) — test that triggering twice for the same week is safe (idempotent), and that triggering before the plan's week has actually elapsed is rejected or handled per the resolved decision.
-10. **End-to-end:** a full first-week plan → screenshot import → link → evaluate → snapshot flow, exercised as an integration test through the same layers the Telegram bot would call.
+### Stable session reference
+
+Add a code-generated UUID after model generation and before persistence. Never
+use array ordinal as permanent identity and never ask the LLM to invent an ID.
+Bump the plan schema version and define schema-v4 loading behavior. A revision
+preserves an ID only when the intended session is unchanged; replacement must
+be explicit and traceable.
+
+### Durable links
+
+A pre-evaluation link must be queryable, relinkable according to the chosen
+policy, and owner-scoped. Storing links only inside the final outcome payload is
+not sufficient for an interactive linking workflow. A normalized association
+record is the leading `PROPOSED` design. Its unique constraints must enforce the
+locked v1 one-to-one primary match; its update/revision behavior depends on the
+relinking decision.
+
+Every write must prove:
+
+- the plan belongs to the athlete;
+- the session reference resolves inside that exact plan revision;
+- the workout belongs to the same athlete;
+- the workout satisfies the approved eligibility rules; and
+- the operation respects link uniqueness/relinking rules.
+
+### Evaluator evidence projection
+
+Do not reuse `FitnessWorkoutEvidence` unchanged. Introduce or extend a typed,
+read-only projection that can carry the actual values the design requires:
+duration, moving duration, distance, canonical pace, cycling speed and power,
+summary HR and timestamped HR observations with quality. Optional feel text is
+outside numerical evaluation and must be isolated from planner prompts.
+
+Source-selection rules must be explicit and return provenance/quality. Missing
+data returns `None`/`UNKNOWN`, never zero. Pace comparisons must account for
+lower-is-faster direction; power comparisons use higher-is-harder direction.
+
+### Evaluation and aggregation
+
+Pure functions should accept already-owned, typed inputs:
+
+1. resolve accepted links into matched pairs;
+2. classify unlinked plan entries and eligible workouts;
+3. compare scalar targets and intensity ranges;
+4. add HR effort and quality flags;
+5. aggregate named denominators by discipline and week; and
+6. apply the versioned deterministic signal rule table.
+
+The output contract should include plan id/revision, week/timezone, evaluator
+version, source workout/link references, per-session facts, aggregate facts,
+quality flags, signal, and signal reasons.
+
+## Persistence requirements
+
+Link and outcome writes must be idempotent and consistent. If links can be
+edited after evaluation, follow the approved correction/revision policy; do not
+silently replace an auditable result. The outcome exposes a stable downstream
+input for the fitness-state brief but does not create state in this work package.
+
+Reusing `weekly_plan_outcomes` requires, at minimum, a payload discriminator and
+schema/calculation version because its current JSON shape is `WeekComparison`.
+Its unique athlete/week constraint also means it cannot store independent
+first-week and dated-plan outcome rows for the same athlete/week without a
+schema decision.
+
+## Test-first implementation order
+
+1. **Decision fixtures and vocabulary.** After E6/E7 approval, encode the
+   accepted statuses,
+   denominators, signal table, time eligibility, metric precedence, and missing
+   data behavior as parameterized tests.
+2. **Stable session references.** Test uniqueness, deterministic ownership,
+   serialization round-trip, superseded plan revisions, and approved schema-v4
+   compatibility. Prove identifiers are code-owned rather than model output.
+3. **Link persistence/service.** Test valid link, nonexistent reference,
+   cross-athlete plan/workout, wrong revision, uniqueness, relink behavior,
+   duplicate source records, and concurrency/double-click safety.
+4. **Evaluator evidence projection.** Test stored cycling power/speed and
+   average/max HR become numeric evidence; timestamped HR retains quality;
+   canonical pace is selected according to policy; missing metrics remain
+   unknown.
+5. **Per-session pure comparison.** Pin the four numeric examples from the
+   design, pace-direction behavior, power, swimming pace, duration/distance,
+   the approved RPE-range-to-reference-HR-band mapping, proof that prose is not
+   parsed for intensity, HR ambiguity, and no-comparable-metric behavior.
+6. **Missed/extra classification.** Test both statuses in the same week,
+   cancellation semantics, candidate eligibility, timezone boundaries, and
+   that missed sessions never enter capability denominators.
+7. **Weekly aggregate and signal.** Pin every named denominator and every rule
+   boundary. Reproduce the design's `3/4`, `131/130`, `131/175`, and `166 min`
+   example. Assert signal reasons are stable and versioned.
+8. **Outcome persistence.** Test the immutable storage shape, payload version,
+   athlete/week/plan revision scope, idempotent replay, and correction policy.
+9. **Fitness-state handoff boundary.** Test the persisted outcome exposes all versioned
+   evidence references required by the separate fitness-state input contract;
+   do not write a state row here.
+10. **Trigger and delivery.** Test the approved link/evaluate/review UI,
+    premature/duplicate triggers, message chunking, and first-week-only routing.
+11. **Integration flow.** Persist plan → log workout → link → evaluate → persist
+    outcome → read downstream evidence, with real PostgreSQL
+    semantics where constraints/transactions matter.
+12. **Regression.** Keep the existing dated-plan comparator behavior green and
+    prove no production route silently switches to `OngoingWeeklyPlanner`.
 
 ## Acceptance criteria
 
-- All TDD steps above pass, with tests committed alongside the code they test (per the project's "write tests first" convention).
-- No change to the ongoing planner's `compare_week()` behavior — verified by re-running `test_weekly_planning_comparison.py` unchanged and green.
-- No HR value is ever used as a match/mismatch pass-fail gate — only as a soft flag, verified by a test that asserts a HR-outside-zone session still produces a valid (non-erroring, non-auto-adjusting) comparison result.
-- A missed session never appears in any ratio/average whose denominator implies it should count as zero performance — verified by a test asserting the specific denominator used (per whatever question 2's resolution defines).
-- `generation_source`-style observability: the evaluation result records enough to distinguish "evaluated cleanly" from any degraded/fallback path, consistent with the project's observability principle, if any fallback path exists at this layer (e.g. missing workout detail data).
+- An athlete can identify a first-week menu session and explicitly link an
+  owned workout through the approved UI.
+- Link cardinality, relinking, historical-plan, and timezone rules are enforced
+  at service and persistence boundaries.
+- Actual RPE is not required or inferred. Optional feel text does not affect
+  evaluation and is not copied automatically into planner input.
+- Stored power, speed, summary HR, sampled HR quality, duration, distance, and
+  pace reach the evaluator projection with provenance.
+- Matched sessions produce deterministic comparisons in the units and direction
+  specified by the design.
+- HR context uses only the approved structured mapping and qualified actual HR;
+  it never derives an intensity class from purpose/guidance prose.
+- Missed and extra work remain visible. Missed work never contributes a zero to
+  capability math, and every percentage names/pins its denominator.
+- The weekly signal is deterministic, versioned, and accompanied by reasons.
+- Link and outcome persistence is owner-scoped, transactional, idempotent, and
+  auditable under correction.
+- A typed, versioned downstream input is available to the fitness-state
+  milestone without pretending state history has been implemented.
+- The approved `last_week_feedback` projection is readable, but no planner is
+  silently wired to consume it as part of this brief unless explicitly added to
+  scope.
+- `compare_week()` remains behaviorally unchanged.
 
-## Documentation updates required after implementation
+## Observability requirements
 
-- `docs/CLAUDE.md` "Current implementation status" section: move the newly-built pieces from NOT YET BUILT to BUILT, with the same code-citation style used elsewhere in that file.
-- `docs/design/first-week-evaluator.md`: update the per-stage status table (all `PROPOSED` rows that are now `BUILT`), and replace the "illustrative numbers" caveat on the worked examples with a note confirming they were validated against real test fixtures, or replace the numbers with the actual fixture values used.
-- `docs/design/fitness-state.md`: replace the recommendation section with a description of what was actually built, once implemented.
-- `docs/decisions/open.md`: remove resolved questions (or move them to `locked.md` with their resolution recorded), keep unresolved ones.
-- `docs/roadmap.md`: move completed steps (1-7 in the current numbering) to "Done."
+- Emit structured lifecycle events for link created/relinked/rejected,
+  evaluation requested/completed/failed, idempotent replay, and correction.
+- Include athlete-safe identifiers, plan/week, evaluator version, matched/
+  missed/extra counts, coverage, signal, and reason codes. Do not log workout
+  titles, notes, feel text, raw HR samples, prompt context, or the `Settings`
+  object.
+- Count evaluation outcomes, missing-effort/metric coverage, ownership
+  rejections, duplicate exclusions, and persistence/correction failures.
+- Record enough version/provenance to reproduce a result without adding an LLM
+  trace; this path must make no model call and no LLM-usage record.
+- Alerting thresholds and dashboards are operational follow-up, not invented in
+  this brief.
 
-## Deployment / live-verification checklist
+## Verification commands
 
-Per the project's "deploy ≠ pass tests" convention:
+Run from `backend/` after implementation:
 
-- [ ] `docker compose up -d --build` after merge — passing tests is not sufficient confirmation.
-- [ ] Manually generate a first-week plan for a test athlete, log a workout via screenshot, link it, trigger evaluation (whatever mechanism was built), and confirm a real weekly outcome + fitness snapshot row exist in the live database.
-- [ ] Confirm the ongoing planner's existing weekly comparison flow is unaffected (`/`-command or whatever surface triggers `compare_finished_week()` for an ongoing-mode athlete still behaves as before).
-- [ ] Confirm no HR value appears anywhere as a prescribed target in the first-week evaluator's output (spot-check the persisted `comparison_jsonb`-equivalent payload directly, not just the rendered message).
-- [ ] Confirm a missed session is visible in the athlete-facing weekly summary (not silently dropped) even though it's excluded from performance averages.
+```powershell
+pytest
+ruff check .
+ruff format --check .
+mypy app
+alembic upgrade head
+```
+
+New tests that require real PostgreSQL and a real model provider must use the
+registered `@pytest.mark.live` marker. The evaluator calculation itself should
+need no real provider.
+
+## Documentation updates after implementation
+
+- Move only verified capabilities from `DESIGNED`/`PROPOSED` to `BUILT` in the
+  owning design/brief, `docs/README.md`, `docs/roadmap.md`, and the historical
+  status appendix in `docs/CLAUDE.md`.
+- Move resolved product questions from `docs/decisions/open.md` to
+  `docs/decisions/locked.md`, recording the chosen behavior.
+- Document the real table/contract and plan schema compatibility after the
+  migrations and tests exist; do not update docs in advance of code.
+- Keep internal callable behavior distinct from production reachability.
+
+## Deployment and live verification
+
+- [ ] Apply migrations in a disposable environment and inspect constraints and
+      downgrade behavior.
+- [ ] Generate a new first-week plan and, if supported, load a schema-v4 plan.
+- [ ] Log workouts using screenshot and at least one import path.
+- [ ] Link workouts through the athlete-facing flow; verify no RPE is required.
+- [ ] Confirm matched/missed/extra output and every displayed denominator.
+- [ ] Confirm stored cycling power and screenshot summary HR reach evaluation.
+- [ ] Re-run evaluation and exercise the approved correction path.
+- [ ] Inspect the persisted outcome, fitness-state handoff references,
+      provenance, and feedback without exposing private notes/titles; do not
+      expect snapshot history until the separate fitness-state brief ships.
+- [ ] Confirm HR remains informational and one HR mismatch changes no zone.
+- [ ] Confirm no dated ongoing plan/comparison flow became reachable by accident.

@@ -88,6 +88,17 @@ class PrescribedIntensityTarget(IntensityTarget):
     ]
 
 
+class PrescribedSessionTargets(_WeeklyPlanSchema):
+    """Model-facing targets; completed-workout HR is never prescribed here."""
+
+    duration_minutes: int | None = Field(default=None, ge=5, le=360)
+    distance_meters: float | None = Field(default=None, gt=0)
+    average_power_watts: int | None = Field(default=None, gt=0, le=1000)
+    pace_seconds_per_km: int | None = Field(default=None, gt=0)
+    swim_pace_seconds_per_100m: int | None = Field(default=None, gt=0)
+    rpe: int | None = Field(default=None, ge=1, le=10)
+
+
 class StrengthSessionTargets(_WeeklyPlanSchema):
     """Strength menus intentionally expose duration, and no dosage targets."""
 
@@ -134,6 +145,46 @@ FirstWeekSession = Annotated[
 ]
 
 
+class PlanSessionPrescription(_WeeklyPlanSchema):
+    """Model-authored session intent with no heart-rate prescription fields."""
+
+    discipline: Discipline
+    purpose: str = Field(min_length=1, max_length=120)
+    intensity: PrescribedIntensityTarget
+    objective: str = Field(min_length=1, max_length=200)
+    targets: PrescribedSessionTargets
+    execution: str = Field(min_length=1, max_length=800)
+
+    @model_validator(mode="after")
+    def require_duration_target(self) -> PlanSessionPrescription:
+        if self.targets.duration_minutes is None:
+            raise ValueError("sessions require targets.duration_minutes")
+        return self
+
+
+class FirstWeekEnduranceSessionPrescription(PlanSessionPrescription):
+    """A model-authored first-week endurance session."""
+
+    discipline: Literal[
+        Discipline.RUNNING,
+        Discipline.CYCLING,
+        Discipline.SWIMMING,
+    ]
+
+
+class FirstWeekStrengthSessionPrescription(PlanSessionPrescription):
+    """A model-authored first-week strength session with duration-only targets."""
+
+    discipline: Literal[Discipline.STRENGTH]
+    targets: StrengthSessionTargets  # type: ignore[assignment]
+
+
+FirstWeekSessionPrescription = Annotated[
+    FirstWeekEnduranceSessionPrescription | FirstWeekStrengthSessionPrescription,
+    Field(discriminator="discipline"),
+]
+
+
 def _coerce_first_week_sessions(value: object) -> object:
     """Accept legacy in-process PlanSession instances at the menu boundary."""
 
@@ -151,10 +202,9 @@ def _coerce_first_week_sessions(value: object) -> object:
     return {**value, "sessions": normalized}
 
 
-class SessionPrescription(PlanSession):
+class SessionPrescription(PlanSessionPrescription):
     """Coach-authored session intent before deterministic calendar placement."""
 
-    intensity: PrescribedIntensityTarget
     priority: Literal["ESSENTIAL", "IMPORTANT", "OPTIONAL"] = "IMPORTANT"
     preferred_weekdays: tuple[
         Literal[
@@ -194,7 +244,9 @@ class FirstWeekPlanPrescription(_WeeklyPlanSchema):
     """Unscheduled probe sessions proposed by the first-week coach."""
 
     week_start: date
-    sessions: tuple[FirstWeekSession, ...] = Field(min_length=1, max_length=14)
+    sessions: tuple[FirstWeekSessionPrescription, ...] = Field(
+        min_length=1, max_length=14
+    )
     guardrails: tuple[str, ...] = Field(default=(), max_length=12)
     logging_instructions: tuple[str, ...] = Field(default=(), max_length=8)
     tests: tuple[str, ...] = Field(default=(), max_length=0)

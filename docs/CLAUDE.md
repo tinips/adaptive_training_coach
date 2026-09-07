@@ -1,3 +1,8 @@
+> **Historical sprint input / cleanup candidate.** This file is not a canonical
+> architecture or status source. Use `docs/README.md` for the documentation map
+> and the linked design/decision documents for current behavior. Retain this
+> file until a separately approved documentation cleanup archives or deletes it.
+
     # Task: Update project documentation for the next implementation
     You are working inside the Adaptive Training Coach repository.
     ## Goal
@@ -95,6 +100,7 @@
     
     Provide last_week_feedback to the future planner
     
+    ```
     
 
 ### Matching decision
@@ -256,43 +262,69 @@ When finished, report:
 -   Decisions that remain open
 -   Recommended next implementation
 -   Confirmation that no application code was changed Stop after documentation and planning. Wait for my approval before implementation.
-## Current implementation status (verified against code, 2026-09-05)
+## Current implementation status (verified against code, 2026-09-06)
 
-Every line below was checked against the code, not assumed from earlier docs. Two corrections from earlier drafts of this file are folded in below: the fitness-snapshot table that does not exist (see NOT YET BUILT), and the ongoing-planner comparison mechanism that does (see BUILT). The one disagreement left unresolved rather than corrected is logged as question 6 in `docs/decisions/open.md`.
+`BUILT` means code exists; reachability is stated separately. `DESIGNED` is a
+locked target with no implementation. `PROPOSED` is a recommendation, and
+`OPEN DECISION` needs sign-off.
 
-### BUILT
+### BUILT and production-wired
 
-- First-week planner: generate → validate → repair (≤2) → deterministic fallback, `generation_source` persisted (`backend/app/services/weekly_planning/service.py`, `validation.py`). See `docs/design/first-week-planner.md` for the full trace.
-- Baseline tiers (`UNPREPARED`/`DEVELOPING`/`TRAINED`/`WELL_TRAINED`), computed in code from self-reported volume + recent evidence (`backend/app/services/weekly_planning/tiers.py`).
-- Resolved intensity zones for the first week: FTP→power, race→pace, else RPE fallback, computed in code (`backend/app/services/weekly_planning/zones.py`). HR is structurally excluded from this resolution.
-- Screenshot workout capture, including average/max power, speed, cadence, and pace extraction, with an explicit ask-the-athlete fallback for HR (`backend/app/services/workout_screenshot/service.py`, `backend/app/integrations/llm/vision.py`).
-- Cycling power capture on actuals (`CyclingWorkoutDetails.average_power_watts`/`max_power_watts`, migration `0051_cycling_power`).
-- Pace/speed derivation from distance + duration, recomputed at read time across all import sources (`backend/app/schemas/workouts.py` validators).
-- Age-estimated HR zones (Tanaka), display/reference-only, never entering plan generation (`backend/app/services/athlete_zones.py`).
-- `/zones` command: read-only, plan-independent, no LLM call (`backend/app/bot/service.py:541`).
-- Ongoing weekly planner: generates dated sessions from current constraints; validated separately from the first-week rule set (`backend/app/services/weekly_planning/service.py`, `validation.py`).
-- Plan validation, repair, fallback, and `generation_source` provenance — applies to both planners (`weekly_training_plans.validation_jsonb`).
-- **Weekly plan comparison for the ongoing (dated) planner only** — `compare_week()` (`backend/app/services/weekly_planning/comparison.py`) matches actual workouts to planned sessions by **nearest same-discipline date, greedily**, and persists the result via `WeeklyPlanOutcomeRepository` into the `weekly_plan_outcomes` table (migration `0050_weekly_plan_outcomes`). This is real, shipped, and tested (`backend/tests/unit/test_weekly_planning_comparison.py`) — but it is a *different* mechanism from the explicit-linking approach locked for the first-week evaluator below, and it does not run for first-week plans at all: `compare_finished_week()` returns `None` immediately when the stored plan is a `FirstWeekPlan`.
+- `FirstWeekPlanner`: goal-excluded menu generation, deterministic tiers/zones,
+  validation, at most two model repair calls, deterministic fallback,
+  persistence, `generation_source`, and Telegram rendering.
+- Workout capture through settings-gated screenshot and TCX paths (screenshot
+  defaults off; TCX defaults on). Discipline detail rows can store canonical
+  pace/speed, cycling power/cadence, and average/max HR. Pace/speed is
+  recomputed by Pydantic validators at construction before persistence, not “at
+  read time.” Apple Health job/repository remnants are not a live upload path.
+- Age-estimated, display-only HR zones and the `/zones` command.
+- One mutable self-reported baseline per athlete and deterministic workout
+  evidence calculation over a configured recent window (`planner_window_days`,
+  default 30 days) on demand. Neither is fitness-state history.
 
-### NOT YET BUILT
+### BUILT but not production-wired
 
-- Stable identifier for an individual planned session. Plans persist as an opaque `plan_jsonb` blob on `WeeklyTrainingPlan`; `PlanSession` carries no session-level id today.
-- Explicit linking of a logged workout to a first-week planned session (no UI, no data model, no service method).
-- First-week evaluation of any kind — the code path exists only as a deliberate no-op (`compare_finished_week()`, first-week branch).
-- Per-session deterministic comparison for the first week specifically (the existing `compare_week()` assumes scheduled dates, which first-week menu sessions do not have).
-- Weekly aggregate evaluation and suggested signal (`ABSORBED_WELL`/`ON_TRACK`/`WATCH_EFFORT`/`BACK_OFF` or equivalent) for the first week.
-- Fitness snapshot history. **Correction:** earlier drafts of this doc described `athlete_fitness_snapshots` as an existing, populated, append-only table. It does not exist in the schema or migrations. What exists today is `athlete_self_reported_baselines` — one mutable row per athlete (unique constraint on `athlete_id`), replaced wholesale on a goal change, with no history — plus a compute-on-read fitness calculator/service over raw `Workout` rows. There is no persisted week-over-week fitness trend anywhere yet.
-- `last_week_feedback` — no such field, contract, or persistence exists yet.
-- General planner (phase cutting).
-- Stage planner (per-phase weekly skeleton).
-- CTL/TSS activation and longer-term tiered adaptation.
+- `OngoingWeeklyPlanner` can generate and validate dated plans in service code,
+  but `backend/app/bot/main.py` composes only `FirstWeekPlanner`; there is no
+  production transition to ongoing mode.
+- `compare_week()` greedily pairs dated sessions to nearest unused
+  same-discipline workouts. `compare_finished_week()` can upsert its
+  `WeekComparison` into `weekly_plan_outcomes`, but no production caller invokes
+  the method and the Telegram planning port does not expose it. First-week
+  plans return `None` before comparison.
 
-### DESIGNED (locked or specified, not yet implemented)
+### Important current data gaps
 
-- First-week evaluator flow, matching decision, missed-workout rule, per-session comparison spec — see `docs/design/first-week-evaluator.md`.
-- Fitness-state history structure options — see `docs/design/fitness-state.md`.
-- Three-planner-layer architecture and division of deterministic vs. LLM responsibility — see `docs/design/planner-architecture.md`.
+- `FitnessWorkoutEvidence` omits stored cycling power/speed and numeric summary
+  HR; the dated comparator returns `None` for actual cycling power and reads
+  only reliable timestamped HR observations.
+- The first-week instructions ask athletes to record RPE and how the session
+  felt, but no write model persists either value.
+- `ActivitySource.FIT` remains an enum value, but no FIT adapter/import path is
+  present in the current repository.
+- The no-HR-prescription invariant is enforced at both model-facing weekly
+  boundaries: HR intensity and HR target fields are excluded. Wider persisted
+  types retain legacy compatibility, and completed-workout HR remains evidence.
 
-### PROPOSED / OPEN DECISION
+### DESIGNED / PROPOSED / OPEN DECISION — no implementation
 
-See `docs/decisions/open.md` for the full list, including the reconciliation question between the new first-week evaluator's locked explicit-linking rule and the already-shipped greedy nearest-date matching used by the ongoing planner's `compare_week()`.
+- A stable first-week planned-session reference and explicit workout link.
+- Any first-week per-session evaluation, missed/extra aggregation, signal rule,
+  trigger, or athlete-facing summary.
+- Fitness-state snapshot/history, correction policy, latest/history reads, or
+  `last_week_feedback` contract/consumer.
+- A production multi-week transition, General Planner, or Stage Planner.
+- CTL/TSS activation and longer-term adaptation.
+
+### DESIGNED, PROPOSED, and OPEN DECISION
+
+- `DESIGNED`: explicit first-week linking, missed-workout semantics,
+  deterministic comparison/aggregation principles, separation of fitness-state
+  roles, and the three planner responsibilities.
+- `PROPOSED`: hybrid versioned fitness history plus a current derived view/cache;
+  the storage approach remains an `OPEN DECISION`.
+- `PROPOSED`: specific identifiers, other persistence shapes, result vocabulary, and
+  technical decomposition in the evaluator brief.
+- `OPEN DECISION`: the authoritative blocking questions are in
+  `docs/decisions/open.md`.

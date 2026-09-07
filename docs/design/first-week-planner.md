@@ -1,5 +1,11 @@
 # The First-Week Planner — Complete Flow
 
+Status: the generation, validation, fallback, persistence, and Telegram display
+path described here is `BUILT` and production-wired. Workout-to-session linking,
+first-week evaluation, fitness-state history, and next-plan feedback are
+`DESIGNED`/`PROPOSED`/`OPEN DECISION` as identified in their linked documents;
+none is implemented.
+
 ## Purpose (what it's for)
 
 It generates the athlete's **very first week** right after onboarding. Its job is **not** to train toward the race — it's a **baseline/probe week**: prescribe sensible volume + controlled intensity, gather signal about the athlete, and stay safe. Goal context (event date, finish time) is deliberately **excluded** so week 1 measures the athlete rather than chasing the goal.
@@ -59,9 +65,9 @@ If none of the three thresholds exist for a discipline, the zone falls back to *
 
 The isolation is structural, not just a naming convention: `app/services/athlete_zones.py` **imports from** `weekly_planning.zones` (for `hr_zone_bands`, `power_zones`, `running_pace_zones`, `swim_pace_zones`), and nothing under `app/services/weekly_planning/` or `app/workflows/prompts/` imports anything back from `athlete_zones.py`. `ReferenceHeartRateZones` never enters `prompt_context` and is never seen by the LLM or the validator that gates the first-week prescription.
 
-There is a second, independent enforcement layer beyond the resolver itself: `_first_week_zone_violations()` (`validation.py:382-415`) rejects any session whose `intensity.metric` isn't `RPE` when its zone is `RPE_FALLBACK` — and after the fix above, HR is `RPE_FALLBACK` for every first-week discipline. So even a model that ignored the prompt and invented a heart-rate target would be caught by validation and repaired back to RPE-only (see Step 6-7) before it ever reached the athlete. The "no HR prescription" guarantee holds at the resolver, the prompt instruction, and the validator — three independent layers, not one.
+There is a second enforcement layer beyond the resolver itself: `_first_week_zone_violations()` (`validation.py:384-419`) rejects a session whose `intensity.metric` is not `RPE` when its zone is `RPE_FALLBACK`. The model-facing `FirstWeekPlanPrescription` now also uses prescription-only endurance targets and intensity, so it rejects `HEART_RATE_BPM`, `average_hr_bpm`, and `hr_range_bpm` before generation can accept them. Wider persisted session types retain the old fields only to load legacy plans; shared validation rejects legacy HR intensity or target prescriptions.
 
-**Why it's good:** intensity targets are **grounded in the athlete's real data, computed deterministically** — not hallucinated by the model. This was the fix that stopped the model from inventing paces. Numbers when we have them, feel when we don't — and heart rate is available to the athlete for their own reference, without ever becoming something the plan tells them to hit.
+**Why it's good:** the primary intensity resolver is **grounded in the athlete's real data and computed deterministically** — not invented by the model. Numbers are used when the supported threshold exists and RPE/feel otherwise. Heart rate remains separate reference information and completed-workout evidence; it is absent from model-facing prescription fields.
 
 ---
 
@@ -90,7 +96,7 @@ This tier — not the model's guess — drives *how demanding* the week is, and 
 -   Treat `resolved_intensity_zones` as authoritative (numeric within bands, or RPE fallback — never invent pace/power/HR when a discipline is `RPE_FALLBACK`)
 -   Scale demand by **tier + coaching style** (demanding + prepared → harder within the tier's safety floor; unprepared/conservative → easier); coaching style never overrides the unprepared rule
 -   Forbid maximal/all-out/VO2max tests
--   **Strength = movements, not numbers:** duration-only in `targets`; no sets, reps, loads, percentages, or numeric RPE anywhere in strength targets or execution text. Describe the movement and, for equipped strength, its relative load in words ("light", "moderate") rather than a number — e.g. "controlled goblet squats with a light weight," never "3×10 squats" or "squats at 60% of 1RM." The prompt gives **two** worked examples: one bodyweight session, one equipped-gym session, so the model has a template for either equipment situation rather than defaulting to generic, equipment-blind phrasing.
+-   **Strength = movements, not numbers:** duration-only in `targets`; no sets, reps, loads, percentages, or numeric RPE anywhere in strength targets or execution text. Describe the movement and, for equipped strength, its relative load in words ("light", "moderate") rather than a number — e.g. "controlled goblet squats with a light weight," never "3×10 squats" or "squats at 60% of 1RM." The prompt gives **two** worked examples: one bodyweight session, one equipped-gym session, so the model has a template for either equipment situation rather than defaulting to generic, equipment-blind phrasing. Model-facing schemas also exclude all HR prescription fields.
 -   Honor desired sessions/discipline (but don't force a zero-baseline discipline hard)
 -   Produce distinct sessions, one short complete `purpose` each (≤120 characters, one sentence)
 -   Emit guardrails + logging instructions
@@ -101,14 +107,14 @@ This tier — not the model's guess — drives *how demanding* the week is, and 
 
 ## Step 5 — The output schema (structured, discriminated)
 
-The model must return a `FirstWeekPlanPrescription` (`backend/app/schemas/weekly_plans.py:176-189`), a discriminated union on `discipline`:
+The model must return a `FirstWeekPlanPrescription` (`backend/app/schemas/weekly_plans.py:193-205`), containing sessions from a discriminated union on `discipline`:
 
--   **`FirstWeekEnduranceSession`** (RUNNING/CYCLING/SWIMMING) → `targets: SessionTargets`, which can hold `duration_minutes` (required), plus `distance_meters`, `average_hr_bpm`, `hr_range_bpm`, `average_power_watts`, `pace_seconds_per_km`, `swim_pace_seconds_per_100m`, `rpe` — all optional except duration.
--   **`FirstWeekStrengthSession`** (STRENGTH) → `targets: StrengthSessionTargets`, which has **only** `duration_minutes` (`gt=0, le=360`). The forbidden fields (sets, reps, loads, RPE) don't exist as attributes on this type at all — a strength session literally cannot carry them; a test (`test_strength_targets_are_rejected_by_the_first_week_schema`) confirms `extra="forbid"` rejects them outright at the schema boundary.
+-   **`FirstWeekEnduranceSessionPrescription`** (RUNNING/CYCLING/SWIMMING) → model-facing `targets: PrescribedSessionTargets`, which can hold `duration_minutes` (required), plus `distance_meters`, `average_power_watts`, `pace_seconds_per_km`, `swim_pace_seconds_per_100m`, and `rpe`. It has no HR target fields. Persisted `FirstWeekEnduranceSession` continues to use wider `SessionTargets` solely for legacy compatibility.
+-   **`FirstWeekStrengthSession`** (STRENGTH) → `targets: StrengthSessionTargets`, which has **only** `duration_minutes` (`ge=5, le=360`). The forbidden fields (sets, reps, loads, RPE) don't exist as attributes on this type at all — a strength session literally cannot carry them; a test (`test_strength_targets_are_rejected_by_the_first_week_schema`) confirms `extra="forbid"` rejects them outright at the schema boundary.
 
 Every session (`PlanSession` base) carries: `discipline`, `purpose` (one short sentence, ≤120 chars, enforced at validation), `intensity` (`IntensityTarget`: `metric`, `target_range`, `rpe_range`, `guidance`), `objective`, `targets`, `execution` (free text, ≤800 chars).
 
-`IntensityTarget.metric` is one of `RPE` / `HEART_RATE_BPM` / `POWER_WATTS` / `PACE_SECONDS_PER_KM` / `SWIM_PACE_SECONDS_PER_100M` at the type level (`HEART_RATE_BPM` remains a valid literal — nothing constructs it for a first-week session any more, but the type itself is a superset of what actually gets produced, not a runtime guarantee by itself; the runtime guarantee is Step 2 + Step 6 together).
+`IntensityTarget.metric` is one of `RPE` / `HEART_RATE_BPM` / `POWER_WATTS` / `PACE_SECONDS_PER_KM` / `SWIM_PACE_SECONDS_PER_100M` at the persisted type level. `HEART_RATE_BPM` and the wider HR targets remain loadable only for legacy plans. Model-facing prescription types omit all three, while shared validation rejects legacy HR intensity or target prescriptions.
 
 `FirstWeekPlan` (the persisted, code-finalized form) adds: `plan_kind` (`"FIRST_WEEK_MENU"`), `guardrails[]` (≥1), `logging_instructions[]` (≥1), `tests[]` (always empty for a probe week), `sessions_per_discipline`, `total_minutes_per_discipline` — the last two computed by code from the sessions, not trusted from the model, and cross-checked against the actual session list (`require_accurate_summaries`).
 
@@ -118,13 +124,13 @@ Every session (`PlanSession` base) carries: `discipline`, `purpose` (one short s
 
 ## Step 6 — Validation (deterministic, the source of truth)
 
-`validate_first_week_plan()` (`backend/app/services/weekly_planning/validation.py:205-276`) is the full rule set applied to every generated menu, before anything is shown to the athlete. Every code below is FIRST_WEEK-specific (the ongoing weekly planner has a separate, non-overlapping rule set):
+`validate_first_week_plan()` (`backend/app/services/weekly_planning/validation.py:206-278`) is the first-week rule entry point applied to every generated menu before display. The ongoing planner uses the distinct `validate_plan()` entry point; both reuse selected helper guards, so their rule sets are different but not wholly non-overlapping:
 
 | Code | Condition |
 |---|---|
 | `FIRST_WEEK_PURPOSE_NOT_CONCISE` | `purpose` is not exactly one sentence (single `.`/`!`/`?` ending) of ≤120 characters. |
 | `FIRST_WEEK_ZONE_CONFLICT` | The session's `intensity.metric`/`target_range` doesn't match the resolved zone for that discipline, or falls outside every one of its easy/moderate/hard bands. |
-| `FIRST_WEEK_RPE_REQUIRED` | The zone is `RPE_FALLBACK` but the session's metric isn't `RPE`. **This is the second layer of the "no HR prescription" guard** — an `RPE_FALLBACK` zone (which HR always is now) with any non-RPE metric fails here regardless of what metric was attempted. |
+| `FIRST_WEEK_RPE_REQUIRED` | The zone is `RPE_FALLBACK` but the session's intensity metric isn't `RPE`. Model-facing schemas separately reject all HR prescription fields. |
 | `HARD_ON_ZERO_BASELINE` | The discipline has zero stated *and* zero evidenced volume, and the session is hard (`intensity.is_hard`, i.e. `rpe_range[1] >= 7`). |
 | `STRENGTH_OVER_SPECIFIED` | A strength session's execution text matches `_STRENGTH_PRESCRIPTION` (a regex for `sets`/`reps`/`loads?`/`kg`/`lb`/`%`/`NxN`/"one-rep", case-insensitive) — checked per-session, independently, not blanket-applied to every strength session in the menu. |
 | `AVAILABILITY_CONFLICT` | No confirmed-available day/window fits the session's discipline and duration. |
@@ -133,20 +139,20 @@ Every session (`PlanSession` base) carries: `discipline`, `purpose` (one short s
 | `FIRST_WEEK_CALIBRATION_SIGNAL_MISSING` | Tier is `DEVELOPING`/`TRAINED`/`WELL_TRAINED`, the zone is `NUMERIC`, there are ≥2 sessions, and *none* reaches `rpe_range[0] >= 5` — a prepared athlete must get at least one controlled-moderate session, not an all-easy week. |
 | `SESSION_COUNT_UNDERSHOOT` | The athlete's stated `desired_weekly_sessions` for a non-zero-baseline discipline isn't met exactly by the session count. |
 
-**Why it's good:** the LLM proposes, **code disposes.** Safety and correctness don't depend on model quality — a weaker/cheaper model produces equally *safe* plans because the validator is the floor. The strength and HR guards in particular are schema- and code-level, not prose the model could ignore.
+**Why it's good:** the LLM proposes, **code disposes** for the rules the schema and validator actually encode. Strength duration-only and the complete no-HR-prescription invariant are code-level, with prescription-boundary and legacy-validator tests.
 
 ---
 
 ## Step 7 — Repair loop, then fallback
 
-Flow: **generate → validate → repair (bounded retries) → deterministic fallback**, in `WeeklyPlanningService._finalize_first_week()` (`backend/app/services/weekly_planning/service.py:679-`), with up to `_FIRST_WEEK_REPAIR_ATTEMPTS = 2` repair round-trips (line 101).
+Flow: **generate → validate → repair (bounded retries) → deterministic fallback**, in `WeeklyPlanningService._finalize_first_week()` (`backend/app/services/weekly_planning/service.py:679-835`), with up to `_FIRST_WEEK_REPAIR_ATTEMPTS = 2` repair round-trips (line 101).
 
 -   On validation failure, a `repair_message` containing the previous plan + only the specific violation codes/details is sent back to the LLM, asking it to fix only those → if the repaired plan then validates clean, the result is `model_repaired`.
--   Independently of the LLM round-trip, code-level repair (`_repair_first_week_menu()`, `validation.py:624-680`) runs first on each attempt: for `FIRST_WEEK_RPE_REQUIRED` / `FIRST_WEEK_ZONE_CONFLICT` / `HARD_ON_ZERO_BASELINE` / `UNSUPPORTED_TARGET`, *every* session's intensity is forced to easy RPE 3 and all numeric target fields are cleared. For `STRENGTH_OVER_SPECIFIED`, the repair is **surgical and per-session** (this is the current, fixed behavior): each strength session is checked independently for whether *it itself* has extra targets or matches the sets/reps/loads regex — a compliant sibling session is left completely untouched. For a session that does violate, only the offending sentence(s) are stripped from `execution` (split on sentence boundaries, drop any sentence containing the regex match), keeping the rest of the description intact; the generic fallback literal ("Use controlled form throughout and finish with plenty in reserve.") is used only if nothing usable (< 15 characters) survives the strip. This replaced an earlier version that overwrote the *entire* menu's strength execution text with that one generic literal the moment any strength session tripped the check — which flattened a gym athlete's equipment-specific session down to the same vague text as a beginner's bodyweight session, even when only one of the two sessions had actually violated.
+-   Independently of the LLM round-trip, code-level repair (`_repair_first_week_menu()`, `validation.py:630-689`) runs first on each attempt: for `FIRST_WEEK_RPE_REQUIRED` / `FIRST_WEEK_ZONE_CONFLICT` / `HARD_ON_ZERO_BASELINE` / `UNSUPPORTED_TARGET`, *every* session's intensity is forced to easy RPE 3 and all numeric target fields are cleared. For `STRENGTH_OVER_SPECIFIED`, the repair is **surgical and per-session** (this is the current, fixed behavior): each strength session is checked independently for whether *it itself* has extra targets or matches the sets/reps/loads regex — a compliant sibling session is left completely untouched. For a session that does violate, only the offending sentence(s) are stripped from `execution` (split on sentence boundaries, drop any sentence containing the regex match), keeping the rest of the description intact; the generic fallback literal ("Use controlled form throughout and finish with plenty in reserve.") is used only if nothing usable (< 15 characters) survives the strip. This replaced an earlier version that overwrote the *entire* menu's strength execution text with that one generic literal the moment any strength session tripped the check — which flattened a gym athlete's equipment-specific session down to the same vague text as a beginner's bodyweight session, even when only one of the two sessions had actually violated.
 -   If repair is exhausted (both attempts) or the schema itself fails to validate → a **deterministic, baseline-scaled fallback** menu (`_build_first_week_fallback()`), clearly labeled to the athlete as degraded, respecting requested session counts and skipping zero-baseline endurance disciplines rather than forcing them.
 -   Every plan records `generation_source` — one of **`model`** (validated clean on the first attempt), **`model_repaired`** (validated clean after at least one repair round-trip), or **`fallback`** (repair exhausted or schema failure) — plus a fallback reason and error list when applicable, persisted in `validation_jsonb` on `weekly_training_plans`.
 
-**Why it's good:** it **never hard-fails** on a new user's first plan, and you can measure quality (model vs. repaired vs. fallback rates) instead of guessing. The surgical strength repair specifically means a repair round-trip no longer costs equipment-appropriate detail for the sessions that were already fine.
+**Why it's good:** model/schema/validation failures can produce a measurable fallback instead of exhausting the generation path. Persistence, provider transport, or other infrastructure failures can still fail the operation. The surgical strength repair specifically means a repair round-trip no longer costs equipment-appropriate detail for the sessions that were already fine.
 
 ---
 
@@ -158,7 +164,10 @@ The menu renders as compact cards (main line: discipline · duration · intensit
 
 ## The final output (what the athlete gets)
 
-A **menu** of sessions (2/discipline by default) they place on their own days, each with:
+A **menu** of sessions they place on their own days. Session count follows the
+athlete's requested frequency for safely prepared disciplines; fallback uses
+the requested/baseline count subject to availability and zero-baseline rules.
+There is no universal two-per-discipline default. Each session has:
 
 -   Discipline · duration · intensity label · numeric zone (if available) or RPE
 -   A one-line purpose
@@ -173,17 +182,17 @@ These aren't steps in the generation pipeline above — they're adjacent capabil
 
 ### Actuals capture
 
-Completed workouts are stored independently of any plan (`backend/app/db/models.py`): a universal `Workout` row (`athlete_id`, `discipline`, `started_at`, `duration_seconds`, `source`, `external_id`) plus exactly one discipline-specific detail row (`RunningWorkoutDetails`, `CyclingWorkoutDetails`, `SwimmingWorkoutDetails`, `StrengthWorkoutDetails`, etc.). A `Workout` carries no foreign key to any plan or planned session — matching is computed on demand elsewhere, not stored here.
+Completed workouts are stored independently of any plan (`backend/app/db/models.py`): a universal `Workout` row (`athlete_id`, `discipline`, `started_at`, `duration_seconds`, `source`, `external_id`) with the matching discipline-detail relationship (`RunningWorkoutDetails`, `CyclingWorkoutDetails`, `SwimmingWorkoutDetails`, `StrengthWorkoutDetails`, etc.) populated by the current repository mapper. Each detail table is one-to-one with `Workout`; the database does not impose one cross-table constraint proving that exactly one of all detail tables is populated. A `Workout` carries no foreign key to any plan or planned session. `BUILT`: a dated-plan comparator can match on demand by nearest same-discipline date, although no production caller triggers it. `DESIGNED`, no implementation: a first-week match or durable workout-to-session link.
 
-`CyclingWorkoutDetails` now has `average_power_watts`/`max_power_watts` (nullable `Float`, migration `0051_cycling_power`) — the first actuals-side power fields in the schema, added specifically so smart-trainer/static-bike power can be logged and eventually compared against the FTP-derived power zones from Step 2.
+`CyclingWorkoutDetails` has `average_power_watts`/`max_power_watts` (nullable `Float`, migration `0051_cycling_power`) so smart-trainer/static-bike power can be logged. This is capture only: `FitnessWorkoutEvidence` does not expose power and the built dated-plan comparator explicitly returns no actual for a power target. Power comparison remains evaluator work.
 
 The screenshot-import path (`ManualWorkoutImportRequest`, `backend/app/schemas/manual_import.py`) now extracts, when visible on screen: `average_pace_seconds_per_km` (running), `average_pace_seconds_per_100m` (swimming), `average_speed_kph`/`max_speed_kph` and `average_power_watts`/`max_power_watts` (cycling, prioritizing static-bike/smart-trainer displays), and `average_cadence`/`max_cadence` (running or cycling) — alongside the fields it already captured (discipline, timing, distance, calories, heart rate). The extraction prompt (`backend/app/integrations/llm/vision.py`) instructs the model to leave any of these empty rather than invent a value when the screenshot doesn't show it. `WorkoutScreenshotService.request_heart_rate()`/`provide_heart_rate()` (`backend/app/services/workout_screenshot/service.py`) let the athlete supply average/max HR by hand if the screenshot itself didn't show it — an explicit ask, not an inference.
 
-Pace/speed derivation from distance + duration was already in place before this round of changes and is unchanged: every `*WorkoutDetailsData` model (`backend/app/schemas/workouts.py`) has a `model_validator` that recomputes `average_pace_seconds_per_km` / `average_speed_kph` / `average_pace_seconds_per_100m` from distance and moving duration whenever both are present, for every import source (screenshot, TCX, FIT, Apple Health) — this recomputed value overwrites any directly-extracted reading, by design, matching how every other import source already behaves. Power and cadence have no such derivation (they can't be computed from distance/duration), so for those fields, direct extraction is the only source.
+Pace/speed derivation is `BUILT`: the running, hiking, cycling, and swimming `*WorkoutDetailsData` validators (`backend/app/schemas/workouts.py`) recompute the applicable average pace/speed from distance and moving duration whenever both are present. The canonical value overrides a directly supplied reading at model construction, before persistence. The repository currently has no FIT adapter despite retaining `ActivitySource.FIT`, so FIT must not be listed as a live import path. Power and cadence cannot be derived from distance/duration and depend on supplied source values.
 
 ### Unit formatting
 
-`format_pace_min_sec(seconds_per_unit, *, unit_label)` (`backend/app/services/formatting.py`) is the one function that converts a stored seconds-based pace into the min:sec an athlete sees (e.g. `296, unit_label="/km"` → `"4:56/km"`; `95, unit_label="/100m"` → `"1:35/100m"`). Pace stays in seconds everywhere else for math and comparison. It's used by the plan-session-card renderer (`_intensity_range` in `backend/app/bot/messages.py`), the athlete's stated goal-pace display (`_performance_target_lines`), and the `/zones` command below — every place a pace reaches the athlete now goes through this one function rather than each renderer doing its own seconds→minutes conversion.
+`format_pace_min_sec(seconds_per_unit, *, unit_label)` (`backend/app/services/formatting.py`) converts a stored seconds-based pace into min:sec (e.g. `296, unit_label="/km"` → `"4:56/km"`; `95, unit_label="/100m"` → `"1:35/100m"`). Pace stays in seconds for calculation. The function is used by the plan-session-card renderer (`_intensity_range` in `backend/app/bot/messages.py`), the athlete's stated goal-pace display (`_performance_target_lines`), and the `/zones` command, so those planner-facing displays share one conversion.
 
 ### The `/zones` command
 
@@ -200,10 +209,14 @@ Unlike the planner's own zone resolver, `/zones` shows a zone whenever the match
 
 ## Why it's a good first-week planner (the summary)
 
-1.  **Adapts to the athlete** — verified live: fit athlete got pace/power + moderate work (405 min); beginner got RPE-only, easy, lower volume (220 min). Re-verified after the strength-repair fix: the fit athlete's gym-equipped strength session now comes back gym-appropriate *and* compliant on the first pass, no repair needed.
-2.  **Grounded, not hallucinated** — zones computed in code from real data, including a heart-rate estimate that's available for reference without ever being prescribable.
-3.  **Safe by construction** — safety in the validator, not dependent on model smarts; the HR guarantee alone has three independent layers (resolver, prompt, validator+repair).
-4.  **Reliable** — repair + fallback mean it always delivers something valid; repair no longer costs equipment-specific detail on sessions that were already fine.
+1.  **Adapts to the athlete** — deterministic use-case tests verify that a prepared athlete receives distinct numeric pace/power sessions with controlled-moderate work, while an unprepared athlete receives one easy RPE session. Historical live sample numbers (405 min and 220 min) are not treated as current code-contract fixtures.
+2.  **Grounded, not hallucinated** — prescription zones are computed in code from athlete evidence; age-estimated heart rate remains a separate reference display.
+3.  **Safety-oriented** — strength is duration-only, both model-facing weekly prescription schemas exclude HR intensity and HR targets, and persisted legacy plans retain a defense-in-depth validator. The no-HR-prescription invariant is `BUILT`.
+4.  **Reliable within the implemented generation path** — provider, schema, and validation failures have first-week fallback handling; persistence or infrastructure failure can still make the operation unavailable. Repair no longer costs equipment-specific detail on sessions that were already fine.
 5.  **Observable** — `generation_source` tells you exactly what produced each plan.
-6.  **Measurement-focused** — probe design (no goal-chasing, logging built in) so the *next* stage has real data to work from, and actuals capture (power, pace, speed, cadence, on-request HR) is growing to give that next stage something real to compare against.
+6.  **Measurement-focused** — probe design avoids goal-chasing and tells the athlete what to log. Actuals capture can store power, pace, speed, cadence, and on-request summary HR, but actual RPE/feel is not persisted and several captured fields are absent from the current comparison projection. The next stage does not yet consume these data.
 7.  **Menu-mode** — athlete places sessions, and you capture *revealed* availability.
+
+The downstream target is documented in
+[First-week evaluator](first-week-evaluator.md); build order and status are in
+the [roadmap](../roadmap.md).

@@ -183,7 +183,10 @@ def make_first_week_plan(
 ) -> FirstWeekPlan:
     """Add code-owned summaries and non-negotiable athlete placement guardrails."""
 
-    sessions = prescription.sessions
+    sessions = tuple(
+        _FIRST_WEEK_SESSION_ADAPTER.validate_python(session.model_dump(mode="python"))
+        for session in prescription.sessions
+    )
     counts = Counter(session.discipline for session in sessions)
     minutes: dict[Discipline, int] = defaultdict(int)
     for session in sessions:
@@ -730,20 +733,27 @@ def _heart_rate_prescription_violations(
 ) -> list[PlanViolation]:
     """Shared no-HR guard for every planner: HR verifies effort, never prescribes it.
 
-    Generation cannot reach this on the ongoing path, where the model-facing
-    ``PrescribedIntensityTarget`` has no heart-rate metric at all. It still
-    guards code-built and previously stored plans, which use the wider
-    persisted ``IntensityTarget``.
+    Generation cannot reach this through either model-facing prescription
+    boundary. It still guards code-built and previously stored plans, which use
+    the wider persisted intensity and target types.
     """
 
-    if session.intensity.metric != "HEART_RATE_BPM":
+    prescribed_fields: list[str] = []
+    if session.intensity.metric == "HEART_RATE_BPM":
+        prescribed_fields.append("intensity.metric")
+    if getattr(session.targets, "average_hr_bpm", None) is not None:
+        prescribed_fields.append("targets.average_hr_bpm")
+    if getattr(session.targets, "hr_range_bpm", None) is not None:
+        prescribed_fields.append("targets.hr_range_bpm")
+    if not prescribed_fields:
         return []
     return [
         PlanViolation(
             "HEART_RATE_PRESCRIBED",
             session.discipline,
             day,
-            "heart rate is a verification metric and is never prescribed",
+            "heart rate is a verification metric and is never prescribed: "
+            + ", ".join(prescribed_fields),
         )
     ]
 
