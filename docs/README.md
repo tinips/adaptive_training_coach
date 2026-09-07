@@ -55,8 +55,8 @@ just `BUILT`.
 | Capability | Status |
 |---|---|
 | First-week menu generation, validation, fallback, persistence, and Telegram rendering | `BUILT, PRODUCTION-WIRED` |
-| Screenshot workout capture | `BUILT, PRODUCTION-WIRED` (disabled by default) |
-| TCX workout capture | `BUILT, PRODUCTION-WIRED` (enabled by default) |
+| Screenshot workout capture | `BUILT, PRODUCTION-WIRED` (enabled by default) |
+| TCX workout capture | `BUILT, PRODUCTION-WIRED` (optional, disabled by default) |
 | Ongoing dated weekly planning (`OngoingWeeklyPlanner`) | `BUILT, DORMANT` — exists as service code, nothing in the bot instantiates it |
 | Dated-plan comparison and `weekly_plan_outcomes` persistence (`compare_week()`/`compare_finished_week()`) | `BUILT, DORMANT` — no production caller, no Telegram command exposes it |
 | No-HR weekly prescription invariant | `BUILT, PRODUCTION-WIRED`; completed-workout HR remains valid evidence |

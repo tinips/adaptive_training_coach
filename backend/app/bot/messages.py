@@ -323,7 +323,7 @@ def weekly_plan_readiness(readiness: PlanReadiness) -> str:
         f"session{'' if readiness.total_session_count == 1 else 's'} on "
         f"{readiness.total_active_day_count} "
         f"day{'' if readiness.total_active_day_count == 1 else 's'}.\n\n"
-        "Import a TCX workout file, then try again."
+        "Send a screenshot of a completed workout, then try again."
     )
 
 

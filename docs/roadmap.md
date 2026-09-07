@@ -32,7 +32,7 @@ what step is next.
 |---|---|
 | First-week menu generation, validation/repair/fallback, persistence, and Telegram rendering | `BUILT` and production-wired |
 | Self-reported baseline, first-week tiers, and pace/power/RPE zone resolution | `BUILT` |
-| Settings-gated screenshot and TCX workout capture; pace/speed derivation; cycling power storage; reference HR zones; `/zones` | `BUILT` (screenshot defaults off; TCX defaults on) |
+| Settings-gated screenshot and TCX workout capture; pace/speed derivation; cycling power storage; reference HR zones; `/zones` | `BUILT` (screenshot defaults on; TCX optional, defaults off) |
 | Ongoing dated weekly-plan generation/validation | `BUILT` service capability, not production-wired |
 | Dated-plan `compare_week()` and `weekly_plan_outcomes` upsert | `BUILT` internal capability, no production trigger |
 | Explicit first-week links and evaluation | `DESIGNED`, not implemented |

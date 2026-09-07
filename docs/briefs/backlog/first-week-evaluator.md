@@ -20,7 +20,7 @@ a final workout/session match, or treat missed work as zero fitness.
 |---|---|---|
 | First-week plan | `BUILT` and production-wired | `FirstWeekPlanner` generates an unscheduled `FirstWeekPlan` and persists it in `WeeklyTrainingPlan.plan_jsonb` with schema version 4. |
 | Planned-session identity | Code-generated UUID `DESIGNED`; not implemented | `PlanSession` has no id today. Array ordinal is explicitly not permanent identity. |
-| Workout actuals | `BUILT` and production-wired behind settings | Screenshot and TCX create `Workout` rows with no plan/session link when enabled; screenshot import defaults off and TCX import defaults on. Discipline detail rows can store pace, speed, cycling power, and average/max HR. |
+| Workout actuals | `BUILT` and production-wired behind settings | Screenshot and TCX create `Workout` rows with no plan/session link when enabled; screenshot import defaults on and TCX import is optional, defaulting off. Discipline detail rows can store pace, speed, cycling power, and average/max HR. |
 | Actual effort | Objective-metric policy `DESIGNED` | V1 does not require actual RPE. Optional feel text is not currently persisted and must not enter planner prompts automatically. |
 | Actual evidence projection | Partially `BUILT` | `FitnessWorkoutEvidence` exposes duration, moving duration, distance, and timestamped HR observations; the dated comparator derives pace from duration/distance. The projection omits cycling power/speed and numeric summary HR. |
 | No-HR prescription guard | `BUILT` | Both model-facing weekly prescriptions exclude HR intensity and HR target fields; wider persisted types remain for legacy reads. |

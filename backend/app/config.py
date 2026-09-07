@@ -52,11 +52,13 @@ class Settings(BaseSettings):
     # Send a workout summary screenshot to the bot; a vision model reads the
     # visible source-app metrics and the athlete confirms before it is saved.
     # Uses the same DeepSeek credentials as `llm_api_key`/`llm_base_url` above,
-    # with its own vision-capable model.
-    screenshot_import_enabled: bool = False
+    # with its own vision-capable model. This is the default import path.
+    screenshot_import_enabled: bool = True
     llm_vision_model: str = "deepseek-v4-flash-vision-exp"
 
-    tcx_import_enabled: bool = True
+    # Optional alternative import path; still fully supported, just not the
+    # default (screenshot capture is).
+    tcx_import_enabled: bool = False
     tcx_import_max_size_mb: int = Field(default=25, ge=1, le=100)
 
     fitness_window_days: int = Field(default=14, ge=1, le=90)
@@ -110,6 +112,7 @@ class Settings(BaseSettings):
             "llm_model": self.llm_model,
             "first_week_llm_model": self.first_week_llm_model,
             "langfuse_enabled": self.langfuse_enabled,
+            "screenshot_import_enabled": self.screenshot_import_enabled,
             "tcx_import_enabled": self.tcx_import_enabled,
             "fitness_window_days": self.fitness_window_days,
             "planner_window_days": self.planner_window_days,

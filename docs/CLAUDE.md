@@ -274,10 +274,11 @@ locked target with no implementation. `PROPOSED` is a recommendation, and
   validation, at most two model repair calls, deterministic fallback,
   persistence, `generation_source`, and Telegram rendering.
 - Workout capture through settings-gated screenshot and TCX paths (screenshot
-  defaults off; TCX defaults on). Discipline detail rows can store canonical
-  pace/speed, cycling power/cadence, and average/max HR. Pace/speed is
-  recomputed by Pydantic validators at construction before persistence, not “at
-  read time.” Apple Health job/repository remnants are not a live upload path.
+  defaults on; TCX is optional and defaults off). Discipline detail rows can
+  store canonical pace/speed, cycling power/cadence, and average/max HR.
+  Pace/speed is recomputed by Pydantic validators at construction before
+  persistence, not “at read time.” Apple Health job/repository remnants are
+  not a live upload path.
 - Age-estimated, display-only HR zones and the `/zones` command.
 - One mutable self-reported baseline per athlete and deterministic workout
   evidence calculation over a configured recent window (`planner_window_days`,

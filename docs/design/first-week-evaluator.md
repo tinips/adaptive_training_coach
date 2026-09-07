@@ -19,7 +19,7 @@ or planner-feedback contract exists in code today.
 | Capability | Status | Evidence and limitation |
 |---|---|---|
 | First-week menu generation and persistence | `BUILT` and production-wired | `FirstWeekPlanner` is composed in `backend/app/bot/main.py`; `FirstWeekPlan` is an unscheduled menu persisted in `WeeklyTrainingPlan.plan_jsonb`. |
-| Workout capture | `BUILT` and production-wired behind settings | Screenshot and TCX paths persist `Workout` plus discipline detail when their feature settings permit them (`screenshot_import_enabled` defaults off; `tcx_import_enabled` defaults on). Screenshot capture can store pace, speed, cycling power, cadence, and average/max HR. Apple Health models/repositories are remnants, not a current upload path. |
+| Workout capture | `BUILT` and production-wired behind settings | Screenshot and TCX paths persist `Workout` plus discipline detail when their feature settings permit them (`screenshot_import_enabled` defaults on; `tcx_import_enabled` is optional and defaults off). Screenshot capture can store pace, speed, cycling power, cadence, and average/max HR. Apple Health models/repositories are remnants, not a current upload path. |
 | Stable reference to one planned session | `DESIGNED`; not implemented | Every planned session will receive a code-generated UUID. Array ordinal is not identity. `PlanSession` has no identifier today. |
 | Explicit workout-to-session link | `DESIGNED` | Explicit athlete selection is locked; no schema, repository, service, or UI exists. |
 | First-week per-session comparison | `DESIGNED` | Required metrics and safety interpretation are specified below; no function implements them. |
