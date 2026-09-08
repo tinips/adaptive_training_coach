@@ -7,7 +7,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Literal, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -47,7 +47,6 @@ from app.repositories.llm_usage import LLMUsageRepository
 from app.repositories.profiles import ProfileRepository
 from app.repositories.training_catalog import TrainingCatalogRepository
 from app.repositories.users import UserRepository
-from app.repositories.weekly_plan_outcomes import WeeklyPlanOutcomeRepository
 from app.repositories.weekly_plans import WeeklyTrainingPlanRepository
 from app.schemas.availability import ConfirmedWeeklyAvailability
 from app.schemas.baseline import AthleteBaselineData, TrainingPreferences
@@ -64,7 +63,6 @@ from app.services.fitness.calculator import (
     calculate_baseline_window,
 )
 from app.services.fitness.service import _fitness_evidence_for_workout
-from app.services.weekly_planning.comparison import WeekComparison, compare_week
 from app.services.weekly_planning.evidence import (
     build_evidence_snapshot,
     build_plan_readiness,
@@ -448,73 +446,6 @@ class WeeklyPlanningService:
                 week_start=next_week_start(utc_now(), user.timezone),
             )
             return discarded is not None
-
-    async def compare_finished_week(
-        self, identity: TelegramIdentity
-    ) -> WeekComparison | None:
-        """Persist and return the deterministic comparison for the week just ended."""
-
-        async with self._session_factory() as session:
-            user = await UserRepository(session).get_by_telegram_id(
-                identity.telegram_user_id
-            )
-            if user is None:
-                return None
-            local_today = (
-                _as_utc(utc_now()).astimezone(_zone_or_utc(user.timezone)).date()
-            )
-            current_week_start = date.fromordinal(
-                local_today.toordinal() - local_today.weekday()
-            )
-            week_start = date.fromordinal(current_week_start.toordinal() - 7)
-            stored_plan = await WeeklyTrainingPlanRepository(session).get_for_week(
-                athlete_id=user.id, week_start=week_start
-            )
-            if stored_plan is None:
-                return None
-            plan = _plan_schema(stored_plan)
-            if isinstance(plan, FirstWeekPlan):
-                # First-week menus are athlete-placed; comparison begins once actual
-                # session placement/logging is linked in the evaluator.
-                return None
-            disciplines = tuple(
-                sorted(
-                    {
-                        session.discipline
-                        for day in plan.days
-                        for session in day.sessions
-                    },
-                    key=lambda discipline: discipline.value,
-                )
-            )
-            workouts = await FitnessRepository(session).workouts_for_window(
-                athlete_id=user.id,
-                disciplines=disciplines,
-                started_at=datetime.combine(week_start, time.min, tzinfo=UTC),
-                ended_at=(
-                    datetime.combine(
-                        date.fromordinal(week_start.toordinal() + 7),
-                        time.min,
-                        tzinfo=UTC,
-                    )
-                    - timedelta(microseconds=1)
-                ),
-            )
-            comparison = compare_week(
-                plan_id=stored_plan.id,
-                plan=plan,
-                workouts=tuple(
-                    _fitness_evidence_for_workout(workout) for workout in workouts
-                ),
-            )
-        async with self._session_factory.begin() as session:
-            await WeeklyPlanOutcomeRepository(session).upsert(
-                athlete_id=user.id,
-                plan_id=stored_plan.id,
-                week_start=week_start,
-                comparison_jsonb=comparison.model_dump(mode="json"),
-            )
-        return comparison
 
     async def generate_next_week(
         self, identity: TelegramIdentity
@@ -1605,13 +1536,6 @@ def next_week_start(now: datetime, timezone: str | None) -> date:
         local = instant
     today = local.date()
     return today + timedelta(days=7 - today.weekday())
-
-
-def _zone_or_utc(timezone: str | None) -> ZoneInfo:
-    try:
-        return ZoneInfo(timezone) if timezone else ZoneInfo("UTC")
-    except ZoneInfoNotFoundError:
-        return ZoneInfo("UTC")
 
 
 def _as_utc(value: datetime) -> datetime:
