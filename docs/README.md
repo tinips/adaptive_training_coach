@@ -16,9 +16,9 @@ automatic transition to ongoing planning.
 end to end, and workout capture.
 
 **What is implemented but not wired into the bot?** Everything tagged
-`BUILT, DORMANT`: the ongoing (dated) weekly planner and the dated-plan
-comparator both run and are tested, but nothing in `backend/app/bot/main.py`
-calls them.
+`BUILT, DORMANT`: the ongoing (dated) weekly planner runs and is tested, but
+nothing in `backend/app/bot/main.py` calls it. Its former dated-plan
+comparator has been removed, see below.
 
 **What is only designed?** Everything tagged `DESIGNED`, `PROPOSED`, or
 `OPEN DECISION`: the first-week evaluator, fitness-state history, the General
@@ -58,7 +58,7 @@ just `BUILT`.
 | Screenshot workout capture | `BUILT, PRODUCTION-WIRED` (enabled by default) |
 | TCX workout capture | `BUILT, PRODUCTION-WIRED` (optional, disabled by default) |
 | Ongoing dated weekly planning (`OngoingWeeklyPlanner`) | `BUILT, DORMANT` — exists as service code, nothing in the bot instantiates it |
-| Dated-plan comparison and `weekly_plan_outcomes` persistence (`compare_week()`/`compare_finished_week()`) | `BUILT, DORMANT` — no production caller, no Telegram command exposes it |
+| Dated-plan comparison (`compare_week()`/`compare_finished_week()`) | Removed 2026-09-08 — superseded by the first-week evaluator's athlete-explicit matching; `weekly_plan_outcomes` remains in the schema but is unused |
 | No-HR weekly prescription invariant | `BUILT, PRODUCTION-WIRED`; completed-workout HR remains valid evidence |
 | First-week repair-loop reconstruction is crash-safe for every discipline | `BUILT, PRODUCTION-WIRED`; fixed 2026-09-07, see [Locked decisions](decisions/locked.md) |
 | Explicit first-week workout/session linking | `DESIGNED`, not implemented |
@@ -170,9 +170,11 @@ built.
   planning actually supplies `planner_window_days`, default 30, to a calculator
   whose module description still says "14-day." Future state code must use
   explicit evidence bounds.
-- The dormant dated comparator queries UTC-midnight week bounds even though it
-  derives the week from the athlete's local date. Do not copy that boundary
-  behavior into first-week eligibility without the timezone decision and tests.
+- The now-removed dated comparator queried UTC-midnight week bounds even
+  though it derived the week from the athlete's local date. That mismatch is
+  gone with the code, but do not reintroduce it: define first-week eligibility
+  windows from the athlete's local date, with its own timezone decision and
+  tests, not by copying that old boundary behavior.
 
 ## Maintenance rule
 

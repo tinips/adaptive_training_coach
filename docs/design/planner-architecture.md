@@ -180,9 +180,11 @@ validation paths.
   Monday–Sunday `WeeklyPlan` from current goal, availability, equipment,
   baseline, and recent-workout evidence.
 - The Telegram `WeeklyPlanningBotPort` exposes generate/view/delete/exists
-  operations only. It does not expose `compare_finished_week()`.
-- `compare_week()` and outcome persistence are `BUILT` internal capabilities
-  for dated plans, but no production trigger calls them.
+  operations only.
+- The dated-plan comparator, `compare_week()`/`compare_finished_week()`, was
+  removed on 2026-09-08: it was never wired to production and used
+  nearest-date matching, which the first-week evaluator design rejects. The
+  `weekly_plan_outcomes` table remains but is currently unused.
 
 The validators share selected helpers, including the no-HR-prescription and strength
 checks, but the first-week and ongoing validators are distinct functions with

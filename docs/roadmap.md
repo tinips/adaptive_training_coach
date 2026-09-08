@@ -34,7 +34,7 @@ what step is next.
 | Self-reported baseline, first-week tiers, and pace/power/RPE zone resolution | `BUILT` |
 | Settings-gated screenshot and TCX workout capture; pace/speed derivation; cycling power storage; reference HR zones; `/zones` | `BUILT` (screenshot defaults on; TCX optional, defaults off) |
 | Ongoing dated weekly-plan generation/validation | `BUILT` service capability, not production-wired |
-| Dated-plan `compare_week()` and `weekly_plan_outcomes` upsert | `BUILT` internal capability, no production trigger |
+| Dated-plan `compare_week()`/`compare_finished_week()` | Removed 2026-09-08 — superseded by the first-week evaluator's athlete-explicit matching; `weekly_plan_outcomes` remains in the schema but is unused |
 | Explicit first-week links and evaluation | `DESIGNED`, not implemented |
 | Fitness state/history | `PROPOSED`; storage choice deferred to its milestone |
 | General Planner and Stage Planner | `DESIGNED`, not implemented |

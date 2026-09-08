@@ -13,7 +13,7 @@ The status vocabulary in `docs/README.md` applies here.
 |---|---|---|
 | Self-reported baseline | `BUILT` | `athlete_self_reported_baselines` holds one mutable, goal-scoped `baseline_jsonb` row per athlete. Updating it overwrites the previous baseline. |
 | Workout-derived baseline calculation | `BUILT` | `services/fitness/calculator.py` deterministically derives evidence over the configured recent-workout window: counts, active days, duration/distance, reliable HR samples, confidence, quality flags, and discipline metrics. `planner_window_days` defaults to 30 and permits 1–90 days. It is recalculated for planning; it is not weekly fitness-state history. |
-| Dated-plan comparison payload | `BUILT` but not production-triggered | `weekly_plan_outcomes` can hold one upserted comparison per athlete/week. No production caller invokes `compare_finished_week()`, and first-week plans return `None`. |
+| Dated-plan comparison payload | Removed 2026-09-08 | `weekly_plan_outcomes` can still hold one upserted comparison per athlete/week, but its only writer, `compare_finished_week()`, was removed as superseded by the first-week evaluator design; the table is currently unused. |
 | Fitness-state snapshot/history | `PROPOSED`; storage is `OPEN DECISION` | No model, migration, repository, read service, or planner input exists. |
 
 There is a current naming/configuration risk: `calculator.py` still calls itself

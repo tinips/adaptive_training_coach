@@ -107,7 +107,7 @@ are defined in `docs/README.md`.
 - `DESIGNED` — evaluation records are immutable and versioned, containing
   athlete/plan references, plan kind/revision, evaluation-rule version, evidence
   provenance, per-session insights, weekly aggregate, and supersession reference.
-  They do not reuse the existing dated `WeekComparison` shape.
+  They do not reuse the removed dated comparator's `WeekComparison` shape.
 - `DESIGNED` — E6 numerical metric tolerances are deterministic and versioned.
   Duration is within ±10% of the planned value or range, with no fixed minimum.
   Distance is within ±5% with minimum allowances of 250 m for running, 1 km for
@@ -135,10 +135,11 @@ are defined in `docs/README.md`.
 The E7 signal/coverage thresholds are the only remaining evaluator product gate
 in `docs/decisions/open.md`.
 
-None of these evaluator decisions is `BUILT`. The existing `compare_week()` is
-a separate dated-plan algorithm that greedily matches nearest same-discipline
-dates. It is callable code, but no production path triggers it and it returns no
-first-week result.
+None of these evaluator decisions is `BUILT`. A separate dated-plan algorithm,
+`compare_week()`, once matched workouts to planned sessions by nearest
+same-discipline date; it was never wired to production and was removed on
+2026-09-08 as superseded by the athlete-explicit matching decided above, not
+kept as a first-week result.
 
 ## Data roles and history
 
@@ -146,8 +147,9 @@ first-week result.
   matching discipline detail populated by the current repository mapper. Each
   detail table is one-to-one with a workout; no cross-table database constraint
   itself proves exactly one detail kind exists.
-- `BUILT` but dormant — `weekly_plan_outcomes` can persist the dated-plan
-  `WeekComparison` shape through `compare_finished_week()`.
+- `weekly_plan_outcomes` remains in the schema and can persist a dated-plan
+  `WeekComparison`-shaped payload, but `compare_finished_week()`, its only
+  writer, was removed on 2026-09-08; the table is currently unused by any code.
 - `DESIGNED` — a first-week evaluation is a separate logical role even if an
   existing table is eventually reused.
 - `DESIGNED` — onboarding baseline, workout evidence, weekly evaluation, current

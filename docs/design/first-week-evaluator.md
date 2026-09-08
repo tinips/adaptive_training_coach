@@ -24,19 +24,20 @@ or planner-feedback contract exists in code today.
 | Explicit workout-to-session link | `DESIGNED` | Explicit athlete selection is locked; no schema, repository, service, or UI exists. |
 | First-week per-session comparison | `DESIGNED` | Required metrics and safety interpretation are specified below; no function implements them. |
 | First-week weekly aggregate and signal | `DESIGNED` in outline, `OPEN DECISION` for thresholds | No aggregate or signal rule table exists. |
-| Outcome persistence | `DESIGNED`; not implemented | First-week outcomes will use immutable, versioned records rather than the dated `WeekComparison` shape. |
+| Outcome persistence | `DESIGNED`; not implemented | First-week outcomes will use immutable, versioned records rather than the now-removed dated comparator's `WeekComparison` shape. |
 | Fitness-state history | `PROPOSED`; storage `OPEN DECISION` | No fitness-snapshot table or repository exists. The hybrid recommendation is in `docs/design/fitness-state.md`. |
 | `last_week_feedback` | Deferred downstream | No schema, field list, reader, persistence, or planner consumer exists; it does not block evaluation persistence. |
 | No-HR-prescription invariant | `BUILT` | Both weekly model-facing schemas exclude HR intensity and HR target fields. Wider persisted types retain them only for legacy reads. Completed-workout HR remains valid evaluator evidence. |
 
-There is also a `BUILT` comparator for dated `WeeklyPlan` objects:
-`compare_week()` greedily pairs each planned session with the nearest unused
-same-discipline workout. `compare_finished_week()` can persist that result in
-`weekly_plan_outcomes`. This is not a live athlete flow: no production code
-calls `compare_finished_week()`, the Telegram planning port does not expose it,
-and production composes `FirstWeekPlanner`, whose first-week branch returns
-`None`. It is a useful implementation reference, not an existing first-week
-evaluator.
+A comparator for dated `WeeklyPlan` objects, `compare_week()`/
+`compare_finished_week()`, previously existed and greedily paired each planned
+session with the nearest unused same-discipline workout. It was never a live
+athlete flow (no production code called it, the Telegram planning port never
+exposed it), and it used exactly the nearest-date matching this design
+rejects, so it was removed on 2026-09-08 rather than kept as precedent. The
+`weekly_plan_outcomes` table and its repository remain in the schema but are
+currently unused; do not reuse their `WeekComparison` shape for the first-week
+evaluator's outcome record.
 
 ## End-to-end target
 
@@ -141,16 +142,16 @@ workouts remain excluded. Secondary/multi-workout matching is deferred.
 
 ## Actual evidence available to an evaluator
 
-The database contains more data than the current comparison projection exposes.
-The evaluator must deliberately define its read model rather than reuse
+The database contains more data than `FitnessWorkoutEvidence` exposes. The
+evaluator must deliberately define its own read model rather than reuse
 `FitnessWorkoutEvidence` unchanged.
 
-| Actual metric | Stored today | Available to current `compare_week()` |
+| Actual metric | Stored today | Available via `FitnessWorkoutEvidence` |
 |---|---:|---:|
 | Duration, distance, moving duration | Yes | Yes |
-| Derived running/swimming pace | Yes; also derivable from distance and moving duration | Derived values only |
+| Derived running/swimming pace | Yes; also derivable from distance and moving duration | Derivable from distance and moving duration; no stored pace field |
 | Cycling speed | Yes | No |
-| Cycling average/max power | Yes | No; `_target_actual()` returns `None` for power |
+| Cycling average/max power | Yes | No; the schema has no power field |
 | Average/max HR summary | Yes on discipline detail rows | No numeric value; the projection exposes only `coarse_heart_rate_present` |
 | Reliable timestamped HR observations | Yes when an import supplies them | Yes |
 | Optional “how it felt” text | No | No |
@@ -546,10 +547,13 @@ Status: `PROPOSED`.
 The only blocking product decision is the E7 signal/coverage threshold table in
 [Open decisions](../decisions/open.md).
 
-Four architectural tensions must be resolved explicitly:
+Three architectural tensions remain; a fourth was resolved by removing the
+conflicting code rather than reconciling it:
 
-1. First-week linking is athlete-explicit (`DESIGNED`), while the built but
-   dormant ongoing comparator uses greedy date matching.
+1. ~~First-week linking is athlete-explicit (`DESIGNED`), while the built but
+   dormant ongoing comparator uses greedy date matching.~~ Resolved 2026-09-08:
+   the greedy-date comparator was removed, since it modeled the approach this
+   design rejects, not a variant to reconcile with it.
 2. The approved immutable evaluator history differs from
    `WeeklyPlanOutcomeRepository.upsert()`, which replaces the same week's dated
    comparison. The evaluator therefore needs its own versioned persistence.

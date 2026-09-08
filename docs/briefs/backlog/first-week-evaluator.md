@@ -24,9 +24,9 @@ a final workout/session match, or treat missed work as zero fitness.
 | Actual effort | Objective-metric policy `DESIGNED` | V1 does not require actual RPE. Optional feel text is not currently persisted and must not enter planner prompts automatically. |
 | Actual evidence projection | Partially `BUILT` | `FitnessWorkoutEvidence` exposes duration, moving duration, distance, and timestamped HR observations; the dated comparator derives pace from duration/distance. The projection omits cycling power/speed and numeric summary HR. |
 | No-HR prescription guard | `BUILT` | Both model-facing weekly prescriptions exclude HR intensity and HR target fields; wider persisted types remain for legacy reads. |
-| Dated-plan comparator | `BUILT`, dormant | `compare_week()` performs greedy nearest-same-discipline-date matching. `compare_finished_week()` can upsert its result, but no production caller invokes it. |
-| First-week comparator | `DESIGNED`; no implementation | `compare_finished_week()` returns `None` for `FirstWeekPlan`. |
-| Outcome storage | First-week shape `DESIGNED`; not implemented | Use immutable versioned records; do not reuse the overwrite-oriented dated `WeekComparison` shape. |
+| Dated-plan comparator | Removed 2026-09-08 | `compare_week()`/`compare_finished_week()` performed greedy nearest-same-discipline-date matching; removed as superseded by athlete-explicit matching, never wired to production. |
+| First-week comparator | `DESIGNED`; no implementation | Nothing computes a first-week comparison today; the removed dated comparator never handled `FirstWeekPlan` either. |
+| Outcome storage | First-week shape `DESIGNED`; not implemented | Use immutable versioned records; do not reuse the removed dated comparator's overwrite-oriented `WeekComparison` shape. |
 | Fitness-state history and feedback | Deferred; no implementation | No snapshot model/table/repository or `last_week_feedback` contract/consumer exists, and neither blocks this brief. |
 
 ## Locked behavior (`DESIGNED`)
@@ -86,7 +86,8 @@ planner/load policy are explicitly downstream and do not block this brief.
 
 - General Planner, Stage Planner, phase cutting, or phase re-cutting.
 - Wiring the ongoing planner into production.
-- Changing the ongoing `compare_week()` algorithm.
+- The ongoing `compare_week()` algorithm no longer exists (removed
+  2026-09-08); there is nothing left in that path for this brief to change.
 - CTL, TSS, training-load activation, vacation/recovery policy, or medical
   interpretation.
 - Fitness-state tables, state update rules, or observed-tier progression; those
@@ -200,11 +201,13 @@ edited after evaluation, follow the approved correction/revision policy; do not
 silently replace an auditable result. The outcome exposes a stable downstream
 input for the fitness-state brief but does not create state in this work package.
 
-Reusing `weekly_plan_outcomes` requires, at minimum, a payload discriminator and
-schema/calculation version because its current JSON shape is `WeekComparison`.
-Its unique athlete/week constraint also means it cannot store independent
-first-week and dated-plan outcome rows for the same athlete/week without a
-schema decision.
+`weekly_plan_outcomes` remains in the schema, though its only writer,
+`compare_finished_week()`, was removed on 2026-09-08 and nothing currently
+populates it. Reusing the table would still require, at minimum, a payload
+discriminator and schema/calculation version, since its JSON shape is the
+removed comparator's `WeekComparison`. Its unique athlete/week constraint also
+means it cannot store independent first-week and dated-plan outcome rows for
+the same athlete/week without a schema decision.
 
 ## Test-first implementation order
 
@@ -269,7 +272,8 @@ schema decision.
 - The approved `last_week_feedback` projection is readable, but no planner is
   silently wired to consume it as part of this brief unless explicitly added to
   scope.
-- `compare_week()` remains behaviorally unchanged.
+- ~~`compare_week()` remains behaviorally unchanged.~~ Moot: it was removed
+  2026-09-08 rather than kept alongside this work.
 
 ## Observability requirements
 
