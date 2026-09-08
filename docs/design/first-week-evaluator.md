@@ -544,8 +544,12 @@ Status: `PROPOSED`.
 
 ## Unresolved decisions and contradictions
 
-The only blocking product decision is the E7 signal/coverage threshold table in
-[Open decisions](../decisions/open.md).
+The blocking product decisions are E7 through E11 in
+[Open decisions](../decisions/open.md): E7 (signal thresholds/precedence) and
+E10 (where intensity-intent adherence belongs) gate the weekly aggregate;
+E8 (volume overshoot and the intent verdict), E9 (single-session efficiency
+evidence), and E11 (HR as sole intent arbiter) gate the per-session
+comparison itself.
 
 Three architectural tensions remain; a fourth was resolved by removing the
 conflicting code rather than reconciling it:

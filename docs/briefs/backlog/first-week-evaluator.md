@@ -1,8 +1,8 @@
 # Implementation Brief: First-Week Evaluator
 
 Status: `DESIGNED` work package, not executed. The HR-prescription prerequisite
-is `BUILT`. Full evaluator implementation remains blocked on approval of the E6
-numerical tolerances and E7 signal/coverage thresholds.
+is `BUILT`. Full evaluator implementation remains blocked on approval of the
+E7–E11 decisions in `docs/decisions/open.md` (E6 is already locked).
 
 ## Outcome
 
@@ -211,7 +211,7 @@ the same athlete/week without a schema decision.
 
 ## Test-first implementation order
 
-1. **Decision fixtures and vocabulary.** After E6/E7 approval, encode the
+1. **Decision fixtures and vocabulary.** After E7–E11 approval, encode the
    accepted statuses,
    denominators, signal table, time eligibility, metric precedence, and missing
    data behavior as parameterized tests.

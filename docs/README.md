@@ -28,9 +28,9 @@ and Stage Planners, and CTL/TSS-driven planning. None of these exist in code.
 order](#canonical-documents-and-reading-order) below; five to seven documents,
 in order.
 
-**What is the single next implementation?** Get the E6/E7 evaluator tables in
-[Open decisions](decisions/open.md) approved (a product decision, not
-engineering work), then execute
+**What is the single next implementation?** Get the E7–E11 evaluator decisions
+in [Open decisions](decisions/open.md) approved (E6 is already locked; these
+are product decisions, not engineering work), then execute
 [First-week evaluator](briefs/backlog/first-week-evaluator.md). See the
 [roadmap](roadmap.md) for the full build order.
 
@@ -102,15 +102,17 @@ rules.
 The active implementation milestone is the first-week evaluator. Its next
 brief is [First-week evaluator](briefs/backlog/first-week-evaluator.md). The HR
 schema prerequisite is complete, including the first-week repair-loop
-reconstruction fix; evaluator work is intentionally gated only by the proposed
-E6 numerical tolerances and E7 signal/coverage thresholds in
-`docs/decisions/open.md`.
+reconstruction fix; evaluator work is intentionally gated by the E7–E11
+decisions in `docs/decisions/open.md` (E6 is already locked). E8, E9, and E11
+block per-session comparison; E7 and E10 block weekly aggregation; stable
+session references, explicit linking, and evidence exposure are not blocked
+by any of them.
 
 Backlog briefs:
 
 | Brief | Status | Depends on |
 |---|---|---|
-| [First-week evaluator](briefs/backlog/first-week-evaluator.md) | `DESIGNED`, not executed | Approval of E6 tolerances and E7 signal/coverage thresholds |
+| [First-week evaluator](briefs/backlog/first-week-evaluator.md) | `DESIGNED`, not executed | Approval of E7–E11 (E6 already locked) |
 | [Fitness state](briefs/backlog/fitness-state.md) | `PROPOSED`, not executed | Evaluator outcome plus storage, seeding, correction, and confidence decisions |
 | [General Planner phase foundation](briefs/backlog/general-planner-phase-foundation.md) | `PROPOSED`, not executed | Phase allocation, minimum-length, feasibility, and re-plan decisions |
 

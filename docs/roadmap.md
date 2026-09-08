@@ -13,8 +13,10 @@ what step is next.
 1. ~~Fix repair regression~~ — **done** (2026-09-07). The first-week repair
    loop no longer raises on an ordinary, non-HR repair. See
    [Locked decisions](decisions/locked.md).
-2. Approve E6/E7 evaluator tables — `OPEN DECISION`, blocks step 3. See
-   [Open decisions](decisions/open.md).
+2. Approve E7–E11 evaluator decisions — `OPEN DECISION`; E6 is already locked.
+   E8/E9/E11 block per-session comparison and E7/E10 block weekly aggregation
+   in step 3; session identity, linking, and evidence exposure are not
+   blocked. See [Open decisions](decisions/open.md).
 3. First-week evaluator — `DESIGNED`, not implemented. See
    [First-week evaluator](briefs/backlog/first-week-evaluator.md).
 4. Fitness history — `PROPOSED`, not implemented. See
@@ -72,9 +74,9 @@ and verified live against the rebuilt bot image.
 
 Status: behavior `DESIGNED`; implementation not started.
 
-The milestone is gated only by approval of the proposed E6 numerical tolerances
-and E7 signal/coverage thresholds in `docs/decisions/open.md`. The executable work package is
-[First-week evaluator](briefs/backlog/first-week-evaluator.md).
+The milestone is gated by approval of the E7–E11 decisions in
+`docs/decisions/open.md` (E6 is already locked). The executable work package
+is [First-week evaluator](briefs/backlog/first-week-evaluator.md).
 
 Implement in vertical slices:
 
@@ -91,13 +93,15 @@ Implement in vertical slices:
    or the relevant pace/power metric makes the comparison `NOT_COMPARABLE`.
 4. **Per-session deterministic comparison.** Implement the direction-aware
    duration/distance/pace/power calculations, output comparison, intensity
-   verdict, HR soft flags, and worked examples in the evaluator design.
+   verdict, HR soft flags, and worked examples in the evaluator design, only
+   after E8, E9, and E11 are approved.
 5. **Weekly aggregation.** Keep completion, matched capability, and total
    actual-volume denominators separate; implement the versioned signal table,
-   using the approved five-value enum, only after E7 thresholds are approved.
+   using the approved five-value enum, only after E7 and E10 are approved.
 6. **Trigger and persistence.** Add the manual idempotent evaluate flow,
    immutable versioned outcome, and superseding correction behavior. Keep
-   `last_week_feedback` downstream and leave the dated comparator unchanged.
+   `last_week_feedback` downstream; the dated comparator this used to
+   reference no longer exists in code (removed 2026-09-08).
 
 Completion of Milestone 1 does not itself create fitness history or switch the
 production planner to ongoing mode.

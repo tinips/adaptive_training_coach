@@ -132,8 +132,11 @@ are defined in `docs/README.md`.
   selected reference-HR band has a ±5 bpm allowance and remains a soft effort
   flag only.
 
-The E7 signal/coverage thresholds are the only remaining evaluator product gate
-in `docs/decisions/open.md`.
+E7 through E11 in `docs/decisions/open.md` are the remaining evaluator
+product gates: signal thresholds/precedence, volume-overshoot handling in the
+per-session verdict, single-session efficiency-evidence semantics, where
+intent adherence belongs in the weekly contract, and confirming HR as the
+sole intent arbiter.
 
 None of these evaluator decisions is `BUILT`. A separate dated-plan algorithm,
 `compare_week()`, once matched workouts to planned sessions by nearest
