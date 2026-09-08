@@ -6,54 +6,11 @@ for fitness state, ongoing planning, General/Stage planning, and future load
 modes remain documented in their owning designs, but are deliberately deferred
 and do not gate this milestone.
 
-The previous 19-item list was reduced on 2026-09-07: evaluator decisions 1–6,
-the signal vocabulary/safety scope, and outcome persistence were approved;
-downstream decisions 11–19 were removed from the active gate because the
-evaluator can persist a versioned outcome without implementing those consumers.
-
-## E6 — Numerical metric tolerances
-
-Status: `OPEN DECISION`. Source precedence and provenance are `DESIGNED` and
-locked. The numerical table below is `PROPOSED` for product review; no evaluator
-implementation may encode it before approval.
-
-| Comparison | Proposed boundary expansion | Proposed minimum absolute allowance | Notes |
-|---|---:|---:|---|
-| Duration | ±10% around the planned value/range | 5 minutes | Always report the raw delta and selected source. |
-| Distance | ±5% around the planned value/range | Running 250 m; cycling 1 km; swimming 50 m | Evaluate only when distance is an explicit structured target. |
-| Running pace | ±5% outside each planned range boundary | 10 s/km | Lower seconds/km is faster. |
-| Indoor cycling power | ±5% outside each planned range boundary | 10 W | Only `STATIONARY` cycling with a structured power target. |
-| Swimming pace | ±5% outside each planned range boundary | 3 s/100 m | Require a reliable distance and duration source. |
-| Reference HR band | 5 bpm outside the selected band | 5 bpm | Soft effort flag only; never a prescription or automatic state/zone change. |
-| Sample-derived average-HR coverage | At least 80% of selected workout duration | — | Below this, samples cannot replace a stored summary average. |
-| Summary-versus-sampled average-HR conflict | More than 10 bpm apart | 10 bpm | Emit `SOURCE_CONFLICT` and make the HR verdict `NOT_COMPARABLE`. |
-
-For a scalar target `T`, “within” means `T ± max(percent × T, minimum)`.
-For a range `[L, U]`, expand the lower and upper boundaries independently.
-Raw values and deltas are retained even when a verdict is `NOT_COMPARABLE`.
-
-Illustrative consequences of the proposal:
-
-- a 40-minute target is within duration tolerance at 35–45 minutes;
-- a `330–360 s/km` running range expands to `313.5–378 s/km`;
-- a `180–220 W` stationary-cycling range expands to `170–231 W`; and
-- an easy reference-HR band of `108–135 bpm` produces soft flags only below
-  `103 bpm` or above `140 bpm`.
-
-### Proposed structured-intensity mapping
-
-The mapping uses only `session.intensity.rpe_range`; purpose, execution,
-guidance, titles, and notes are never parsed.
-
-| Structured RPE range | Proposed reference HR band |
-|---|---|
-| Entire range within 1–4 | Easy |
-| Entire range within 5–6 | Moderate |
-| Entire range within 7–10 | Hard |
-| Range crosses one of those boundaries | `NOT_COMPARABLE` for HR |
-
-Approval must either accept these numbers or replace them. Implementation must
-store the selected rule-table version and metric provenance.
+The previous 19-item list was reduced on 2026-09-07. E6, the signal
+vocabulary/safety scope, and outcome persistence are approved and recorded in
+`locked.md`; downstream decisions 11–19 were removed from the active gate
+because the evaluator can persist a versioned outcome without implementing
+those consumers.
 
 ## E7 — Signal thresholds, precedence, and coverage
 

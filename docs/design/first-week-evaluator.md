@@ -163,9 +163,9 @@ session verdict `NOT_COMPARABLE`.
 
 ## Per-session comparison
 
-Status: `DESIGNED` metric set, source-precedence architecture, and safety
-behavior. Exact numerical tolerances are `PROPOSED` and remain an
-`OPEN DECISION` in `docs/decisions/open.md`.
+Status: `DESIGNED` metric set, source-precedence architecture, safety behavior,
+and E6 numerical tolerances. The locked E6 rules are in
+`docs/decisions/locked.md`.
 
 Only matched pairs enter this computation. The calculation is deterministic and
 does not call an LLM.
@@ -274,9 +274,9 @@ For planned intensity, compare the actual value with
 - Swimming pace: seconds/100 m; lower is faster.
 - Cycling power: watts; higher is harder.
 - RPE fallback: no objective output verdict in v1; the structured `rpe_range`
-  may select a proposed reference-HR band, but HR remains a soft flag.
+  may select a reference-HR band, but HR remains a soft flag.
 
-With an approved boundary tolerance applied symmetrically, classification is
+With the locked boundary tolerance applied symmetrically, classification is
 direction-aware:
 
 | Metric | Below expected output | Within expected output | Above expected output |
@@ -295,7 +295,7 @@ to the corresponding built, age-estimated `ReferenceHeartRateZones` band is
 therefore required before comparing a reliable or explicitly accepted actual
 average HR. The evaluator must not parse purpose/guidance prose to choose the
 band, and it must preserve the approximation caveat. The mapping boundaries are
-an `OPEN DECISION`.
+locked in E6.
 
 `DESIGNED` HR verdicts:
 
@@ -332,7 +332,7 @@ stored canonical running/swimming pace precedes a fresh derivation; stationary
 cycling average power is primary; speed/cadence are contextual; and a stored
 summary average HR precedes an adequately covered reliable-sample average.
 Every selection retains provenance. Numerical quality/tolerance gates and the
-RPE-range-to-HR-band mapping remain `PROPOSED` pending E6 approval.
+RPE-range-to-HR-band mapping are locked in E6.
 
 ### Worked running examples
 
@@ -543,8 +543,8 @@ Status: `PROPOSED`.
 
 ## Unresolved decisions and contradictions
 
-The only blocking product decisions are the numerical E6 metric tolerances and
-E7 signal/coverage thresholds in [Open decisions](../decisions/open.md).
+The only blocking product decision is the E7 signal/coverage threshold table in
+[Open decisions](../decisions/open.md).
 
 Four architectural tensions must be resolved explicitly:
 

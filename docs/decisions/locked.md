@@ -108,9 +108,32 @@ are defined in `docs/README.md`.
   athlete/plan references, plan kind/revision, evaluation-rule version, evidence
   provenance, per-session insights, weekly aggregate, and supersession reference.
   They do not reuse the existing dated `WeekComparison` shape.
+- `DESIGNED` — E6 numerical metric tolerances are deterministic and versioned.
+  Duration is within ±10% of the planned value or range, with no fixed minimum.
+  Distance is within ±5% with minimum allowances of 250 m for running, 1 km for
+  cycling, and 50 m for swimming; it is evaluated only for an explicit structured
+  target. Running pace is within ±5% of each range boundary with a 10 s/km
+  minimum; stationary-cycling power is within ±5% with a 10 W minimum; and
+  swimming pace is within ±5% with a 3 s/100 m minimum when reliable duration
+  and distance are available.
+- `DESIGNED` — for a scalar target `T`, metrics with a fixed minimum are within
+  `T ± max(percent × T, minimum)`; duration is within `T ± (10% × T)`. For a
+  range `[L, U]`, lower and upper boundaries are expanded independently. Raw
+  values and signed deltas remain available for every verdict.
+- `DESIGNED` — planned `session.intensity.rpe_range` selects the evaluator's
+  approximate HR reference band: an entire range in 1–4 selects easy, 5–6
+  selects moderate, and 7–10 selects hard. A range crossing those boundaries is
+  `NOT_COMPARABLE` for HR. Purpose, execution, guidance, titles, and notes are
+  never parsed.
+- `DESIGNED` — a stored average-HR summary takes precedence. Reliable samples
+  covering at least 80% of selected workout duration may supply an average when
+  no summary is available. If a stored and sampled average differ by more than
+  10 bpm, emit `SOURCE_CONFLICT` and make the HR verdict `NOT_COMPARABLE`. The
+  selected reference-HR band has a ±5 bpm allowance and remains a soft effort
+  flag only.
 
-The exact numerical metric tolerances and signal/coverage thresholds remain the
-only evaluator product gates in `docs/decisions/open.md`.
+The E7 signal/coverage thresholds are the only remaining evaluator product gate
+in `docs/decisions/open.md`.
 
 None of these evaluator decisions is `BUILT`. The existing `compare_week()` is
 a separate dated-plan algorithm that greedily matches nearest same-discipline
