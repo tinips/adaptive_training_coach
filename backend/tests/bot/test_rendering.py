@@ -159,7 +159,10 @@ def test_first_week_menu_compacts_metric_cards_and_deduplicates_logging() -> Non
                     "guidance": "Long guidance stays in the saved session.",
                 },
                 objective="This redundant objective is hidden.",
-                targets={"duration_minutes": 45},
+                targets={
+                    "duration_minutes": 45,
+                    "distance_range_meters": (7500.0, 8500.0),
+                },
                 execution="This long execution paragraph is hidden from the menu.",
             ),
         ),
@@ -177,7 +180,7 @@ def test_first_week_menu_compacts_metric_cards_and_deduplicates_logging() -> Non
 
     rendered = messages.first_week_menu(plan)
 
-    assert "<b>1. Running</b> · 45 min · Easy (RPE 3-4, 5:30-6:15/km)" in rendered
+    assert "<b>1. Running</b> · 7.5-8.5 km · Easy (RPE 3-4, 5:30-6:15/km)" in rendered
     assert "Purpose: Calibrate easy aerobic feel." in rendered
     assert "…" not in rendered
     assert "redundant objective" not in rendered

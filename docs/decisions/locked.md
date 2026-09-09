@@ -59,6 +59,66 @@ are defined in `docs/README.md`.
 - `DESIGNED` — the first-week evaluator may use HR only as a soft effort flag.
   One mismatch never automatically changes zones or declares lost fitness.
 
+## Workout capture
+
+- `DESIGNED`, not yet implemented (2026-09-08). Confirming a screenshot-captured
+  workout now requires average and max heart rate. The existing optional
+  "Add heart rate" prompt becomes a hard requirement: the confirm action is
+  blocked until both values are present, replacing the current behavior where
+  an athlete may confirm without them.
+- This decision does not yet address athletes without a heart-rate-capable
+  device; they would be unable to confirm any workout under this rule until a
+  fallback path is designed. Tracked in `roadmap.md`'s Deferred section.
+
+## Elevation adjustment (running and cycling)
+
+Status: `DECIDED` for the gating rule and mechanism (2026-09-09); `PROVISIONAL`
+for the specific coefficients below, which need calibration against real
+ride/run data. Ship every coefficient as a named, isolated constant,
+commented as provisional, same as the E7 scoring numbers.
+
+- Gating uses the workout's own recorded type (`RunningType`, `CyclingType`),
+  never inferred from an elevation reading or free text. Adjustment runs for
+  running types `OUTDOOR` and `TRAIL`, and for cycling types `ROAD`,
+  `GRAVEL`, and `MTB` only when power is unavailable for that session (power
+  remains primary whenever present). Adjustment never runs for running types
+  `TRACK` and `TREADMILL`, or cycling types `STATIONARY` and `OTHER`,
+  regardless of what elevation the workout reports.
+- Stationary cycling keeps duration and power as its pair; it does not adopt
+  distance-and-pace comparison, since an indoor trainer's distance is
+  computed from power and speed, not independently measured.
+- Treadmill incline is not currently captured anywhere in the data model, so
+  an inclined treadmill session is treated as flat. Known limitation, not
+  solved by this decision; a future fix if incline training becomes common.
+- Formula: for a gated workout with both `elevation_gain_meters` and
+  `elevation_loss_meters` present, `climb_grade_percent =
+  elevation_gain_meters / distance_meters * 100` and `descent_grade_percent =
+  elevation_loss_meters / distance_meters * 100`. Running:
+  `elevation_adjusted_pace_seconds_per_km = actual_pace_seconds_per_km *
+  (1 - CLIMB_PACE_CREDIT * climb_grade_percent + DESCENT_PACE_PENALTY *
+  descent_grade_percent)`. Cycling (power-fallback only):
+  `elevation_adjusted_speed_kph = actual_speed_kph * (1 + CLIMB_SPEED_CREDIT *
+  climb_grade_percent - DESCENT_SPEED_PENALTY * descent_grade_percent)`.
+- Illustrative starting coefficients, not yet calibrated: `CLIMB_PACE_CREDIT
+  = 0.03`, `DESCENT_PACE_PENALTY = 0.01` for running; `CLIMB_SPEED_CREDIT =
+  0.05`, `DESCENT_SPEED_PENALTY = 0.02` for cycling. This is a linear
+  approximation and likely understates cost at very steep grades; a cap or a
+  non-linear curve may be needed later, not a v1 blocker since typical
+  training routes are far more moderate.
+- Sanity guard: if the computed adjustment would move pace or speed by more
+  than `MAX_ELEVATION_ADJUSTMENT_PERCENT` (illustrative: 25%), treat the
+  elevation reading as unreliable, emit a data-quality flag, and fall back
+  to the unadjusted value rather than applying an implausible correction.
+- Missing `elevation_gain_meters` or `elevation_loss_meters` on a gated
+  workout never becomes zero. Fall back to the unadjusted actual pace or
+  speed, attach a data-quality flag noting the adjustment could not be
+  applied, and do not mark the session `NOT_COMPARABLE` for this reason
+  alone; raw pace/speed is still usable.
+- Both the raw and the elevation-adjusted value are stored. The adjusted
+  value feeds the output-comparison flag and the ratio check described in
+  `docs/decisions/open.md`; the raw value remains visible as its own fact
+  and is never overwritten.
+
 ## First-week evaluator
 
 - `DESIGNED` — matching is athlete-explicit. Date or discipline may organize
@@ -74,8 +134,13 @@ are defined in `docs/README.md`.
   Secondary/multi-workout matching is deferred.
 - `DESIGNED` — eligible workouts fall inside the athlete-local Monday–Sunday
   plan week. Duplicate or unresolved workouts are excluded until resolved.
-- `DESIGNED` — planned sessions without links are `MISSED`; eligible workouts
-  without links are `EXTRA`.
+- `DESIGNED` (revised 2026-09-08) — in v1, every logged workout must be
+  linked to a planned session before it can be confirmed; there is no
+  unlinked `EXTRA` state. A planned session with no linked workout is
+  `MISSED`. The capture flow blocks confirming a workout with no planned
+  session available to link it to (see "Workout capture"). Allowing a
+  genuinely unplanned workout to be logged on its own is deferred to the
+  ongoing-planner milestone, not part of v1.
 - `DESIGNED` — `CANCELLED_AGREED` is reserved for a future confirmed plan-change
   flow and is never inferred from a missing workout.
 - `DESIGNED` — missed sessions stay visible in completion reporting and are
@@ -131,6 +196,115 @@ are defined in `docs/README.md`.
   10 bpm, emit `SOURCE_CONFLICT` and make the HR verdict `NOT_COMPARABLE`. The
   selected reference-HR band has a ±5 bpm allowance and remains a soft effort
   flag only.
+
+## Prescribed-range tolerance model (running/swim pace, cycling power, distance/volume)
+
+Status: `DECIDED` for the model and scope (2026-09-09); `PROVISIONAL` for the
+specific minimum-width numbers below, pending calibration against real
+athlete data, same as the E7 scoring numbers and the elevation coefficients.
+
+This supersedes the E6 boundary-expansion tolerance above for four metrics
+only: running pace, swim pace, cycling power, and distance/volume for
+running, swimming, and cycling when a session has an explicit distance
+target. For these, the LLM prescribes the target as a range, and the range's
+own boundaries are the flagging boundaries directly. No percent-or-minimum
+tolerance is added on top of the prescribed range; the range is the margin.
+
+- Running pace and swim pace already prescribe a range
+  (`session.intensity.target_range`); this decision only removes the E6
+  boundary expansion that used to widen it further, it does not change how
+  the range itself is authored.
+- Cycling power already prescribes a range the same way; the E6 boundary
+  expansion is removed for it too.
+- Distance/volume changes shape: for running, swimming, and cycling, an
+  explicit distance target moves from an optional scalar value to a
+  prescribed range (minimum and maximum). It is still evaluated only when a
+  session has an explicit structured distance target, exactly as E6 already
+  specified.
+- A validator enforces a minimum width on every prescribed range covered by
+  this decision, so the LLM cannot prescribe a range too narrow to be
+  meaningful. If a prescribed range is narrower than the floor, the
+  validator widens it to the floor before it is stored. The floor numbers
+  reuse the E6 minimums, now applied as a total-width floor instead of a
+  per-boundary expansion: running pace 10 s/km, swim pace 3 s/100m, cycling
+  power 10 W, running distance 250 m, swim distance 50 m, cycling distance
+  1 km.
+
+Not covered by this decision; these three keep the E6 model above unchanged:
+
+- Strength: duration-only, no pace/power/distance target exists on it.
+- RPE-fallback sessions: no pace or power to build a range from.
+- Duration, for running, swimming, and cycling: no longer independently
+  prescribed or flagged at all, except where noted below. See "Duration
+  derivation (continuous and structured sessions)" immediately below for the
+  resolved model.
+
+This is a schema and validator change, not only a docs change: distance
+targets for running, swimming, and cycling need to become ranges instead of
+optional scalars, and a new minimum-range-width validator needs to exist.
+Code implementation is a separate pass; this decision only locks the model,
+the scope, and the floor numbers.
+
+## Duration derivation (continuous and structured sessions)
+
+Status: `DECIDED` for the model (2026-09-09). This is a schema and evaluator
+change, not only a docs change; code implementation is a separate pass.
+
+Duration is no longer independently prescribed or flagged for running,
+swimming, or cycling, except in the unaffected exceptions below. It is
+computed by code from what is actually prescribed, never authored or judged
+on its own. This resolves the "still-open" duration question left in
+"Prescribed-range tolerance model" above.
+
+- **Continuous single-effort sessions** (no internal structure: an easy run,
+  a steady ride, a straight-through swim). Distance and pace/power are
+  prescribed as ranges, per "Prescribed-range tolerance model" above.
+  Duration is derived from the range endpoints (`duration = distance /
+  pace`, or the cycling equivalent), producing a derived duration range. It
+  is never independently prescribed, never a target, never flagged on its
+  own.
+- **Structured sessions** (intervals, or any session with distinct work and
+  rest blocks). The LLM designs the session as an ordered list of segments.
+  A work segment prescribes a duration and a pace-or-power range (running
+  and swimming use pace, cycling uses power). A rest segment prescribes
+  only a duration, no pace or power requirement. The LLM has full latitude
+  over segment count, length, and shape; only the segment shape (duration
+  plus an optional pace/power range) is fixed by the schema.
+- From the segment list, code deterministically computes three overall
+  numbers, none of them separately authored: overall duration is the sum of
+  every segment's duration, work and rest included; the overall pace/power
+  range is a duration-weighted blend of the work segments' individual
+  ranges (rest segments do not contribute, they carry no intensity target);
+  overall distance is derived from each work segment's own duration and
+  pace, summed, and stays contextual, never independently prescribed or
+  flagged.
+- The evaluator computes the athlete's actual overall the same way: actual
+  total distance over actual total work time gives the actual blended pace
+  (duration-weighted average power for cycling); actual total duration is
+  the sum of what was actually logged. The output check compares this
+  single actual-overall value against the code-computed overall range for
+  one `BELOW_EXPECTED_OUTPUT` / `WITHIN_EXPECTED_OUTPUT` /
+  `ABOVE_EXPECTED_OUTPUT` verdict per session, same vocabulary as today.
+- V1 does not verdict individual segments. A session with a strong rep and a
+  weak rep can average out to a single "fine" verdict. This is an accepted
+  v1 simplification, not a free win; revisit once per-segment verdicts are
+  in scope.
+
+Unaffected exceptions, unchanged by this decision:
+
+- Strength: duration-only, matched not flagged.
+- RPE-fallback sessions: no pace or power data; duration stays
+  independently prescribed on the E6 scalar target and ±10% tolerance.
+- Cycling's continuous/primary mode: duration and power are still
+  prescribed together as already locked; this decision only adds the
+  structured/segment case on top, for cycling interval sessions.
+
+Code implementation is a separate pass: `SessionTargets` needs a segment
+sub-structure (an ordered list of work/rest segments) for structured
+sessions, a deterministic overall-range aggregator, and the evaluator's
+output-check computation needs to consume actual segment-level data (or an
+equivalent actual breakdown) to compute the actual-overall blend. This
+decision locks the model and scope only.
 
 E7 through E11 in `docs/decisions/open.md` are the remaining evaluator
 product gates: signal thresholds/precedence, volume-overshoot handling in the

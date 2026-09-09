@@ -7,7 +7,7 @@ from datetime import date, datetime
 from html import escape
 from typing import Any
 
-from app.domain.enums import ProfileSettingsStep
+from app.domain.enums import Discipline, ProfileSettingsStep
 from app.schemas.capabilities import CapabilityReview, GoalExecutionAssessment
 from app.schemas.weekly_plans import (
     FirstWeekPlan,
@@ -406,7 +406,7 @@ def first_week_menu_messages(
     ):
         session_blocks.append(
             f"<b>{number}. {escape(session.discipline.value.title())}</b> · "
-            f"{session.targets.duration_minutes} min · "
+            f"{_volume_or_duration_label(session)} · "
             f"{_intensity_label(session)} ({_intensity_range(session)})\n"
             f"  Purpose: {escape(session.purpose)}"
         )
@@ -430,6 +430,25 @@ def first_week_menu_messages(
         )
     )
     return _chunk_telegram_blocks(header, (*session_blocks, *trailing_blocks))
+
+
+def _volume_or_duration_label(session: PlanSession) -> str:
+    """What the athlete sees as their target: pace/volume, not duration.
+
+    See docs/decisions/locked.md, "Duration derivation": for a running or
+    swimming session with a real pace target, the athlete's prescribed
+    volume is the distance range, duration is only an internal scheduling
+    estimate. Strength, cycling, and RPE-fallback sessions still prescribe
+    duration directly, so duration is what's shown for those.
+    """
+
+    distance_range = session.targets.distance_range_meters
+    if distance_range is None:
+        return f"{session.targets.duration_minutes} min"
+    lower, upper = distance_range
+    if session.discipline is Discipline.SWIMMING:
+        return f"{lower:.0f}-{upper:.0f} m"
+    return f"{lower / 1000:.1f}-{upper / 1000:.1f} km"
 
 
 def _intensity_label(session: PlanSession) -> str:

@@ -1314,9 +1314,14 @@ def _build_first_week_fallback(prepared: _PlanningInput) -> FirstWeekPlan:
             )
             rpe_range = intensity["rpe_range"]
             assert isinstance(rpe_range, list) and isinstance(rpe_range[1], int)
-            targets: dict[str, int] = {"duration_minutes": duration}
+            targets: dict[str, object] = {"duration_minutes": duration}
             if discipline is not Discipline.STRENGTH:
                 targets["rpe"] = rpe_range[1]
+            distance_range = _fallback_distance_range_meters(
+                discipline=discipline, duration_minutes=duration, intensity=intensity
+            )
+            if distance_range is not None:
+                targets["distance_range_meters"] = distance_range
             sessions.append(
                 {
                     "discipline": discipline,
@@ -1354,6 +1359,42 @@ def _build_first_week_fallback(prepared: _PlanningInput) -> FirstWeekPlan:
             {"week_start": prepared.week_start, "sessions": sessions}
         )
     )
+
+
+_FALLBACK_PACE_UNIT_METERS = {
+    "PACE_SECONDS_PER_KM": 1000.0,
+    "SWIM_PACE_SECONDS_PER_100M": 100.0,
+}
+
+
+def _fallback_distance_range_meters(
+    *, discipline: Discipline, duration_minutes: int, intensity: dict[str, object]
+) -> tuple[float, float] | None:
+    """A companion distance figure when the fallback prescribes a pace target.
+
+    See docs/decisions/locked.md, "Prescribed-range tolerance model": running
+    and swimming sessions with a real pace target require a distance range.
+    The fallback authors duration directly (unaffected, it is deterministic
+    code, not the coach model), so this only backs into a matching distance
+    from the duration already chosen and the pace zone already resolved,
+    purely so the session satisfies the schema. The minimum-width validator
+    widens this single-point estimate to a real range.
+    """
+
+    if discipline not in (Discipline.RUNNING, Discipline.SWIMMING):
+        return None
+    metric = intensity.get("metric")
+    unit_meters = _FALLBACK_PACE_UNIT_METERS.get(metric) if isinstance(metric, str) else None
+    if unit_meters is None:
+        return None
+    target_range = intensity.get("target_range")
+    if not isinstance(target_range, (list, tuple)) or len(target_range) != 2:
+        return None
+    avg_pace_seconds = (float(target_range[0]) + float(target_range[1])) / 2
+    if avg_pace_seconds <= 0:
+        return None
+    distance_meters = (duration_minutes * 60 / avg_pace_seconds) * unit_meters
+    return (distance_meters, distance_meters)
 
 
 def _fallback_session_shape(

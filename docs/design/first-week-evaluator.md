@@ -77,7 +77,11 @@ guardrails.
   it.
 - **Matched** — a planned session with an accepted link to actual evidence.
 - **Missed** — a planned session with no accepted link at evaluation time.
-- **Extra** — an otherwise eligible workout with no accepted link to this plan.
+- **Extra** — an otherwise eligible workout with no accepted link to this
+  plan. Removed from v1 scope (revised 2026-09-08): every logged workout must
+  now be linked to a planned session before it can be confirmed, so no
+  unlinked workout can exist. Reserved for a future, ongoing-planner
+  milestone.
 - **Cancelled agreed** — a future status for a confirmed plan change. It is not
   part of v1 and must not be inferred from a missing workout.
 - **Completion** — whether planned work was done. It may include missed work in
@@ -108,9 +112,12 @@ without confirmation.
 
 For v1, a workout can link to at most one planned session, and a planned session
 has at most one primary workout used by the evaluator. Unlinked planned
-sessions are `MISSED`; eligible unlinked workouts are `EXTRA`. Both remain
-visible, and neither label deletes or mutates the underlying plan or workout.
-`CANCELLED_AGREED` is reserved for a future confirmed plan-change flow.
+sessions are `MISSED`, which remains visible and does not delete or mutate
+the underlying plan. As of the 2026-09-08 revision, a workout cannot be
+confirmed without linking it to a planned session, so the earlier unlinked
+`EXTRA` workout state no longer exists in v1; it is deferred to a future,
+ongoing-planner milestone. `CANCELLED_AGREED` is reserved for a future
+confirmed plan-change flow.
 
 ### Matching example
 
@@ -124,16 +131,17 @@ flowchart LR
     S3["S-strength<br/>30 min strength"]
     W1["W-101<br/>40 min run"]
     W2["W-102<br/>28 min strength"]
-    W3["W-103<br/>35 min swim"]
 
     W1 -- "athlete confirms" --> S1
     W2 -- "athlete confirms" --> S3
     S2 -. "no link = MISSED" .-> M["MISSED"]
-    W3 -. "no link = EXTRA" .-> E["EXTRA"]
 ```
 
-Result: two matched pairs, one missed planned session, and one extra workout.
-The workout dates can help order the UI, but they do not decide either match.
+Result: two matched pairs and one missed planned session. The workout dates
+can help order the UI, but they do not decide either match. Under the
+2026-09-08 revision, a workout with nothing to link to, for example a swim
+when no planned session matches it, cannot be confirmed in v1; that case is
+deferred to a future milestone rather than logged as `EXTRA`.
 
 The v1 primary link is one-to-one. Relinking is allowed before evaluation.
 Post-evaluation correction creates a superseding evaluation revision. Eligible
@@ -196,7 +204,7 @@ The name is `PROPOSED`; the facts are `DESIGNED` unless marked otherwise.
 | Field group | Required meaning |
 |---|---|
 | Identity | Exact plan/revision, stable planned-session reference, and linked-workout reference with athlete ownership |
-| Status | `MATCHED`, `MISSED`, `EXTRA`; future `CANCELLED_AGREED` |
+| Status | `MATCHED`, `MISSED`; future `CANCELLED_AGREED` (`EXTRA` deferred, see the 2026-09-08 revision above) |
 | Duration | Planned/actual seconds, delta seconds, delta percent, and source/quality |
 | Distance | Planned/actual metres and delta where the discipline/targets make it relevant |
 | Primary output | Running pace, swimming pace, or cycling power comparison when planned and available; cycling speed as context unless explicitly targeted in a future schema |
@@ -205,9 +213,10 @@ The name is `PROPOSED`; the facts are `DESIGNED` unless marked otherwise.
 | Explanation | Factual reasons and soft flags; no diagnosis or automatic zone/state change |
 
 `MATCHED` requires both references. `MISSED` has a planned-session reference and
-no workout. `EXTRA` has a workout reference and no planned session. The future
-`CANCELLED_AGREED` has a planned-session reference plus confirmation provenance,
-not merely an absent workout.
+no workout. The future `CANCELLED_AGREED` has a planned-session reference plus
+confirmation provenance, not merely an absent workout. (`EXTRA`, a workout
+reference with no planned session, is deferred; see the 2026-09-08 revision
+above.)
 
 ### Core calculations
 
@@ -252,6 +261,17 @@ actual_speed_kph =
     (actual_distance_meters / 1000) / (actual_duration_seconds / 3600)
 ```
 
+Elevation adjustment (running and cycling), `DECIDED` gating and mechanism,
+`PROVISIONAL` coefficients, see `docs/decisions/locked.md`, "Elevation
+adjustment (running and cycling)": for running types `OUTDOOR`/`TRAIL`, and
+for cycling types `ROAD`/`GRAVEL`/`MTB` when power is unavailable, actual
+pace or speed is adjusted for the workout's recorded elevation gain and loss
+before it is used below. Running types `TRACK`/`TREADMILL` and cycling types
+`STATIONARY`/`OTHER` are never adjusted. Both the raw and the adjusted value
+are stored; the adjusted value is what feeds the output-comparison
+classification and the ratio check for a gated workout, never the raw value
+alone.
+
 For a scalar target whose planned value is the reference, also report:
 
 ```text
@@ -289,6 +309,31 @@ Cycling speed has the higher-is-more-output direction, but it remains context
 unless a future plan schema explicitly prescribes a speed range. Duration and
 distance deltas describe volume completion; they do not by themselves prove
 fitness or intensity compliance.
+
+Prescribed-range tolerance, `DECIDED` model and scope, `PROVISIONAL` floor
+numbers, see `docs/decisions/locked.md`, "Prescribed-range tolerance model
+(running/swim pace, cycling power, distance/volume)": for running pace, swim
+pace, cycling power, and distance/volume for running, swimming, and cycling,
+the LLM-prescribed range's own boundaries are the flagging boundaries. The
+E6 boundary-expansion tolerance no longer applies to these four metrics. A
+distance target for these disciplines is now a prescribed range, not an
+optional scalar. Strength and RPE-fallback sessions are unaffected and keep the E6
+scalar-plus-tolerance model described above.
+
+Duration derivation, `DECIDED` model, see `docs/decisions/locked.md`,
+"Duration derivation (continuous and structured sessions)": duration is no
+longer independently prescribed or flagged for running, swimming, or
+cycling. For a continuous single-effort session, duration is derived from
+the prescribed distance and pace/power range. For a structured session
+(intervals, or distinct work/rest blocks), the LLM designs an ordered list
+of work segments (duration plus a pace-or-power range) and rest segments
+(duration only); code deterministically computes an overall duration, an
+overall duration-weighted pace/power range, and a contextual overall
+distance from that list, and the output check compares the athlete's actual
+overall, computed the same way from actual data, against the code-computed
+overall range for one verdict per session. V1 does not verdict individual
+segments. Strength, RPE-fallback sessions, and cycling's continuous/primary
+mode (duration plus power) are unaffected.
 
 HR is context. The persisted plan has a structured `rpe_range`, not a structured
 easy/moderate/hard enum. An approved deterministic mapping from that RPE range
@@ -390,8 +435,9 @@ separate denominators:
 - **Planned-session completion:** `MATCHED / (MATCHED + MISSED)` for v1.
 - **Matched-performance adherence:** performance comparisons over matched
   sessions with the required actual metric only.
-- **Weekly volume:** all eligible actual work, including extras, reported
-  separately from plan adherence.
+- **Weekly volume:** all eligible actual work, matched sessions only in v1
+  since `EXTRA` no longer exists (revised 2026-09-08), reported separately
+  from plan adherence.
 
 ## Weekly aggregate
 
@@ -399,11 +445,11 @@ Status: `DESIGNED` facts; deterministic signal thresholds are `OPEN DECISION`.
 
 The aggregate contains:
 
-- matched, missed, extra, and unknown/cancelled counts;
+- matched, missed, and unknown/cancelled counts (no `extra` count in v1, see revision note above);
 - planned and actual minutes by discipline, with each denominator named;
 - duration/distance/intensity comparisons over matched sessions;
 - HR soft flags and data-quality counts;
-- total actual weekly duration and distance, including extras;
+- total actual weekly duration and distance (matched sessions only in v1);
 - baseline-calibration evidence by discipline; and
 - one deterministic suggested signal plus the facts that caused it. The
   `PROPOSED` vocabulary is `ABSORBED_WELL`, `ON_TRACK`, `WATCH_EFFORT`,
@@ -434,7 +480,7 @@ planned_volume_completion_percent =
 
 all_actual_duration =
     sum(actual_duration for matched sessions)
-    + sum(actual_duration for eligible extra workouts)
+    + sum(actual_duration for eligible extra workouts)  # always 0 in v1; EXTRA deferred
 ```
 
 A percentage is `UNKNOWN`, not zero, when its denominator is zero. Future
@@ -450,12 +496,12 @@ logical facts:
 | Group | Fields |
 |---|---|
 | Identity/version | plan id and revision, athlete-local week start/end and timezone, evaluation-rule version |
-| Classification | matched, missed, extra, and future cancelled counts plus references |
+| Classification | matched, missed, and future cancelled counts plus references (no `extra` in v1) |
 | Denominators | explicitly named completion/adherence denominators and exclusions |
 | Volume | planned and actual duration/distance by discipline; matched-only and all-eligible-actual totals kept separate |
-| Intent/output | pace/power coverage and adherence, intensity-intent verdict counts, HR soft-flag counts |
+| Intent/output | pace/power coverage and adherence, intensity-intent verdict counts, HR soft-flag counts, count of sessions not `AS_PRESCRIBED` in either direction and its coaching-note trigger (see `docs/decisions/open.md`, E10) |
 | Evidence quality | missing-data coverage, HR/source quality, duplicate exclusions |
-| Interpretation | positive efficiency evidence and factual observations by discipline |
+| Interpretation | positive efficiency evidence and factual observations by discipline; per-discipline efficiency factor (output divided by average HR), saved for future week-over-week comparison; `progressive_load_absorbed` flag alongside `ABSORBED_WELL` (see `docs/decisions/open.md`, E7) |
 | Handoff | deterministic suggested signal, signal reasons, and rule version |
 
 ### Proposed deterministic signal rule table
@@ -481,8 +527,7 @@ flowchart LR
     M["Matched comparisons"] --> C["Completion facts<br/>planned denominator"]
     X["Missed sessions"] --> C
     M --> A["Capability facts<br/>matched-only denominator"]
-    E["Extra workouts"] --> V["Actual weekly volume<br/>all eligible actuals"]
-    M --> V
+    M --> V["Actual weekly volume<br/>matched sessions only in v1"]
     C --> R["Versioned rule table<br/>OPEN DECISION"]
     A --> R
     V --> R
@@ -504,7 +549,6 @@ above; it cannot be read from today's workout model.
 | Moderate ride | 60 | 63 | Matched; overcooked HR/effort flag |
 | Easy strength | 30 | 28 | Matched; within recorded RPE intent |
 | Steady run | 45 | — | Missed; excluded from capability math |
-| Extra swim | — | 35 | Extra; included only in actual weekly volume |
 
 Deterministic facts:
 
@@ -514,8 +558,9 @@ Deterministic facts:
   `131 / 130 = 100.8%`.
 - All planned minutes are `175`; actual minutes linked to planned sessions are
   `131`, a separate completion-volume ratio of `74.9%`.
-- Total actual weekly volume is `131 + 35 = 166 min` when the extra swim is
-  eligible for the week.
+- Total actual weekly volume is `131 min`, matched sessions only. (Before the
+  2026-09-08 revision this example also included an unlinked extra swim,
+  which is no longer a possible v1 case.)
 - Intensity intent is respected in `2 / 3 = 66.7%` of matched sessions; one has
   an effort flag. The missed run is not in that denominator.
 

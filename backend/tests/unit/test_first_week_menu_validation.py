@@ -463,7 +463,11 @@ def test_repair_a_pace_endurance_session_clears_the_pace_target() -> None:
                         "rpe_range": [6, 7],
                         "guidance": "Hold this pace.",
                     },
-                    {"duration_minutes": 40, "pace_seconds_per_km": 310},
+                    {
+                        "duration_minutes": 40,
+                        "pace_seconds_per_km": 310,
+                        "distance_range_meters": (7500.0, 8000.0),
+                    },
                 )
             ],
         }

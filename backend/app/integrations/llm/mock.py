@@ -275,9 +275,14 @@ def _fake_first_week_session(
         purpose, objective, execution = _fake_easy_role(index)
     rpe_range = intensity["rpe_range"]
     assert isinstance(rpe_range, list) and isinstance(rpe_range[1], int)
-    targets: dict[str, int] = {"duration_minutes": 45}
+    targets: dict[str, object] = {"duration_minutes": 45}
     if discipline != "STRENGTH":
         targets["rpe"] = rpe_range[1]
+    distance_range = _fake_distance_range_meters(
+        discipline=discipline, duration_minutes=45, intensity=intensity
+    )
+    if distance_range is not None:
+        targets["distance_range_meters"] = distance_range
     return {
         "discipline": discipline,
         "purpose": purpose,
@@ -286,6 +291,36 @@ def _fake_first_week_session(
         "targets": targets,
         "execution": execution,
     }
+
+
+_FAKE_PACE_UNIT_METERS = {
+    "PACE_SECONDS_PER_KM": 1000.0,
+    "SWIM_PACE_SECONDS_PER_100M": 100.0,
+}
+
+
+def _fake_distance_range_meters(
+    *, discipline: str, duration_minutes: int, intensity: dict[str, object]
+) -> tuple[float, float] | None:
+    """Companion distance for a fake pace-metric session, see service.py's
+    ``_fallback_distance_range_meters`` for the same reasoning: running and
+    swimming sessions with a real pace target now require a distance range.
+    """
+
+    if discipline not in ("RUNNING", "SWIMMING"):
+        return None
+    metric = intensity.get("metric")
+    unit_meters = _FAKE_PACE_UNIT_METERS.get(metric) if isinstance(metric, str) else None
+    if unit_meters is None:
+        return None
+    target_range = intensity.get("target_range")
+    if not isinstance(target_range, (list, tuple)) or len(target_range) != 2:
+        return None
+    avg_pace_seconds = (float(target_range[0]) + float(target_range[1])) / 2
+    if avg_pace_seconds <= 0:
+        return None
+    distance_meters = (duration_minutes * 60 / avg_pace_seconds) * unit_meters
+    return (distance_meters, distance_meters)
 
 
 def _fake_easy_role(index: int) -> tuple[str, str, str]:
