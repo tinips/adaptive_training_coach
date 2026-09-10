@@ -9,7 +9,7 @@ cycling power/speed and numeric summary HR, both required here.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Literal
 from uuid import UUID
 
@@ -22,6 +22,8 @@ from app.domain.enums import (
     PlannedSessionLinkStatus,
     SessionIntentVerdict,
     SessionOutputVerdict,
+    VolumeRangeStatus,
+    WeeklySignal,
 )
 
 
@@ -136,3 +138,78 @@ class PerSessionInsight(_EvaluationSchema):
     positive_efficiency_evidence: bool = False
 
     quality_flags: tuple[str, ...] = ()
+
+
+class WeeklyVolumeRangeResult(_EvaluationSchema):
+    """Summed actual volume against the summed planned distance range.
+
+    docs/decisions/locked.md, "Weekly volume range status". `percent` is
+    only populated for BELOW_RANGE (`actual/range_min*100`) or ABOVE_RANGE
+    (`actual/range_max*100`); WITHIN_RANGE is reported flat, no percent.
+    UNKNOWN means no discipline in scope carried a real distance target
+    that week (nothing to compare).
+    """
+
+    status: VolumeRangeStatus
+    percent: float | None = None
+    range_min: float | None = None
+    range_max: float | None = None
+    actual: float | None = None
+
+
+class ThrivingGateResult(_EvaluationSchema):
+    """Each of the five THRIVING conditions, individually, plus the verdict.
+
+    docs/decisions/locked.md, "THRIVING gate": any one condition failing
+    alone keeps the week at ON_TRACK.
+    """
+
+    met: bool
+    zero_overcooked: bool
+    zero_below_expected_output: bool
+    zero_variance_flag: bool
+    volume_not_below_range: bool
+    has_positive_efficiency_session: bool
+
+
+class WeeklyEvaluation(_EvaluationSchema):
+    """The evaluator's full weekly output: facts, quality flags, and signal.
+
+    Name and physical schema are PROPOSED in the design doc; the facts are
+    DESIGNED. See docs/design/first-week-evaluator.md, "Proposed
+    WeeklyEvaluation contract".
+    """
+
+    plan_id: UUID
+    plan_revision: int
+    week_start: date
+    timezone: str | None
+    evaluator_version: int
+
+    per_session_insights: tuple[PerSessionInsight, ...]
+
+    matched_count: int
+    missed_count: int
+    session_completion_percent: float | None
+
+    matched_metric_coverage_percent: float | None
+    intensity_intent_adherence_percent: float | None
+
+    matched_duration_percent: float | None
+    planned_volume_completion_percent: float | None
+    all_actual_duration_seconds: int
+
+    density: float | None
+    comparable_session_count: int
+
+    variance_flag_count: int
+    variance_flag_note: str | None
+
+    volume_range_status_by_discipline: dict[Discipline, WeeklyVolumeRangeResult]
+    blended_volume_range_status: WeeklyVolumeRangeResult
+
+    thriving_gate: ThrivingGateResult
+    efficiency_factor_by_discipline: dict[Discipline, float | None]
+
+    signal: WeeklySignal
+    signal_reasons: tuple[str, ...]
