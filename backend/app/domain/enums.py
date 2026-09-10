@@ -247,3 +247,72 @@ class ProfileSettingsStep(StrEnum):
     PERSONAL_WEIGHT = "PERSONAL_WEIGHT"
     PERSONAL_HEIGHT = "PERSONAL_HEIGHT"
     PERSONAL_TIMEZONE = "PERSONAL_TIMEZONE"
+
+
+class PlannedSessionLinkStatus(StrEnum):
+    """A first-week planned session's evaluation status.
+
+    docs/decisions/locked.md, "First-week evaluator": EXTRA is deferred (every
+    logged workout must link to a planned session before it can be confirmed,
+    so no unlinked-workout state exists in v1) and CANCELLED_AGREED is
+    future-only, reserved for a confirmed plan-change flow. Only these two
+    values are reachable in v1.
+    """
+
+    MATCHED = "MATCHED"
+    MISSED = "MISSED"
+
+
+class SessionIntentVerdict(StrEnum):
+    """Whether a matched session's intended effort was respected.
+
+    docs/decisions/locked.md, "Signal scoring...": HR alone decides this
+    value (E11, Option A); pace/power never arbitrate it.
+    """
+
+    AS_PRESCRIBED = "AS_PRESCRIBED"
+    OVERCOOKED = "OVERCOOKED"
+    EASIER_THAN_EXPECTED = "EASIER_THAN_EXPECTED"
+    NOT_COMPARABLE = "NOT_COMPARABLE"
+
+
+class SessionOutputVerdict(StrEnum):
+    """Whether a matched session's objective output (pace/power) hit its range.
+
+    docs/decisions/locked.md, "Prescribed-range tolerance model": the
+    prescribed range's own boundaries are the flagging boundaries.
+    """
+
+    BELOW_EXPECTED_OUTPUT = "BELOW_EXPECTED_OUTPUT"
+    WITHIN_EXPECTED_OUTPUT = "WITHIN_EXPECTED_OUTPUT"
+    ABOVE_EXPECTED_OUTPUT = "ABOVE_EXPECTED_OUTPUT"
+    UNKNOWN = "UNKNOWN"
+
+
+class WeeklySignal(StrEnum):
+    """The evaluator's deterministic suggested signal for one plan week.
+
+    docs/decisions/locked.md, "Signal scoring, THRIVING, and volume status".
+    THRIVING renamed from ABSORBED_WELL on 2026-09-10 (same hierarchy: only
+    fires as an upgrade from ON_TRACK).
+    """
+
+    THRIVING = "THRIVING"
+    ON_TRACK = "ON_TRACK"
+    WATCH_EFFORT = "WATCH_EFFORT"
+    BACK_OFF = "BACK_OFF"
+    INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
+
+
+class VolumeRangeStatus(StrEnum):
+    """Summed actual volume against the summed planned distance-range.
+
+    docs/decisions/locked.md, "Weekly volume range status". UNKNOWN covers
+    the case with no real distance target that week (no running/cycling/
+    swimming matched sessions with a distance range to sum).
+    """
+
+    WITHIN_RANGE = "WITHIN_RANGE"
+    BELOW_RANGE = "BELOW_RANGE"
+    ABOVE_RANGE = "ABOVE_RANGE"
+    UNKNOWN = "UNKNOWN"
