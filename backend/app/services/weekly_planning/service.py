@@ -63,6 +63,10 @@ from app.services.fitness.calculator import (
     calculate_baseline_window,
 )
 from app.services.fitness.service import _fitness_evidence_for_workout
+from app.services.weekly_planning.constants import (
+    FIRST_WEEK_PLAN_SCHEMA_VERSION,
+    LEGACY_WEEKLY_PLAN_SCHEMA_VERSION,
+)
 from app.services.weekly_planning.evidence import (
     build_evidence_snapshot,
     build_plan_readiness,
@@ -1106,7 +1110,11 @@ class WeeklyPlanningService:
                     athlete_id=prepared.athlete_id,
                     week_start=prepared.week_start,
                     plan_jsonb=plan.model_dump(mode="json"),
-                    plan_schema_version=4 if isinstance(plan, FirstWeekPlan) else 3,
+                    plan_schema_version=(
+                        FIRST_WEEK_PLAN_SCHEMA_VERSION
+                        if isinstance(plan, FirstWeekPlan)
+                        else LEGACY_WEEKLY_PLAN_SCHEMA_VERSION
+                    ),
                     validation_jsonb=validation,
                     evidence_snapshot_jsonb=prepared.evidence_snapshot,
                     input_digest=prepared.input_digest,

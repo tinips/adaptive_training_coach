@@ -689,6 +689,12 @@ def _repair_first_week_menu(
         targets = _targets(raw)
         targets.pop("average_hr_bpm", None)
         targets.pop("hr_range_bpm", None)
+        # "id" is the code-generated session identity (docs/decisions/locked.md,
+        # "First-week evaluator"); repair runs before first persistence (no link
+        # can exist against these ids yet), so every repaired session gets a
+        # fresh code-generated id below rather than carrying the pre-repair one
+        # forward or accepting it as prescription input.
+        raw.pop("id", None)
     return make_first_week_plan(
         FirstWeekPlanPrescription.model_validate(
             {

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import date, datetime
 from typing import Annotated, Literal
 
@@ -241,8 +242,19 @@ def _require_and_derive_session_targets(session: object) -> object:
 
 
 class PlanSession(_WeeklyPlanSchema):
-    """One concise, actionable training session shown to the athlete."""
+    """One concise, actionable training session shown to the athlete.
 
+    ``id`` is a code-generated stable reference (docs/decisions/locked.md,
+    "First-week evaluator"): every planned session gets one so a logged
+    workout can link to it later. It is never authored by the model; the
+    LLM-facing ``PlanSessionPrescription`` carries no ``id`` field at all, so
+    the default here is the only way one is produced. A legacy (schema-v4 and
+    earlier) plan payload has no stored "id" key, so this default also
+    synthesizes a fresh id at load time for those rows -- that id is *not*
+    stable across reloads and such a plan must not be treated as linkable.
+    """
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4)
     discipline: Discipline
     purpose: str = Field(min_length=1, max_length=120)
     intensity: IntensityTarget
