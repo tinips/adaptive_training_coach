@@ -879,6 +879,48 @@ class WeeklyPlanOutcome(UUIDPrimaryKeyMixin, Base):
     )
 
 
+class FirstWeekEvaluationOutcome(UUIDPrimaryKeyMixin, Base):
+    """One immutable, versioned first-week evaluation revision.
+
+    docs/decisions/locked.md, "First-week evaluator": "evaluation records
+    are immutable and versioned... They do not reuse the removed dated
+    comparator's WeekComparison shape." Append-only: a correction after an
+    evaluation exists writes a new row with `evaluation_revision`
+    incremented, never mutates or replaces a prior row -- unlike
+    `WeeklyPlanOutcome.upsert()` above, which this evaluator deliberately
+    does not reuse.
+    """
+
+    __tablename__ = "first_week_evaluation_outcomes"
+    __table_args__ = (
+        UniqueConstraint(
+            "plan_id",
+            "evaluation_revision",
+            name="uq_first_week_evaluation_outcomes_plan_revision",
+        ),
+    )
+
+    athlete_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    plan_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("weekly_training_plans.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    week_start: Mapped[date] = mapped_column(Date, nullable=False)
+    evaluation_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    evaluator_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    payload_jsonb: Mapped[dict[str, object]] = mapped_column(
+        json_document(), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
 class RunningWorkoutDetails(Base):
     """Metrics and subtype for a running workout."""
 
@@ -1714,6 +1756,7 @@ __all__ = [
     "ContextExecutionOption",
     "CyclingWorkoutDetails",
     "ExecutionOptionCapability",
+    "FirstWeekEvaluationOutcome",
     "GoalTemplate",
     "GoalTemplateContext",
     "HikingWorkoutDetails",
