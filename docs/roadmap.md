@@ -13,12 +13,17 @@ what step is next.
 1. ~~Fix repair regression~~ — **done** (2026-09-07). The first-week repair
    loop no longer raises on an ordinary, non-HR repair. See
    [Locked decisions](decisions/locked.md).
-2. Approve E7–E11 evaluator decisions — `OPEN DECISION`; E6 is already locked.
-   E8/E9/E11 block per-session comparison and E7/E10 block weekly aggregation
-   in step 3; session identity, linking, and evidence exposure are not
-   blocked. See [Open decisions](decisions/open.md).
-3. First-week evaluator — `DESIGNED`, not implemented. See
-   [First-week evaluator](briefs/backlog/first-week-evaluator.md).
+2. ~~Approve E7-E11~~ — **done** (2026-09-10). All five are `DECIDED`. See
+   [Locked decisions](decisions/locked.md), "Signal scoring, THRIVING, and
+   volume status," for the full mechanism. Calibration numbers (density cut
+   lines and similar) are `PROVISIONAL`: implement them as named, isolated
+   constants, not inline literals, so they can be recalibrated later.
+   Nothing in step 3 or 4 below is still blocked by E7-E11.
+3. First-week evaluator — deterministic core (identity, linking,
+   evidence, per-session comparison, weekly aggregation/signal, immutable
+   outcome persistence) `BUILT, DORMANT` (2026-09-10); Telegram
+   link/evaluate/review UI, integration test, and regression test remain
+   `DESIGNED`. See [First-week evaluator](briefs/backlog/first-week-evaluator.md).
 4. Fitness history — `PROPOSED`, not implemented. See
    [Fitness state](briefs/backlog/fitness-state.md).
 5. General Planner phases — `DESIGNED`, not implemented. See
@@ -37,7 +42,7 @@ what step is next.
 | Settings-gated screenshot and TCX workout capture; pace/speed derivation; cycling power storage; reference HR zones; `/zones` | `BUILT` (screenshot defaults on; TCX optional, defaults off) |
 | Ongoing dated weekly-plan generation/validation | `BUILT` service capability, not production-wired |
 | Dated-plan `compare_week()`/`compare_finished_week()` | Removed 2026-09-08 — superseded by the first-week evaluator's athlete-explicit matching; `weekly_plan_outcomes` remains in the schema but is unused |
-| Explicit first-week links and evaluation | `DESIGNED`, not implemented |
+| Explicit first-week links and evaluation | `BUILT, DORMANT` (2026-09-10) — deterministic core exists and is tested; no Telegram UI calls it |
 | Fitness state/history | `PROPOSED`; storage choice deferred to its milestone |
 | General Planner and Stage Planner | `DESIGNED`, not implemented |
 
@@ -72,36 +77,64 @@ and verified live against the rebuilt bot image.
 
 ## Milestone 1 — first-week evaluator
 
-Status: behavior `DESIGNED`; implementation not started.
+Status: deterministic core `BUILT, DORMANT` (2026-09-10); delivery (Telegram
+UI, integration test, regression test) not started.
 
-The milestone is gated by approval of the E7–E11 decisions in
-`docs/decisions/open.md` (E6 is already locked). The executable work package
-is [First-week evaluator](briefs/backlog/first-week-evaluator.md).
+The milestone was gated by approval of the E7-E11 decisions (E6 is already
+locked). All five are resolved as of 2026-09-10; see `docs/decisions/locked.md`,
+"Signal scoring, THRIVING, and volume status." Calibration numbers (density
+cut lines, and formerly E7's numbers) remain provisional, ship as named
+constants. The executable work package is
+[First-week evaluator](briefs/backlog/first-week-evaluator.md).
 
-Implement in vertical slices:
+Implemented in vertical slices:
 
-1. **Stable planned-session references.** Add a code-generated UUID and define
-   schema-v4 compatibility plus explicit preserve/replace rules for revisions.
-   Never use array ordinal as identity or ask the LLM to create identifiers.
-2. **Explicit one-to-one primary matching.** Add athlete-owned durable links,
-   the approved correction lifecycle, candidate eligibility, and the minimal
-   link/review UI. Unlinked plan entries become `MISSED`; eligible unlinked
-   workouts become `EXTRA`.
-3. **Objective evaluator evidence.** Expose stored power, speed, cadence,
-   summary HR, sampled-HR quality, duration, distance, and pace with provenance.
-   Actual RPE is not required; optional feel text is not interpreted. Missing HR
-   or the relevant pace/power metric makes the comparison `NOT_COMPARABLE`.
-4. **Per-session deterministic comparison.** Implement the direction-aware
-   duration/distance/pace/power calculations, output comparison, intensity
-   verdict, HR soft flags, and worked examples in the evaluator design, only
-   after E8, E9, and E11 are approved.
-5. **Weekly aggregation.** Keep completion, matched capability, and total
-   actual-volume denominators separate; implement the versioned signal table,
-   using the approved five-value enum, only after E7 and E10 are approved.
-6. **Trigger and persistence.** Add the manual idempotent evaluate flow,
-   immutable versioned outcome, and superseding correction behavior. Keep
-   `last_week_feedback` downstream; the dated comparator this used to
-   reference no longer exists in code (removed 2026-09-08).
+1. **Stable planned-session references.** `BUILT` — `PlanSession.id` is a
+   code-generated UUID (`Field(default_factory=uuid.uuid4)`), never authored
+   by the LLM-facing prescription types. First-week plans write at schema
+   v5; a legacy v4 plan still loads (the field defaults), but is not
+   linkable (no durable identity).
+2. **Explicit one-to-one primary matching.** `BUILT, DORMANT` — the
+   `planned_session_links` table and `LinkingService` enforce ownership,
+   plan-revision eligibility, and the athlete-local week boundary; relinking
+   before evaluation updates the row in place. No Telegram link/review UI
+   exists yet. Unlinked plan entries classify as `MISSED`
+   (`classification.py`). As of the 2026-09-08 revision, every workout must
+   link to a planned session before it can be confirmed; the deterministic
+   predicate for that block (`has_linkable_plan_for_workout`) exists but is
+   not wired into the capture/confirm flow.
+3. **Objective evaluator evidence.** `BUILT` — `EvaluatorWorkoutEvidence`
+   exposes stored power, speed, summary HR, sampled-HR quality (via direct
+   queries, not the lazy-loaded ORM relationships), duration, distance, and
+   pace with provenance. Actual RPE is not required; optional feel text is
+   not interpreted. Missing HR or the relevant pace/power metric makes the
+   comparison `NOT_COMPARABLE`.
+4. **Per-session deterministic comparison.** `BUILT` — `compare_session()`
+   implements the direction-aware duration/distance/pace/power calculations,
+   output comparison, intensity verdict, the additive point-value/
+   variance-flag formula, the ratio-gated positive-efficiency-evidence
+   check, and HR soft flags (E8, E9, and E11 applied, see
+   `decisions/locked.md`).
+5. **Weekly aggregation.** `BUILT` — `aggregate_week()` keeps completion,
+   matched capability, and total actual-volume denominators separate;
+   implements the additive scoring formula, the variance-flag note, the
+   five-condition `THRIVING` gate, the weekly volume range status (per
+   discipline and blended), and the per-discipline efficiency factor, using
+   the approved five-value signal enum. Calibration numbers are provisional,
+   shipped as named constants (`app/services/weekly_evaluation/constants.py`).
+6. **Trigger and persistence.** Persistence half `BUILT`: immutable,
+   versioned `first_week_evaluation_outcomes` rows
+   (`FirstWeekEvaluationOutcome`/`OutcomeService`), idempotent replay, and
+   superseding-revision correction behavior. The manual trigger (an
+   "Evaluate week" action in the bot) does not exist yet. `last_week_feedback`
+   remains downstream, unbuilt; the dated comparator this used to reference
+   no longer exists in code (removed 2026-09-08).
+
+Remaining for this milestone: the Telegram link/evaluate/review UI (wiring
+`LinkingService`, a manual evaluate trigger, and `OutcomeService` into
+`backend/app/bot/`), wiring `has_linkable_plan_for_workout` into the capture
+confirm flow, an integration test against real PostgreSQL, and a regression
+test proving no route reaches `OngoingWeeklyPlanner` by accident.
 
 Completion of Milestone 1 does not itself create fitness history or switch the
 production planner to ongoing mode.
@@ -219,3 +252,7 @@ Status: escalation principle `DESIGNED`; thresholds `OPEN DECISION`.
 - Any Mini App beyond the minimal evaluator link/effort/review experience.
 - Archiving or deleting historical `docs/CLAUDE.md`; it remains a separately
   approved cleanup candidate.
+- A logging path for athletes without a heart-rate-capable device, needed once
+  workout confirmation requires heart rate (see `decisions/locked.md`,
+  "Workout capture"). Without one, these athletes cannot confirm any logged
+  workout under the new rule.

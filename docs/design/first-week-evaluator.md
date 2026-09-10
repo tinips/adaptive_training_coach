@@ -1,18 +1,26 @@
 # First-Week Evaluator — Design
 
-Status: `DESIGNED` at the behavioral level; `PROPOSED` where this document
-recommends a still-unlocked detail; not implemented.
+Status: deterministic core `BUILT, DORMANT` as of 2026-09-10 (identity,
+linking, evidence, per-session comparison, weekly aggregation/signal,
+immutable outcome persistence); the Telegram delivery UI and fitness-state
+handoff remain `DESIGNED`/`PROPOSED`, not implemented. See
+`docs/briefs/backlog/first-week-evaluator.md` for the exact test-first status
+per slice.
 
 ## Status vocabulary
 
-- `BUILT` — present in the current code. Reachability is stated separately.
+- `BUILT` — present in the current code. Reachability is stated separately
+  (`DORMANT` means tested and callable, but nothing in the live bot calls it
+  yet; unqualified `BUILT` in this document means the same unless noted).
 - `DESIGNED` — an agreed target behavior, but no implementation exists yet.
 - `PROPOSED` — a recommended detail that has not been accepted as a decision.
 - `OPEN DECISION` — implementation would encode product behavior that still
   needs explicit sign-off.
 
-No first-week workout-to-session link, evaluator, aggregate, fitness snapshot,
-or planner-feedback contract exists in code today.
+The first-week evaluator's deterministic core (link, per-session comparison,
+weekly aggregate, immutable outcome) is `BUILT, DORMANT` in code as of
+2026-09-10. No Telegram link/evaluate/review UI, fitness snapshot, or
+planner-feedback contract/consumer exists yet.
 
 ## Current boundary, verified against code
 
@@ -20,11 +28,11 @@ or planner-feedback contract exists in code today.
 |---|---|---|
 | First-week menu generation and persistence | `BUILT` and production-wired | `FirstWeekPlanner` is composed in `backend/app/bot/main.py`; `FirstWeekPlan` is an unscheduled menu persisted in `WeeklyTrainingPlan.plan_jsonb`. |
 | Workout capture | `BUILT` and production-wired behind settings | Screenshot and TCX paths persist `Workout` plus discipline detail when their feature settings permit them (`screenshot_import_enabled` defaults on; `tcx_import_enabled` is optional and defaults off). Screenshot capture can store pace, speed, cycling power, cadence, and average/max HR. Apple Health models/repositories are remnants, not a current upload path. |
-| Stable reference to one planned session | `DESIGNED`; not implemented | Every planned session will receive a code-generated UUID. Array ordinal is not identity. `PlanSession` has no identifier today. |
-| Explicit workout-to-session link | `DESIGNED` | Explicit athlete selection is locked; no schema, repository, service, or UI exists. |
-| First-week per-session comparison | `DESIGNED` | Required metrics and safety interpretation are specified below; no function implements them. |
-| First-week weekly aggregate and signal | `DESIGNED` in outline, `OPEN DECISION` for thresholds | No aggregate or signal rule table exists. |
-| Outcome persistence | `DESIGNED`; not implemented | First-week outcomes will use immutable, versioned records rather than the now-removed dated comparator's `WeekComparison` shape. |
+| Stable reference to one planned session | `BUILT` (2026-09-10) | `PlanSession.id` is a code-generated UUID (`app/schemas/weekly_plans.py`), never authored by the LLM-facing prescription types. Plans write at schema v5; a legacy v4 plan still loads but is not linkable (no durable identity). |
+| Explicit workout-to-session link | `BUILT, DORMANT` (2026-09-10) | `planned_session_links` table, `PlannedSessionLinkRepository`, and `LinkingService` (`app/services/weekly_evaluation/linking.py`) enforce ownership, plan-revision eligibility, and athlete-local week eligibility. No Telegram link/review UI exists yet. |
+| First-week per-session comparison | `BUILT` (2026-09-10) | `compare_session()` (`app/services/weekly_evaluation/comparison.py`) implements the metrics and safety interpretation below. |
+| First-week weekly aggregate and signal | `BUILT` (2026-09-10) | `aggregate_week()` (`app/services/weekly_evaluation/aggregation.py`) implements the full rule table; `PROVISIONAL` calibration numbers are named constants. |
+| Outcome persistence | `BUILT, DORMANT` (2026-09-10) | `FirstWeekEvaluationOutcome` (migration 0053) is immutable/versioned, unrelated to the removed dated comparator's `WeekComparison` shape; `OutcomeService` persists idempotently. No manual-trigger UI calls it. |
 | Fitness-state history | `PROPOSED`; storage `OPEN DECISION` | No fitness-snapshot table or repository exists. The hybrid recommendation is in `docs/design/fitness-state.md`. |
 | `last_week_feedback` | Deferred downstream | No schema, field list, reader, persistence, or planner consumer exists; it does not block evaluation persistence. |
 | No-HR-prescription invariant | `BUILT` | Both weekly model-facing schemas exclude HR intensity and HR target fields. Wider persisted types retain them only for legacy reads. Completed-workout HR remains valid evaluator evidence. |
@@ -46,10 +54,10 @@ flowchart TD
     P["First-week menu<br/>BUILT"]
     X["Screenshot or TCX capture<br/>BUILT; settings-gated"]
     A["Persisted workout actuals<br/>BUILT"]
-    L["Athlete selects planned session<br/>DESIGNED"]
-    C["Per-session comparison<br/>DESIGNED"]
-    W["Weekly aggregate and suggested signal<br/>DESIGNED + OPEN thresholds"]
-    O["Persist immutable evaluation revision<br/>DESIGNED"]
+    L["Athlete selects planned session<br/>BUILT, DORMANT; no UI"]
+    C["Per-session comparison<br/>BUILT"]
+    W["Weekly aggregate and suggested signal<br/>BUILT"]
+    O["Persist immutable evaluation revision<br/>BUILT, DORMANT; no trigger UI"]
     F["Update fitness state/history<br/>PROPOSED; storage OPEN"]
     B["Build last_week_feedback<br/>deferred downstream"]
     N["Next weekly plan consumes feedback<br/>PROPOSED; not wired"]
@@ -102,7 +110,8 @@ with “performance was 75% of target.”
 ## Explicit matching
 
 Status: identity, explicit matching, primary-link cardinality, relinking, and
-candidate eligibility are `DESIGNED`; none is implemented.
+candidate eligibility are `BUILT, DORMANT` (2026-09-10) — `LinkingService`
+and `planned_session_links` enforce all of it; no athlete-facing UI exists.
 
 The athlete explicitly selects the planned first-week session represented by a
 logged workout. The system must not infer the final link from nearest date: menu
@@ -172,8 +181,9 @@ session verdict `NOT_COMPARABLE`.
 
 ## Per-session comparison
 
-Status: `DESIGNED` metric set, source-precedence architecture, safety behavior,
-and E6 numerical tolerances. The locked E6 rules are in
+Status: `BUILT` (2026-09-10) — `compare_session()` implements the metric set,
+source-precedence architecture, safety behavior, and E6 numerical
+tolerances. The locked E6 rules are in
 `docs/decisions/locked.md`.
 
 Only matched pairs enter this computation. The calculation is deterministic and
@@ -366,11 +376,18 @@ never a prescription, diagnosis, zone change, or automatic fitness change.
 - An HR observation can add an effort flag, never turn the session into an
   error and never adjust a zone.
 
-Positive efficiency evidence requires all of the following: output at or above
-the approved expected range, actual HR inside the intended reference-HR band,
-adequate source quality, and no
-confounder that blocks comparability. Faster pace or higher power without usable
-effort evidence is `NOT_COMPARABLE` for efficiency, even though the raw output
+Positive efficiency evidence, `DECIDED` (2026-09-10), redefines and narrows
+this: see `docs/decisions/locked.md`, "Ratio check and positive efficiency
+evidence", for the full mechanism. In outline, it requires a ratio check
+(speed-or-power divided by HR, compared against an interval derived from the
+plan's own pace/power range and reference HR zone, no extra tolerance
+layered on top) to land above that interval, AND one of exactly three
+intent/output combinations (`AS_PRESCRIBED` + `ABOVE_EXPECTED_OUTPUT`,
+`EASIER_THAN_EXPECTED` + `ABOVE_EXPECTED_OUTPUT`, or
+`EASIER_THAN_EXPECTED` + `WITHIN_EXPECTED_OUTPUT`), AND adequate source
+quality, AND no confounder that blocks comparability. Faster pace or higher
+power without usable effort evidence, or without the ratio clearing its
+interval, is `NOT_COMPARABLE` for efficiency, even though the raw output
 fact remains visible.
 
 Source precedence is `DESIGNED`: canonical moving duration precedes elapsed;
@@ -407,6 +424,19 @@ These are design examples, not current test fixtures.
    exceeding the distance target, so this is positive baseline-calibration
    evidence. One session does not prove a fitness gain.
 
+   Revision note (2026-09-10): under the redefinition in
+   `docs/decisions/locked.md`, examples 1 and 2 above both land on
+   intent/output combinations that qualify for positive efficiency evidence
+   (`EASIER_THAN_EXPECTED`/`ABOVE_EXPECTED_OUTPUT` and
+   `EASIER_THAN_EXPECTED`/`WITHIN_EXPECTED_OUTPUT` respectively, assuming
+   both are read as `EASIER_THAN_EXPECTED` on intent), but neither example
+   states an exact actual HR precise enough to also verify the new ratio
+   check, since example 1 gives only "inside the easy reference band" rather
+   than a number. Whether either example clears `ratio_max` depends on that
+   missing figure; do not treat these two worked examples as still
+   automatically qualifying without checking the ratio in an actual
+   implementation or test case.
+
 3. **Overcooked easy session.** Same 40-minute plan; actual: 40 minutes, 9.0 km,
    average HR
    152 bpm. Pace is `2400 / 9.0 = 266.7 s/km` (`4:27/km`), faster than the
@@ -425,7 +455,7 @@ These are design examples, not current test fixtures.
 
 ## Missed-workout rule
 
-Status: `DESIGNED`.
+Status: `BUILT` (2026-09-10) — `classification.py`'s `classify_planned_sessions()`.
 
 A missed session remains visible in completion reporting but is excluded from
 pace, power, HR, and other capability math. It has no actual measurement,
@@ -441,7 +471,10 @@ separate denominators:
 
 ## Weekly aggregate
 
-Status: `DESIGNED` facts; deterministic signal thresholds are `OPEN DECISION`.
+Status: `BUILT` (2026-09-10) — `aggregate_week()` implements every fact and
+the deterministic signal rule table, see `docs/decisions/locked.md`,
+"Signal scoring, THRIVING, and volume status" (`PROVISIONAL` calibration
+numbers are named constants).
 
 The aggregate contains:
 
@@ -450,10 +483,12 @@ The aggregate contains:
 - duration/distance/intensity comparisons over matched sessions;
 - HR soft flags and data-quality counts;
 - total actual weekly duration and distance (matched sessions only in v1);
-- baseline-calibration evidence by discipline; and
+- baseline-calibration evidence by discipline;
+- weekly volume range status, per discipline and blended (see
+  `docs/decisions/locked.md`); and
 - one deterministic suggested signal plus the facts that caused it. The
-  `PROPOSED` vocabulary is `ABSORBED_WELL`, `ON_TRACK`, `WATCH_EFFORT`,
-  `BACK_OFF`, and `INSUFFICIENT_EVIDENCE`.
+  vocabulary is `THRIVING` (renamed from `ABSORBED_WELL`, 2026-09-10),
+  `ON_TRACK`, `WATCH_EFFORT`, `BACK_OFF`, and `INSUFFICIENT_EVIDENCE`.
 
 ### Aggregation equations
 
@@ -481,7 +516,17 @@ planned_volume_completion_percent =
 all_actual_duration =
     sum(actual_duration for matched sessions)
     + sum(actual_duration for eligible extra workouts)  # always 0 in v1; EXTRA deferred
+
+density =
+    sum(session point value for matched, comparable sessions)
+    / count(matched, comparable sessions)
 ```
+
+`density` selects the weekly band (`ON_TRACK` / `WATCH_EFFORT` / `BACK_OFF`);
+`session point value` is intent value plus output value per session. See
+`docs/decisions/locked.md`, "Signal scoring, THRIVING, and volume status" for
+the full per-session formula, the band cut lines, and the `THRIVING` gate;
+this document does not restate those numbers to avoid the two drifting apart.
 
 A percentage is `UNKNOWN`, not zero, when its denominator is zero. Future
 `CANCELLED_AGREED` handling is outside v1. Every persisted and displayed
@@ -499,28 +544,33 @@ logical facts:
 | Classification | matched, missed, and future cancelled counts plus references (no `extra` in v1) |
 | Denominators | explicitly named completion/adherence denominators and exclusions |
 | Volume | planned and actual duration/distance by discipline; matched-only and all-eligible-actual totals kept separate |
-| Intent/output | pace/power coverage and adherence, intensity-intent verdict counts, HR soft-flag counts, count of sessions not `AS_PRESCRIBED` in either direction and its coaching-note trigger (see `docs/decisions/open.md`, E10) |
+| Intent/output | pace/power coverage and adherence, intensity-intent verdict counts, HR soft-flag counts, count of sessions carrying `variance_flag` and its coaching-note trigger (see `docs/decisions/locked.md`) |
 | Evidence quality | missing-data coverage, HR/source quality, duplicate exclusions |
-| Interpretation | positive efficiency evidence and factual observations by discipline; per-discipline efficiency factor (output divided by average HR), saved for future week-over-week comparison; `progressive_load_absorbed` flag alongside `ABSORBED_WELL` (see `docs/decisions/open.md`, E7) |
+| Interpretation | positive efficiency evidence and factual observations by discipline; per-discipline efficiency factor (output divided by average HR), saved for future week-over-week comparison; weekly volume range status, per discipline and blended, the blended status gates `THRIVING` (see `docs/decisions/locked.md`) |
 | Handoff | deterministic suggested signal, signal reasons, and rule version |
 
-### Proposed deterministic signal rule table
+### Deterministic signal rule table
 
-The vocabulary and exclusion of free-text pain/safety interpretation are
-`DESIGNED`. Exact thresholds and minimum coverage remain an `OPEN DECISION`;
-the numerical proposal is in `docs/decisions/open.md`.
+Status: `DECIDED` (2026-09-10), see `docs/decisions/locked.md`, "Signal
+scoring, THRIVING, and volume status" for the full mechanism and every
+number; this table restates only the precedence, not the formula, to avoid
+the two documents drifting apart.
 
-| Priority | Candidate condition | Suggested signal |
+| Priority | Condition | Suggested signal |
 |---:|---|---|
-| 1 | Comparable metric/effort coverage is below the approved minimum | `INSUFFICIENT_EVIDENCE` |
-| 2 | Repeated objective over-effort and/or volume overshoot crosses approved back-off criteria | `BACK_OFF` |
-| 3 | Objective over-effort or volume mismatch crosses watch but not back-off criteria | `WATCH_EFFORT` |
-| 4 | Intent/volume are acceptable and approved positive-efficiency criteria are met | `ABSORBED_WELL` |
-| 5 | Evidence is sufficient and no stronger condition applies | `ON_TRACK` |
+| 1 | Comparable metric/effort coverage is below the minimum-evidence bar | `INSUFFICIENT_EVIDENCE` |
+| 2 | `density` (sum of session point values / matched-comparable count) is `+0.6` or higher | `BACK_OFF` |
+| 3 | `density` is `+0.3` up to `+0.6` | `WATCH_EFFORT` |
+| 4 | `density` is below `+0.3`, and the `THRIVING` gate (zero `OVERCOOKED`, zero `BELOW_EXPECTED_OUTPUT`, zero `variance_flag`, blended volume status not `BELOW_RANGE`, 1+ positive-efficiency session) is met | `THRIVING` |
+| 5 | `density` is below `+0.3` and the `THRIVING` gate is not met | `ON_TRACK` |
 
-The implementation must evaluate this as a versioned deterministic rule table
-and retain every causing fact. V1 does not interpret pain, safety, diagnoses, or
-free text. A missed session alone never implies reduced fitness or `BACK_OFF`.
+`THRIVING` is reached only through row 5's territory, it can never fire
+independently of a below-`+0.3` density (locked 2026-09-10, resolving the
+"does `THRIVING` require `ON_TRACK`" question raised during artifact
+review). The implementation must evaluate this as a versioned deterministic
+rule table and retain every causing fact. V1 does not interpret pain,
+safety, diagnoses, or free text. A missed session alone never implies
+reduced fitness or `BACK_OFF`.
 
 ```mermaid
 flowchart LR
@@ -528,7 +578,7 @@ flowchart LR
     X["Missed sessions"] --> C
     M --> A["Capability facts<br/>matched-only denominator"]
     M --> V["Actual weekly volume<br/>matched sessions only in v1"]
-    C --> R["Versioned rule table<br/>OPEN DECISION"]
+    C --> R["Versioned rule table<br/>DECIDED 2026-09-10"]
     A --> R
     V --> R
     R --> S["Suggested signal + reasons"]
@@ -589,30 +639,38 @@ Status: `PROPOSED`.
 
 ## Unresolved decisions and contradictions
 
-The blocking product decisions are E7 through E11 in
-[Open decisions](../decisions/open.md): E7 (signal thresholds/precedence) and
-E10 (where intensity-intent adherence belongs) gate the weekly aggregate;
-E8 (volume overshoot and the intent verdict), E9 (single-session efficiency
-evidence), and E11 (HR as sole intent arbiter) gate the per-session
-comparison itself.
+E7 through E11 (signal thresholds/precedence, volume overshoot and the
+intent verdict, single-session efficiency evidence, where intensity-intent
+adherence belongs, and HR as sole intent arbiter) were the blocking product
+decisions gating the weekly aggregate and the per-session comparison. All
+five are resolved as of 2026-09-10; see `docs/decisions/locked.md`, "Signal
+scoring, THRIVING, and volume status". [Open decisions](../decisions/open.md)
+now carries only the low-comparable-metric-coverage sub-question, which was
+never part of E7-E11 and does not block either the per-session comparison or
+the weekly aggregate as specified.
 
-Three architectural tensions remain; a fourth was resolved by removing the
-conflicting code rather than reconciling it:
+One architectural tension was resolved by removing the conflicting code
+rather than reconciling it, and three more are now resolved by the
+2026-09-10 implementation:
 
 1. ~~First-week linking is athlete-explicit (`DESIGNED`), while the built but
    dormant ongoing comparator uses greedy date matching.~~ Resolved 2026-09-08:
    the greedy-date comparator was removed, since it modeled the approach this
    design rejects, not a variant to reconcile with it.
-2. The approved immutable evaluator history differs from
+2. ~~The approved immutable evaluator history differs from
    `WeeklyPlanOutcomeRepository.upsert()`, which replaces the same week's dated
-   comparison. The evaluator therefore needs its own versioned persistence.
-3. Positive-efficiency classification needs trustworthy objective effort
+   comparison.~~ Resolved 2026-09-10: `FirstWeekEvaluationOutcome` is its own
+   append-only, versioned table (migration 0053), not a reuse of
+   `WeeklyPlanOutcome`.
+3. ~~Positive-efficiency classification needs trustworthy objective effort
    context, but summary HR and cycling power are missing from the current
-   evaluator evidence projection.
-4. Reference HR bands are labeled easy/moderate/hard, while a persisted session
-   carries a numeric `rpe_range` rather than that structured category. The
-   evaluator needs an approved deterministic mapping and must not infer it from
-   prose.
+   evaluator evidence projection.~~ Resolved 2026-09-10:
+   `EvaluatorWorkoutEvidence` carries both.
+4. ~~Reference HR bands are labeled easy/moderate/hard, while a persisted
+   session carries a numeric `rpe_range` rather than that structured
+   category.~~ Resolved 2026-09-10: `hr_bands.py`'s
+   `resolve_reference_hr_band()` implements the approved deterministic
+   mapping; it reads only `rpe_range`, never purpose/guidance prose.
 
 Two repository-root files also contain known stale implementation claims but
 are outside this task's docs-only edit boundary: `CLAUDE.md` names a nonexistent

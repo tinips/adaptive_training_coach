@@ -262,7 +262,7 @@ When finished, report:
 -   Decisions that remain open
 -   Recommended next implementation
 -   Confirmation that no application code was changed Stop after documentation and planning. Wait for my approval before implementation.
-## Current implementation status (verified against code, 2026-09-06)
+## Current implementation status (verified against code, 2026-09-10)
 
 `BUILT` means code exists; reachability is stated separately. `DESIGNED` is a
 locked target with no implementation. `PROPOSED` is a recommendation, and
@@ -289,17 +289,25 @@ locked target with no implementation. `PROPOSED` is a recommendation, and
 - `OngoingWeeklyPlanner` can generate and validate dated plans in service code,
   but `backend/app/bot/main.py` composes only `FirstWeekPlanner`; there is no
   production transition to ongoing mode.
-- `compare_week()` greedily pairs dated sessions to nearest unused
-  same-discipline workouts. `compare_finished_week()` can upsert its
-  `WeekComparison` into `weekly_plan_outcomes`, but no production caller invokes
-  the method and the Telegram planning port does not expose it. First-week
-  plans return `None` before comparison.
+- `compare_week()`/`compare_finished_week()` (the dated-plan comparator) were
+  removed 2026-09-08 as superseded by the first-week evaluator's athlete-
+  explicit matching decision below; nothing in current code performs
+  nearest-date matching.
+- **(2026-09-10)** The first-week evaluator's deterministic core: stable
+  session identity (`PlanSession.id`), the athlete-confirmed link
+  service/repository (`planned_session_links`), the evaluator evidence
+  projection, per-session comparison, missed classification, weekly
+  aggregation and signal, and immutable versioned outcome persistence
+  (`first_week_evaluation_outcomes`) all exist in
+  `backend/app/services/weekly_evaluation/` and are unit-tested and
+  live-migration-verified. No Telegram link/evaluate/review UI calls any of
+  it yet.
 
 ### Important current data gaps
 
 - `FitnessWorkoutEvidence` omits stored cycling power/speed and numeric summary
-  HR; the dated comparator returns `None` for actual cycling power and reads
-  only reliable timestamped HR observations.
+  HR (unchanged; the evaluator's own `EvaluatorWorkoutEvidence` projection,
+  added 2026-09-10, does not have this gap).
 - The first-week instructions ask athletes to record RPE and how the session
   felt, but no write model persists either value.
 - `ActivitySource.FIT` remains an enum value, but no FIT adapter/import path is
@@ -310,9 +318,9 @@ locked target with no implementation. `PROPOSED` is a recommendation, and
 
 ### DESIGNED / PROPOSED / OPEN DECISION — no implementation
 
-- A stable first-week planned-session reference and explicit workout link.
-- Any first-week per-session evaluation, missed/extra aggregation, signal rule,
-  trigger, or athlete-facing summary.
+- The first-week evaluator's Telegram link/evaluate/review UI, its capture-
+  confirm block wiring, an integration test, and a regression test (the
+  deterministic core itself is built as of 2026-09-10, see above).
 - Fitness-state snapshot/history, correction policy, latest/history reads, or
   `last_week_feedback` contract/consumer.
 - A production multi-week transition, General Planner, or Stage Planner.
@@ -320,9 +328,9 @@ locked target with no implementation. `PROPOSED` is a recommendation, and
 
 ### DESIGNED, PROPOSED, and OPEN DECISION
 
-- `DESIGNED`: explicit first-week linking, missed-workout semantics,
-  deterministic comparison/aggregation principles, separation of fitness-state
-  roles, and the three planner responsibilities.
+- `BUILT, DORMANT` (2026-09-10): explicit first-week linking, missed-workout
+  classification, and deterministic comparison/aggregation. `DESIGNED`:
+  separation of fitness-state roles and the three planner responsibilities.
 - `PROPOSED`: hybrid versioned fitness history plus a current derived view/cache;
   the storage approach remains an `OPEN DECISION`.
 - `PROPOSED`: specific identifiers, other persistence shapes, result vocabulary, and

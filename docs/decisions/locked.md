@@ -69,6 +69,29 @@ are defined in `docs/README.md`.
 - This decision does not yet address athletes without a heart-rate-capable
   device; they would be unable to confirm any workout under this rule until a
   fallback path is designed. Tracked in `roadmap.md`'s Deferred section.
+- `DECIDED` (2026-09-10), not yet implemented. Before confirming, the
+  screenshot scanner compares the workout's actual distance (or duration, for
+  sessions without a distance target) against its linked planned session's
+  own `distance_range_meters`. If actual falls under
+  `SCREENSHOT_VOLUME_FLOOR_PERCENT` of that range's midpoint, `PROVISIONAL`,
+  illustrative value 60%, same calibration caveat as every other constant in
+  this file, the scanner shows the athlete a warning and refuses the
+  confirmation outright. Nothing is saved: no workout row, no
+  discipline-detail row, no partial record. There is no override; the
+  athlete cannot save a short session anyway.
+- This check runs at capture/confirm time, not retroactively during weekly
+  evaluation, because by the time the screenshot scanner runs, the athlete
+  is already confirming against a specific planned session, so its planned
+  range is known. It does not conflict with the append-only rule for
+  captured data (see "Process" below): nothing was ever captured, so nothing
+  is being deleted, this is a rejected confirmation, not a deletion.
+- Because the workout is never saved or linked, the planned session it would
+  have matched simply stays unlinked and becomes `MISSED` under the existing
+  rule above; no new completion-rate rule is needed. It drops out of
+  completion reporting the same as any other miss, never penalized.
+- Scope: screenshot capture only for now. TCX file capture is a separate
+  ingestion path and is not yet covered by this check, a known gap tracked
+  in `docs/decisions/open.md`.
 
 ## Elevation adjustment (running and cycling)
 
@@ -121,6 +144,15 @@ commented as provisional, same as the E7 scoring numbers.
 
 ## First-week evaluator
 
+Implementation status (2026-09-10): the deterministic core implementing every
+`DESIGNED` behavior below is `BUILT, DORMANT` (`backend/app/services/
+weekly_evaluation/`, `backend/app/repositories/planned_session_links.py`,
+`backend/app/repositories/first_week_evaluation_outcomes.py`) — unit-tested
+and live-migration-verified against Postgres, but not reachable from the
+Telegram bot (no link/evaluate/review UI). Each `DESIGNED` tag below still
+describes the decided behavior, not running-and-reachable code; see
+`docs/briefs/backlog/first-week-evaluator.md` for the per-slice build status.
+
 - `DESIGNED` — matching is athlete-explicit. Date or discipline may organize
   candidates, but cannot create the final link automatically.
 - `DESIGNED` — every planned session receives a code-generated UUID. Array
@@ -166,9 +198,11 @@ commented as provisional, same as the E7 scoring numbers.
   Intent comes only from structured session fields, never prose.
 - `DESIGNED` — age-estimated HR zones produce soft flags only and never
   automatically modify zones or fitness.
-- `DESIGNED` — signal vocabulary is `ABSORBED_WELL`, `ON_TRACK`,
-  `WATCH_EFFORT`, `BACK_OFF`, and `INSUFFICIENT_EVIDENCE`. Signals are
-  deterministic and versioned. V1 does not interpret pain/safety from free text.
+- `DESIGNED` — signal vocabulary is `THRIVING` (renamed from `ABSORBED_WELL`
+  on 2026-09-10, same signal, see "Signal scoring, THRIVING, and volume
+  status" below), `ON_TRACK`, `WATCH_EFFORT`, `BACK_OFF`, and
+  `INSUFFICIENT_EVIDENCE`. Signals are deterministic and versioned. V1 does
+  not interpret pain/safety from free text.
 - `DESIGNED` — evaluation records are immutable and versioned, containing
   athlete/plan references, plan kind/revision, evaluation-rule version, evidence
   provenance, per-session insights, weekly aggregate, and supersession reference.
@@ -242,8 +276,12 @@ Not covered by this decision; these three keep the E6 model above unchanged:
 This is a schema and validator change, not only a docs change: distance
 targets for running, swimming, and cycling need to become ranges instead of
 optional scalars, and a new minimum-range-width validator needs to exist.
-Code implementation is a separate pass; this decision only locks the model,
-the scope, and the floor numbers.
+`BUILT`, discovered already implemented while executing the first-week
+evaluator brief (2026-09-10): `SessionTargets.distance_range_meters` in
+`backend/app/schemas/weekly_plans.py` is already a range with the exact
+per-discipline minimum-width floors above (`_MIN_DISTANCE_RANGE_WIDTH_METERS`).
+This entry previously said "code implementation is a separate pass," which
+was stale by the time the evaluator brief started.
 
 ## Duration derivation (continuous and structured sessions)
 
@@ -306,17 +344,200 @@ output-check computation needs to consume actual segment-level data (or an
 equivalent actual breakdown) to compute the actual-overall blend. This
 decision locks the model and scope only.
 
-E7 through E11 in `docs/decisions/open.md` are the remaining evaluator
-product gates: signal thresholds/precedence, volume-overshoot handling in the
-per-session verdict, single-session efficiency-evidence semantics, where
-intent adherence belongs in the weekly contract, and confirming HR as the
-sole intent arbiter.
+E7 through E11 were the remaining evaluator product gates: signal
+thresholds/precedence, volume-overshoot handling in the per-session verdict,
+single-session efficiency-evidence semantics, where intent adherence
+belongs in the weekly contract, and confirming HR as the sole intent
+arbiter. All five are resolved as of 2026-09-10; see "Signal scoring,
+THRIVING, and volume status" immediately below. `docs/decisions/open.md`
+keeps only the one sub-question that was never part of E7-E11 proper: low
+comparable-metric coverage above the minimum-evidence bar.
 
 None of these evaluator decisions is `BUILT`. A separate dated-plan algorithm,
 `compare_week()`, once matched workouts to planned sessions by nearest
 same-discipline date; it was never wired to production and was removed on
 2026-09-08 as superseded by the athlete-explicit matching decided above, not
 kept as a first-week result.
+
+## Signal scoring, THRIVING, and volume status (2026-09-10)
+
+Status: `DECIDED` for the full mechanism below, resolving E7 (superseding
+its 2026-09-08 version), E8, E9, and E11 from the former
+`docs/decisions/open.md`. `PROVISIONAL` for the density cut lines, same
+calibration caveat as the rest of this file: ship every number as a named,
+isolated constant, commented as provisional, so it can be recalibrated
+without touching the surrounding logic.
+
+### Per-session score
+
+Replaces the 2026-09-08 flat-rule proposal (`+2` per `OVERCOOKED`, `+1` per
+`EASIER_THAN_EXPECTED`, `+1` per 10 percentage points of duration
+overshoot). A matched, comparable session's point value is its intent value
+plus its output value, each on the same small signed scale:
+
+```text
+intent value:  EASIER_THAN_EXPECTED = -1, AS_PRESCRIBED = 0, OVERCOOKED = +1
+output value:  BELOW_EXPECTED_OUTPUT = +1, WITHIN_EXPECTED_OUTPUT = 0, ABOVE_EXPECTED_OUTPUT = -1
+session point value = intent value + output value   # range: -2 (best) to +2 (worst)
+```
+
+`NOT_COMPARABLE` intent or `UNKNOWN` output contributes nothing to the
+score and is excluded from the weekly average below, the same exclusion
+rule `NOT_COMPARABLE` already had.
+
+Resolves **E11 as Option A**: HR alone decides the intent value; pace/power
+never arbitrates it, it only decides the separate output value. This was
+already the design's working assumption; it is now a locked decision, not
+only document prose.
+
+Resolves **E8 as Option A**: duration and distance deltas never feed the
+per-session intent verdict or its point value. They live entirely as the
+weekly volume range status described below, never as a per-session flag or
+verdict input. Options B and C (a session-level volume flag, or letting
+overshoot downgrade the verdict) are superseded, not chosen.
+
+### Variance flag (revises E10's mechanism; E10's axis placement stands)
+
+The two cells where intent and output land on exactly opposite non-zero
+values, `OVERCOOKED` with `ABOVE_EXPECTED_OUTPUT`, or
+`EASIER_THAN_EXPECTED` with `BELOW_EXPECTED_OUTPUT`, sum to zero by
+construction. That zero is recorded as `variance_flag = true` on the
+session (contributing 0 points, matching the arithmetic) rather than as an
+unflagged neutral score.
+
+This revises the mechanism of the 2026-09-08 intent-mismatch note (E10,
+resolved as **Option B**: intent adherence is its own named axis, separate
+from completion and capability; that placement is unchanged). What changes
+is the trigger and the wording. The old note fired on any count of matched
+sessions not `AS_PRESCRIBED` in either direction and named "the more common
+direction." The new note fires only on `variance_flag` count, reaching 2 or
+more in a week, and never names a direction: "Watch out: you completed [N]
+workouts where the intended intensity did not match the output. This makes
+it harder for the planner to accurately adapt your training."
+`EASIER_THAN_EXPECTED` with `BELOW_EXPECTED_OUTPUT` no longer earns a
+separate flat point penalty on its own (the pre-2026-09-10 rule); it is now
+fully absorbed into this mechanism instead.
+
+### Weekly bands
+
+Density is the sum of session point values divided by matched session
+count.
+
+```text
+below +0.3        -> ON_TRACK      (covers every negative density too, not only zero)
++0.3 up to +0.6   -> WATCH_EFFORT
++0.6 and up       -> BACK_OFF
+```
+
+`INSUFFICIENT_EVIDENCE` still overrides all of the above when minimum
+evidence is not met, unchanged from the minimum-evidence rule above.
+
+### THRIVING gate (renamed from `ABSORBED_WELL`, 2026-09-10)
+
+Same signal, renamed for tone, not for hierarchy: it remains strictly an
+upgrade from `ON_TRACK`, never fired independently of that band. This
+resolves the artifact-review "open fork" on that question: THRIVING only
+fires from inside `ON_TRACK`.
+
+THRIVING fires when every one of the following holds for the week:
+
+- zero matched sessions flagged `OVERCOOKED`;
+- zero matched sessions with output `BELOW_EXPECTED_OUTPUT`;
+- zero matched sessions carrying `variance_flag`;
+- the blended weekly volume range status (see below) is not `BELOW_RANGE`;
+- at least one matched session carries positive efficiency evidence
+  (redefined below).
+
+Any one of these failing keeps the week at `ON_TRACK` instead; the planner
+holds the default load rather than being told to add more. This replaces
+the 2026-09-08 `progressive_load_absorbed` detail flag (matched volume at
+least 110% of planned, zero `OVERCOOKED`, at least two positive-efficiency
+sessions) entirely. That flag and its flat 110% threshold are retired,
+folded into the single gate above using the volume range status instead of
+a guessed percentage. The minimum efficiency-evidence session count is 1,
+down from the old flag's 2.
+
+THRIVING is computed once, blended across every discipline the athlete
+trained that week, not per discipline. Known, accepted MVP limitation: one
+efficient session in one discipline can upgrade a week even when another
+discipline that same week was merely average, not flagged, not efficient
+either. The gates above, especially zero `OVERCOOKED` anywhere and the
+volume floor, keep this from firing on a genuinely bad week. Per-discipline
+THRIVING is deferred to the per-discipline efficiency factor described
+below, not built into this signal now.
+
+### Ratio check and positive efficiency evidence (redefines E9's fact)
+
+Status: `DECIDED` for the interval formula (2026-09-09) and for this
+redefinition (2026-09-10). Resolves **E9** as: ship as designed, keep the
+name "positive efficiency evidence," no rename and no separate
+"unconfirmed" qualifier. The ratio-gating below already narrows the claim
+far past E9's original single-session concern.
+
+For each matched session with usable pace-or-power and HR, compute
+`ratio = speed-or-power / HR` (running and swimming use speed, not pace, so
+higher is always better; cycling uses power, never speed, over HR) and
+compare it against a planned interval derived entirely from the plan's own
+numbers, no extra tolerance layered on top, the range width is the margin:
+
+```text
+ratio_min = slowest planned speed / top of the reference HR zone
+ratio_max = fastest planned speed / bottom of the reference HR zone
+```
+
+Positive efficiency evidence is true only when the ratio lands above
+`ratio_max`, AND one of exactly three intent/output combinations holds:
+(`AS_PRESCRIBED`, `ABOVE_EXPECTED_OUTPUT`), (`EASIER_THAN_EXPECTED`,
+`ABOVE_EXPECTED_OUTPUT`), or (`EASIER_THAN_EXPECTED`,
+`WITHIN_EXPECTED_OUTPUT`), AND source quality is adequate, AND no
+confounder blocks comparability. This replaces the 2026-09-08 definition
+("output at or above the expected range, HR inside the intended band,
+adequate source quality, no confounder") with a narrower, ratio-gated
+version. It remains a per-session fact only; it never by itself labels a
+session or a week THRIVING, it is one of the ingredients the THRIVING gate
+above reads.
+
+Missing or zero HR, or missing pace/power, makes the ratio
+`NOT_COMPARABLE`, same as every other comparison in this document.
+
+### Weekly volume range status
+
+Status: `DECIDED` (2026-09-10). New fact, not part of the 2026-09-08
+proposal, not to be confused with the per-session distance-range tolerance
+in "Prescribed-range tolerance model" above, which this builds on.
+
+Planned weekly volume is a summed range, not a single target number: for
+each discipline with a real target that week (running, cycling, swimming;
+never strength, which has no distance target), sum every matched session's
+planned `distance_range_meters` minimum and maximum separately across the
+week to get `[range_min, range_max]`. No separate tolerance is layered on
+top, the same principle already locked above for the prescribed-range
+tolerance model: the range width is the margin.
+
+Compare summed actual matched volume against that range for one of three
+outcomes: `WITHIN_RANGE` (reported flat, no finer percentage computed),
+`BELOW_RANGE` (`actual / range_min * 100`), or `ABOVE_RANGE` (`actual /
+range_max * 100`). Computed and persisted twice: once per discipline, and
+once more blended into a single weekly status the same way, summing across
+every discipline trained that week. The blended status is what the THRIVING
+gate above reads. Neither the per-discipline nor the blended status carries
+a point value or an evaluator-authored note; both are pure planner-facing
+context, alongside the existing per-discipline efficiency factor.
+
+How the planner should weigh a THRIVING week against a meaningfully
+`BELOW_RANGE` volume status when planning the next week is explicitly
+deferred to the weekly planner's own prompt design
+(`docs/design/planner-architecture.md`), not decided here. The evaluator's
+job stops at emitting the signal and the volume status as two separate,
+unchanged facts; it never relabels THRIVING or attaches a note for a volume
+shortfall, keeping HR-based effort quality, pace/power output adherence,
+and volume completion as three separately named signals rather than one
+blended score (research grounding: Bourdon et al., "External and Internal
+Loads in Sports Science: Time to Rethink?", preprints.org, 2021, on naming
+each measured variable rather than merging under a vague composite "load"
+term; TrainingPeaks' Efficiency Factor / decoupling documentation, on using
+the output-to-HR ratio as a separate, stricter derived fact layered on top
+of the two raw signals rather than a replacement for either).
 
 ## Data roles and history
 

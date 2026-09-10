@@ -18,19 +18,28 @@ end to end, and workout capture.
 **What is implemented but not wired into the bot?** Everything tagged
 `BUILT, DORMANT`: the ongoing (dated) weekly planner runs and is tested, but
 nothing in `backend/app/bot/main.py` calls it. Its former dated-plan
-comparator has been removed, see below.
+comparator has been removed, see below. As of 2026-09-10, the first-week
+evaluator's deterministic core (stable session identity, the athlete-link
+service/repository, the evidence projection, per-session comparison, missed
+classification, weekly aggregation and signal, and immutable outcome
+persistence) is also `BUILT, DORMANT`: unit-tested and live-migration-
+verified, but nothing in the Telegram bot calls any of it yet — there is no
+link/evaluate/review UI.
 
 **What is only designed?** Everything tagged `DESIGNED`, `PROPOSED`, or
-`OPEN DECISION`: the first-week evaluator, fitness-state history, the General
-and Stage Planners, and CTL/TSS-driven planning. None of these exist in code.
+`OPEN DECISION`: the evaluator's Telegram link/evaluate/review UI and its
+integration/regression tests, fitness-state history, the General and Stage
+Planners, and CTL/TSS-driven planning.
 
 **What should I read next?** See [Canonical documents and reading
 order](#canonical-documents-and-reading-order) below; five to seven documents,
 in order.
 
-**What is the single next implementation?** Get the E7–E11 evaluator decisions
-in [Open decisions](decisions/open.md) approved (E6 is already locked; these
-are product decisions, not engineering work), then execute
+**What is the single next implementation?** E6 through E11 are all resolved
+(see [Locked decisions](decisions/locked.md), "Signal scoring, THRIVING, and
+volume status"). The evaluator's deterministic core (brief steps 1-9) is
+built; the next slice is the Telegram link/evaluate/review UI, the
+integration test, and the regression test (brief steps 10-12) in
 [First-week evaluator](briefs/backlog/first-week-evaluator.md). See the
 [roadmap](roadmap.md) for the full build order.
 
@@ -61,8 +70,8 @@ just `BUILT`.
 | Dated-plan comparison (`compare_week()`/`compare_finished_week()`) | Removed 2026-09-08 — superseded by the first-week evaluator's athlete-explicit matching; `weekly_plan_outcomes` remains in the schema but is unused |
 | No-HR weekly prescription invariant | `BUILT, PRODUCTION-WIRED`; completed-workout HR remains valid evidence |
 | First-week repair-loop reconstruction is crash-safe for every discipline | `BUILT, PRODUCTION-WIRED`; fixed 2026-09-07, see [Locked decisions](decisions/locked.md) |
-| Explicit first-week workout/session linking | `DESIGNED`, not implemented |
-| First-week per-session and weekly evaluation | `DESIGNED`, not implemented |
+| Explicit first-week workout/session linking | `BUILT, DORMANT` — `LinkingService`/`PlannedSessionLinkRepository`; no Telegram UI calls it |
+| First-week per-session and weekly evaluation | `BUILT, DORMANT` — evidence projection, per-session comparison, weekly aggregation/signal, and immutable outcome persistence all exist and are tested; no manual-trigger UI calls any of it |
 | Fitness-state tracking/history | `PROPOSED`; storage choice deferred to its milestone |
 | General Planner | `DESIGNED`, not implemented |
 | Stage Planner | `DESIGNED`, not implemented |
@@ -99,20 +108,23 @@ rules.
 
 ## Active milestone and implementation briefs
 
-The active implementation milestone is the first-week evaluator. Its next
-brief is [First-week evaluator](briefs/backlog/first-week-evaluator.md). The HR
-schema prerequisite is complete, including the first-week repair-loop
-reconstruction fix; evaluator work is intentionally gated by the E7–E11
-decisions in `docs/decisions/open.md` (E6 is already locked). E8, E9, and E11
-block per-session comparison; E7 and E10 block weekly aggregation; stable
-session references, explicit linking, and evidence exposure are not blocked
-by any of them.
+The active implementation milestone is the first-week evaluator. Its brief is
+[First-week evaluator](briefs/backlog/first-week-evaluator.md). The HR schema
+prerequisite is complete, including the first-week repair-loop reconstruction
+fix; every decision that gated the evaluator (E6 through E11) is resolved,
+see [Locked decisions](decisions/locked.md), "Signal scoring, THRIVING, and
+volume status." As of 2026-09-10, brief steps 1-9 (the deterministic core:
+stable session identity, athlete-explicit linking, evidence projection,
+per-session comparison, missed classification, weekly aggregation/signal,
+and immutable outcome persistence) are `BUILT, DORMANT`. Steps 10-12 (the
+Telegram link/evaluate/review UI, the integration test, and the regression
+test) remain `DESIGNED`, not implemented.
 
 Backlog briefs:
 
 | Brief | Status | Depends on |
 |---|---|---|
-| [First-week evaluator](briefs/backlog/first-week-evaluator.md) | `DESIGNED`, not executed | Approval of E7–E11 (E6 already locked) |
+| [First-week evaluator](briefs/backlog/first-week-evaluator.md) | Deterministic core (steps 1-9) `BUILT, DORMANT`; delivery (steps 10-12) `DESIGNED`, not executed | Nothing outstanding; all gating decisions (E6-E11) resolved |
 | [Fitness state](briefs/backlog/fitness-state.md) | `PROPOSED`, not executed | Evaluator outcome plus storage, seeding, correction, and confidence decisions |
 | [General Planner phase foundation](briefs/backlog/general-planner-phase-foundation.md) | `PROPOSED`, not executed | Phase allocation, minimum-length, feasibility, and re-plan decisions |
 
