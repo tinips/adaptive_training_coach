@@ -26,6 +26,7 @@ dependencies = [
     "python-telegram-bot>=21.9,<23",
     "sqlalchemy>=2.0.36,<3",
     "uvicorn[standard]>=0.32,<1",
+    "greenlet>=3.5.4",
 ]
 
 [project.optional-dependencies]
