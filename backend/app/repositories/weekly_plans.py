@@ -19,6 +19,11 @@ class WeeklyTrainingPlanRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    async def get_by_id(self, *, plan_id: uuid.UUID) -> WeeklyTrainingPlan | None:
+        """Load one exact plan revision, regardless of supersession."""
+
+        return await self._session.get(WeeklyTrainingPlan, plan_id)
+
     async def get_for_week(
         self, *, athlete_id: uuid.UUID, week_start: date
     ) -> WeeklyTrainingPlan | None:

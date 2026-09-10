@@ -805,6 +805,51 @@ class WeeklyTrainingPlan(UUIDPrimaryKeyMixin, Base):
     )
 
 
+class PlannedSessionLink(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """The athlete-confirmed link from one logged workout to one planned session.
+
+    docs/decisions/locked.md, "First-week evaluator": explicit, athlete-
+    confirmed matching; a workout links to at most one planned session and a
+    planned session has at most one primary workout used by evaluation.
+    Relinking before evaluation updates this row's ``workout_id`` in place
+    (``updated_at`` records when); a correction made after an evaluation
+    already exists is handled at the outcome layer (a superseding evaluation
+    revision), not by mutating history here.
+    """
+
+    __tablename__ = "planned_session_links"
+    __table_args__ = (
+        UniqueConstraint(
+            "plan_id",
+            "plan_session_id",
+            name="uq_planned_session_links_plan_session",
+        ),
+        UniqueConstraint(
+            "workout_id",
+            name="uq_planned_session_links_workout",
+        ),
+    )
+
+    athlete_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    plan_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("weekly_training_plans.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    plan_session_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), nullable=False
+    )
+    workout_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("workouts.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+
 class WeeklyPlanOutcome(UUIDPrimaryKeyMixin, Base):
     """Aggregated plan-versus-actual comparison for one completed week."""
 
@@ -1676,6 +1721,7 @@ __all__ = [
     "LLMUsage",
     "OnboardingSession",
     "OtherWorkoutDetails",
+    "PlannedSessionLink",
     "PoolSwimmingDetails",
     "RunningWorkoutDetails",
     "StrengthWorkoutDetails",
