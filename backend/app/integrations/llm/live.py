@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, cast
 
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.runnables import Runnable, RunnableConfig, RunnableLambda
@@ -165,9 +165,56 @@ def _recover_structured_json(
 
     if parsed is not None:
         return parsed, False
-    if not isinstance(raw, AIMessage) or not isinstance(raw.content, str):
+    if not isinstance(raw, AIMessage):
+        return None, True
+    tool_arguments = _tool_call_arguments(raw)
+    if tool_arguments is not None:
+        return tool_arguments, False
+    if not isinstance(raw.content, str):
         return None, True
     try:
         return json.loads(raw.content), False
     except (TypeError, ValueError):
         return None, True
+
+
+def _tool_call_arguments(raw: AIMessage) -> object | None:
+    """Return the first structured tool payload exposed by a provider.
+
+    LangChain normally fills ``parsed`` from ``AIMessage.tool_calls``. Some
+    OpenAI-compatible providers, including the configured DeepSeek endpoint,
+    return valid tool calls while leaving ``parsed`` empty. Depending on the
+    transport version, arguments are available either as normalized ``args``
+    or in the original OpenAI-compatible response metadata.
+    """
+
+    for tool_call in raw.tool_calls:
+        arguments = tool_call.get("args")
+        recovered = _json_value(arguments)
+        if recovered is not None:
+            return recovered
+
+    raw_tool_calls = raw.additional_kwargs.get("tool_calls")
+    if not isinstance(raw_tool_calls, list):
+        return None
+    for tool_call in raw_tool_calls:
+        if not isinstance(tool_call, Mapping):
+            continue
+        function = tool_call.get("function")
+        if not isinstance(function, Mapping):
+            continue
+        recovered = _json_value(function.get("arguments"))
+        if recovered is not None:
+            return recovered
+    return None
+
+
+def _json_value(value: object) -> object | None:
+    if isinstance(value, (Mapping, list)):
+        return value
+    if not isinstance(value, str):
+        return None
+    try:
+        return cast(object, json.loads(value))
+    except (TypeError, ValueError):
+        return None

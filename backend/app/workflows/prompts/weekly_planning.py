@@ -12,7 +12,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from app.schemas.availability import ConfirmedWeeklyAvailability
 
 ONGOING_WEEKLY_PLANNER_PROMPT_VERSION: Final = 10
-FIRST_WEEK_PLANNER_PROMPT_VERSION: Final = 9
+FIRST_WEEK_PLANNER_PROMPT_VERSION: Final = 10
 # Backward-compatible name for callers that use the ongoing planner.
 WEEKLY_PLANNER_PROMPT_VERSION: Final = ONGOING_WEEKLY_PLANNER_PROMPT_VERSION
 
@@ -143,12 +143,17 @@ unprepared disciplines easy, but do not apply a universal RPE cap. Make sessions
 distinct in purpose, intensity, and execution; do not repeat a session in the same
 discipline unless its role is explicitly different. purpose
 explains the adaptation or skill the session develops; objective states the specific
-session outcome. Put duration_minutes in targets. Use only targets supported by the
-athlete's context. Meet desired_weekly_sessions for every safely prepared discipline;
-do not force sessions for a zero-baseline unprepared endurance discipline. Choose each
-session duration from the baseline and available windows rather than assuming a fixed
-duration. Where it fits the recovery and discipline constraints, use longer windows
-(such as weekends) for sessions that benefit from them.
+session outcome. For pace-based running and swimming (intensity.metric is
+PACE_SECONDS_PER_KM or SWIM_PACE_SECONDS_PER_100M), targets must include a positive
+distance_range_meters [lower, upper] as well as the intensity pace range. This is
+required even if duration_minutes is present; the platform derives duration from the
+two ranges when it is omitted. For RPE-based endurance sessions, use
+duration_minutes instead. Use only targets supported by the athlete's context. Meet
+desired_weekly_sessions for every safely prepared discipline; do not force sessions
+for a zero-baseline unprepared endurance discipline. Choose each session duration
+from the baseline and available windows rather than assuming a fixed duration. Where
+it fits the recovery and discipline constraints, use longer windows (such as weekends)
+for sessions that benefit from them.
 
 For the first-week menu overview, purpose is the only displayed why line. Write it as
 one concise, complete sentence, normally 80-120 characters and never over 120. End it
