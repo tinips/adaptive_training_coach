@@ -12,7 +12,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from app.schemas.availability import ConfirmedWeeklyAvailability
 
 ONGOING_WEEKLY_PLANNER_PROMPT_VERSION: Final = 10
-FIRST_WEEK_PLANNER_PROMPT_VERSION: Final = 10
+FIRST_WEEK_PLANNER_PROMPT_VERSION: Final = 11
 # Backward-compatible name for callers that use the ongoing planner.
 WEEKLY_PLANNER_PROMPT_VERSION: Final = ONGOING_WEEKLY_PLANNER_PROMPT_VERSION
 
@@ -136,6 +136,12 @@ work plus one or two controlled tempo or threshold sessions in the supplied nume
 zones. Coaching style shifts the amount and placement of this work within the tier;
 it never overrides the unprepared rule. Controlled tempo/threshold is not a maximal
 test. Do not make medical claims or invent measurements.
+
+A running recent_race_result can include effort_context in the athlete's own plain
+English. Treat it as authoritative. A result described as maximal, all-out, or race
+effort is a performance ceiling, not an easy or moderate training pace. In that case,
+the resolved running zone will be RPE_FALLBACK and you must not prescribe pace or
+hard running work for this first-week menu.
 
 Every session must contain purpose, structured intensity, objective, targets,
 execution. intensity requires metric, target_range, rpe_range, and guidance. Keep

@@ -29,6 +29,9 @@ def test_running_form_captures_consistency_and_optional_metrics() -> None:
         "running.recent_race_result": parse_answer(
             key="running.recent_race_result", text="10 km, 48:30"
         ),
+        "running.recent_race_effort_context": parse_answer(
+            key="running.recent_race_effort_context", text="All-out race effort"
+        ),
     }
 
     baseline = build_baseline(values)
@@ -38,6 +41,7 @@ def test_running_form_captures_consistency_and_optional_metrics() -> None:
     assert baseline.running.longest_recent_run_minutes == 65
     assert baseline.running.recent_race_result is not None
     assert baseline.running.recent_race_result.duration_seconds == 2910
+    assert baseline.running.recent_race_result.effort_context == "All-out race effort"
 
 
 def test_triathlon_form_includes_every_relevant_discipline() -> None:
@@ -52,7 +56,8 @@ def test_triathlon_form_includes_every_relevant_discipline() -> None:
     assert "triathlon.open_water_confidence" in fields
     assert "preferences.coaching_style" in fields
     assert "preferences.desired_weekly_sessions.SWIMMING" in fields
-    assert len(fields) == 23
+    assert "running.recent_race_effort_context" in fields
+    assert len(fields) == 24
 
 
 def test_self_reported_baseline_allows_a_conservative_first_plan() -> None:

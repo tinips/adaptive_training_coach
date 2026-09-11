@@ -79,3 +79,29 @@ def test_resolver_never_selects_heart_rate_even_with_reliable_observed_hr() -> N
 
     assert zones[Discipline.RUNNING].mode == "RPE_FALLBACK"
     assert zones[Discipline.RUNNING].metric == "RPE"
+
+
+def test_resolver_does_not_turn_an_explicitly_maximal_result_into_training_pace() -> (
+    None
+):
+    baseline = AthleteBaselineData(
+        running=RunningBaseline(
+            typical_weekly_sessions=2,
+            typical_weekly_duration_minutes=100,
+            longest_recent_run_minutes=60,
+            recent_race_result=RecentRaceResult(
+                distance_km=10,
+                duration_seconds=3_000,
+                effort_context="All-out race effort",
+            ),
+        )
+    )
+
+    zones = resolve_first_week_zones(
+        baseline=baseline,
+        calculations={},
+        disciplines=(Discipline.RUNNING,),
+    )
+
+    assert zones[Discipline.RUNNING].mode == "RPE_FALLBACK"
+    assert "maximal effort" in zones[Discipline.RUNNING].guidance

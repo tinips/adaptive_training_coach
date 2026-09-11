@@ -67,6 +67,16 @@ def _resolve_discipline(
             else None
         )
         if race is not None:
+            if _is_explicitly_maximal_effort(race.effort_context):
+                return ResolvedIntensityZones(
+                    mode="RPE_FALLBACK",
+                    metric="RPE",
+                    guidance=(
+                        "The reported running result was a maximal effort, not an "
+                        "easy-training pace. Prescribe this first week by RPE and "
+                        "feel, not pace."
+                    ),
+                )
             return running_pace_zones(race.duration_seconds / race.distance_km)
     if discipline is Discipline.SWIMMING:
         threshold = (
@@ -83,6 +93,25 @@ def _resolve_discipline(
             "No usable threshold is available: prescribe and record effort by RPE "
             "and breathing/feel, not pace, power, or heart-rate targets."
         ),
+    )
+
+
+def _is_explicitly_maximal_effort(effort_context: str | None) -> bool:
+    """Recognize only unambiguous athlete wording that a result was maximal."""
+
+    if effort_context is None:
+        return False
+    normalized = " ".join(effort_context.casefold().split())
+    return any(
+        phrase in normalized
+        for phrase in (
+            "max effort",
+            "maximum effort",
+            "all-out",
+            "all out",
+            "race effort",
+            "raced it",
+        )
     )
 
 

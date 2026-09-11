@@ -30,6 +30,7 @@ const config={
  'running.typical_weekly_duration_minutes':{section:'Running',label:'Typical total running minutes per week',kind:'number',min:0,max:1440,help:'Use 0 if you have not run.'},
  'running.longest_recent_run_minutes':{section:'Running',label:'Longest run in the last 14 days (minutes)',kind:'number',min:0,max:1440,help:'Use 0 if you have not run.'},
  'running.recent_race_result':{section:'Running',label:'Recent race or time trial',kind:'text',optional:true,placeholder:'For example: 5 km, 25:30',help:'Optional. Leave blank if you do not have one.'},
+ 'running.recent_race_effort_context':{section:'Running',label:'How hard was that run?',kind:'text',optional:true,placeholder:'For example: all-out race effort',help:'Optional. Plain English is fine; this prevents a hard result being treated as an easy training pace.'},
  'cycling.typical_weekly_sessions':{section:'Cycling',label:'Typical rides per week',kind:'number',min:0,max:14,help:'Use your average across the last 4 weeks.'},
  'cycling.typical_weekly_duration_minutes':{section:'Cycling',label:'Typical total cycling minutes per week',kind:'number',min:0,max:1440,help:'Use 0 if you have not ridden.'},
  'cycling.longest_recent_ride_minutes':{section:'Cycling',label:'Longest ride in the last 14 days (minutes)',kind:'number',min:0,max:1440,help:'Use 0 if you have not ridden.'},

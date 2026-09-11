@@ -34,6 +34,7 @@ _RACE = re.compile(
 _OPTIONAL_FIELDS = frozenset(
     {
         "running.recent_race_result",
+        "running.recent_race_effort_context",
         "cycling.recent_ftp_watts",
         "swimming.pool_length_meters",
         "swimming.recent_400m_seconds",
@@ -60,6 +61,11 @@ _QUESTIONS: dict[str, BaselineQuestion] = {
     "running.recent_race_result": BaselineQuestion(
         "running.recent_race_result",
         "Recent run race or time trial (optional). Send e.g. `5 km, 25:30`, or `skip`.",
+    ),
+    "running.recent_race_effort_context": BaselineQuestion(
+        "running.recent_race_effort_context",
+        "How hard was that run? (optional) Describe it plainly, e.g. "
+        "`all-out race effort` or `steady training run`.",
     ),
     "cycling.typical_weekly_sessions": BaselineQuestion(
         "cycling.typical_weekly_sessions",
@@ -149,6 +155,7 @@ _FIELDS_BY_DISCIPLINE: dict[Discipline, tuple[str, ...]] = {
         "running.typical_weekly_duration_minutes",
         "running.longest_recent_run_minutes",
         "running.recent_race_result",
+        "running.recent_race_effort_context",
     ),
     Discipline.CYCLING: (
         "cycling.typical_weekly_sessions",
@@ -261,6 +268,8 @@ def parse_answer(*, key: str, text: str) -> object:
                 match.group("time"), allow_hours=True, maximum=24 * 60 * 60
             ),
         }
+    if key == "running.recent_race_effort_context":
+        return value
     if key == "cycling.riding_environment":
         return _choice(value, {"INDOOR", "OUTDOOR", "BOTH", "NONE"})
     if key == "cycling.riding_confidence":
@@ -333,13 +342,19 @@ def _running(values: dict[str, object]) -> RunningBaseline | None:
     if "running.typical_weekly_sessions" not in values:
         return None
     race = values.get("running.recent_race_result")
+    effort_context = values.get("running.recent_race_effort_context")
+    race_payload = dict(race) if isinstance(race, dict) else None
+    if race_payload is not None and isinstance(effort_context, str):
+        race_payload["effort_context"] = effort_context
     return RunningBaseline(
         typical_weekly_sessions=values["running.typical_weekly_sessions"],
         typical_weekly_duration_minutes=values[
             "running.typical_weekly_duration_minutes"
         ],
         longest_recent_run_minutes=values["running.longest_recent_run_minutes"],
-        recent_race_result=RecentRaceResult.model_validate(race) if race else None,
+        recent_race_result=(
+            RecentRaceResult.model_validate(race_payload) if race_payload else None
+        ),
     )
 
 

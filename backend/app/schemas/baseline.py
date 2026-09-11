@@ -18,6 +18,7 @@ class RecentRaceResult(_BaselineSchema):
 
     distance_km: float = Field(gt=0, le=250)
     duration_seconds: int = Field(gt=0, le=24 * 60 * 60)
+    effort_context: str | None = Field(default=None, min_length=1, max_length=240)
 
 
 class RunningBaseline(_BaselineSchema):
