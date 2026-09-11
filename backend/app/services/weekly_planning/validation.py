@@ -439,11 +439,12 @@ def repair_plan(
     *,
     baseline: AthleteBaselineData | None,
     availability: ConfirmedWeeklyAvailability | None = None,
+    zones: dict[Discipline, ResolvedIntensityZones] | None = None,
 ) -> WeeklyPlan | FirstWeekPlan:
     """Apply one deterministic, idempotent repair pass without adding sessions."""
 
     if isinstance(plan, FirstWeekPlan):
-        return _repair_first_week_menu(plan, violations)
+        return _repair_first_week_menu(plan, violations, zones=zones)
 
     payload = plan.model_dump(mode="json")
     violation_list = tuple(violations)
@@ -631,7 +632,10 @@ def build_fallback_week(
 
 
 def _repair_first_week_menu(
-    plan: FirstWeekPlan, violations: Iterable[PlanViolation]
+    plan: FirstWeekPlan,
+    violations: Iterable[PlanViolation],
+    *,
+    zones: dict[Discipline, ResolvedIntensityZones] | None = None,
 ) -> FirstWeekPlan:
     """Repair a menu without inventing dates or re-running placement."""
 
@@ -661,6 +665,29 @@ def _repair_first_week_menu(
                 "swim_pace_seconds_per_100m",
             ):
                 targets[field] = None
+    if "FIRST_WEEK_CALIBRATION_SIGNAL_MISSING" in codes and zones is not None:
+        for violation in violations:
+            if (
+                violation.code != "FIRST_WEEK_CALIBRATION_SIGNAL_MISSING"
+                or violation.discipline is None
+            ):
+                continue
+            zone = zones.get(violation.discipline)
+            if zone is None or zone.mode != "NUMERIC" or zone.moderate is None:
+                continue
+            for raw in raw_sessions:
+                if raw.get("discipline") != violation.discipline.value:
+                    continue
+                raw["intensity"] = {
+                    "metric": zone.metric,
+                    "target_range": list(zone.moderate),
+                    "rpe_range": [5, 6],
+                    "guidance": (
+                        "Controlled moderate work inside the resolved intensity "
+                        "range; finish with reserve."
+                    ),
+                }
+                break
     if "STRENGTH_OVER_SPECIFIED" in codes:
         for raw in raw_sessions:
             if raw.get("discipline") != Discipline.STRENGTH.value:

@@ -33,7 +33,10 @@ from app.services.weekly_planning.validation import (
     repair_plan,
     validate_first_week_plan,
 )
-from app.services.weekly_planning.zones import resolve_first_week_zones
+from app.services.weekly_planning.zones import (
+    ResolvedIntensityZones,
+    resolve_first_week_zones,
+)
 
 
 def test_menu_requires_requested_frequency_and_rpe_without_a_threshold() -> None:
@@ -579,6 +582,65 @@ def test_repair_still_strips_strength_execution_alongside_an_endurance_repair() 
     running, strength = repaired.sessions
     assert running.intensity.metric == "RPE"
     assert strength.execution == _STRENGTH_FALLBACK_EXECUTION
+
+
+def test_repair_adds_missing_numeric_calibration_signal() -> None:
+    plan = make_first_week_plan(
+        FirstWeekPlanPrescription.model_validate(
+            {
+                "week_start": date(2026, 9, 7),
+                "sessions": [
+                    _endurance_session(
+                        "CYCLING",
+                        {
+                            "metric": "RPE",
+                            "target_range": [3, 4],
+                            "rpe_range": [3, 4],
+                            "guidance": "Easy, controlled effort.",
+                        },
+                        {"duration_minutes": 45},
+                    ),
+                    _endurance_session(
+                        "CYCLING",
+                        {
+                            "metric": "RPE",
+                            "target_range": [3, 4],
+                            "rpe_range": [3, 4],
+                            "guidance": "Easy, relaxed effort.",
+                        },
+                        {"duration_minutes": 55},
+                    ),
+                ],
+            }
+        )
+    )
+
+    repaired = repair_plan(
+        plan,
+        [
+            PlanViolation(
+                "FIRST_WEEK_CALIBRATION_SIGNAL_MISSING",
+                Discipline.CYCLING,
+                None,
+                "prepared discipline with numeric zones needs controlled moderate work",
+            )
+        ],
+        baseline=None,
+        zones={
+            Discipline.CYCLING: ResolvedIntensityZones(
+                mode="NUMERIC",
+                metric="POWER_WATTS",
+                easy=(100, 140),
+                moderate=(145, 175),
+                guidance="Known power range.",
+            )
+        },
+    )
+
+    assert isinstance(repaired, FirstWeekPlan)
+    assert repaired.sessions[0].intensity.metric == "POWER_WATTS"
+    assert repaired.sessions[0].intensity.target_range == (145, 175)
+    assert repaired.sessions[0].intensity.rpe_range == (5, 6)
 
 
 def _strength_readiness(week_start: date) -> PlanReadiness:

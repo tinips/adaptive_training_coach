@@ -658,6 +658,7 @@ class WeeklyPlanningService:
                     outcome.violations,
                     baseline=prepared.baseline,
                     availability=prepared.availability,
+                    zones=prepared.zones,
                 )
                 assert isinstance(repaired, FirstWeekPlan)
                 repaired_outcome = validate_first_week_plan(
@@ -1392,7 +1393,9 @@ def _fallback_distance_range_meters(
     if discipline not in (Discipline.RUNNING, Discipline.SWIMMING):
         return None
     metric = intensity.get("metric")
-    unit_meters = _FALLBACK_PACE_UNIT_METERS.get(metric) if isinstance(metric, str) else None
+    unit_meters = (
+        _FALLBACK_PACE_UNIT_METERS.get(metric) if isinstance(metric, str) else None
+    )
     if unit_meters is None:
         return None
     target_range = intensity.get("target_range")
