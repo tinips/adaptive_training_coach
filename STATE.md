@@ -6,9 +6,8 @@ stands. This file is meant to answer "what's the current state of this
 thing" without reading the whole codebase. It summarizes; it is not the
 source of truth for either the code or the active plan.
 
-Written 2026-09-02 by cross-checking the codebase directly (not the older
-docs it replaces — see the doc-consolidation summary in the conversation
-that introduced this file for specifics on what was stale and why).
+Last reconciled 2026-09-11 against the codebase and the current roadmap and
+locked decisions. It summarizes rather than supersedes those sources.
 
 ## What's built
 
@@ -39,20 +38,21 @@ today:
    goal's disciplines. Submitting it marks onboarding **completed
    immediately** — there is no further step in the live path.
 
-**Weekly planning** is real and implemented, not aspirational:
-`WeeklyPlanningService.generate_next_week` gathers deterministic evidence,
-gates on a whole-athlete readiness floor, calls an LLM
-(`method="function_calling"`, so the schema is actually sent) to produce a
-seven-day plan, validates the reply, checks it against stated availability,
-and persists it with optimistic concurrency. It is reachable in the bot only
-through the "Plan next week" reply-keyboard button — see Known gaps below.
+**First-week planning** is real and production-wired: `FirstWeekPlanner`
+gathers deterministic evidence, gates on a whole-athlete readiness floor,
+calls an LLM using `function_calling`, validates the reply, checks stated
+availability, and persists an **unscheduled, athlete-placed session menu**.
+The athlete chooses when to do its sessions; production does not compose the
+ongoing dated-plan planner. The ongoing planner exists as a service only.
 
 **Also built:** post-onboarding screenshot-based workout logging (a vision
-model reads a workout-summary photo; the athlete confirms before it saves,
-deduplicated by a fingerprint of discipline/start time/duration/distance);
-Apple Health ZIP and TCX workout-history import; a workout-history Mini App
-chart; optional self-hosted Langfuse tracing (metadata-only, off by
-default); profile editing mini-flows post-onboarding.
+model reads a workout-summary photo; the athlete supplies average and maximum
+heart rate, then confirms before it saves, deduplicated by a fingerprint of
+discipline/start time/duration/distance); settings-gated TCX file capture
+(optional and off by default); a workout-history Mini App chart; optional
+self-hosted Langfuse tracing (metadata-only, off by default); profile editing
+mini-flows post-onboarding. Apple Health models and repositories are legacy
+remnants, not a current upload path.
 
 ## Explicitly out of scope right now
 
@@ -66,7 +66,8 @@ default); profile editing mini-flows post-onboarding.
 - **No mobile/companion app.** A prior iPhone HealthKit sync companion
   (`ios/CoachHealthSync/`) was built and then fully removed, credentials
   table dropped by migration `0045_remove_mobile_sync`. Workout history now
-  reaches the system only via Apple Health export, TCX file, or screenshot.
+  reaches the system through screenshot capture by default, or optional TCX
+  file capture when enabled; Apple Health is not a current ingestion path.
 - **No dynamic/LLM-driven catalog expansion.** The goal catalog (14 primary
   goals across running/cycling/swimming/triathlon, 5 supporting goals, 9
   equipment capabilities) is a fixed seed. An LLM-driven catalog-expansion
@@ -142,14 +143,13 @@ not fixed here since fixing them wasn't in scope for a docs pass.
   `langgraph` anywhere in `app/` — leftover from the deleted conversation
   layer. `langchain-core`/`langchain-openai` are still genuinely used and
   should stay.
-- **A known pre-existing test mismatch**, per the active ExecPlan's own last
-  entry: the full suite carries an Apple Health fixture-count mismatch (the
-  test archive contains 42 workouts, an assertion expects 28).
+- **Historical fixture-count warning is stale.** The 2026-09-02 ExecPlan says
+  an Apple Health archive has 42 workouts while an assertion expects 28, but
+  the current full suite passes; it is not a current test failure.
 
-## Active ExecPlan snapshot
+## Historical ExecPlan snapshot
 
-`.agent/PLANS.md` (untouched by this file, and the actual live source of
-truth) points to the single active ExecPlan:
+`.agent/PLANS.md` points to the long historical ExecPlan
 `.agent/execplans/onboarding-strava-vertical-slice.md` (2,600+ lines).
 
 Its name and its original objective section are both stale relative to what
@@ -157,14 +157,14 @@ it now covers: it was scoped as a Strava-inclusive "vertical slice" with
 training-plan generation explicitly excluded, and has since organically grown
 to cover (via dated "Follow-up" sections) a mobile HealthKit sync path that
 was later fully removed, the weekly planner described above, and optional
-Langfuse tracing. Despite the name, it is the record for essentially
-everything in this repo's history, and it is genuinely current — its own
-last dated entries are the most accurate description of what changed most
-recently.
+Langfuse tracing. It ends on 2026-09-02 and does not cover the subsequent
+nine first-week-evaluator implementation steps or their documentation update.
+Use `docs/roadmap.md` and `docs/decisions/locked.md` as the living sources of
+truth for current work and settled behavior.
 
-**As of its most recent entry** ("Follow-up: optional self-hosted Langfuse
+**Its most recent entry** ("Follow-up: optional self-hosted Langfuse
 tracing", 2026-09-02, the file's last section): Langfuse wiring is
 implemented and lazily no-ops when unconfigured, but has not yet been
-validated end-to-end against a real running Langfuse stack — that checklist
-item is unchecked. The file's final sentence also flags the fixture-count
-test mismatch noted above as still open.
+validated end-to-end against a real running Langfuse stack — that historical
+checklist item is unchecked. Its fixture-count warning is superseded by the
+current passing test suite noted above.

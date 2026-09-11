@@ -23,25 +23,45 @@ An AI endurance-training coach. Telegram bot, Python/FastAPI backend, Postgres, 
 
 ## Planner hierarchy (three zoom levels)
 
-1. **General Planner** — runs once; cuts goal→race into dated phases (Base→Build→ Peak→Taper). Deterministic (calendar math); LLM only writes phase objective text.
-2. **Stage Planner** — lays out one phase's week-by-week skeleton (load + focus + deload per week). Deterministic progression rules. NOT full workouts.
-3. **Weekly Planner** — generates the actual sessions for one week, filling the skeleton slot within the athlete's real constraints. This is where the LLM works.
+The three layers are the locked **design target**; General and Stage Planner
+milestones are not built yet:
 
-Shared guards (no-HR, strength-duration-only, zone validity, availability) live in a COMMON harness both planners use — never re-implemented per planner. A guarantee enforced in one planner must be enforced in all.
+1. **General Planner** — will cut goal→race into dated phases (Base→Build→
+   Peak→Taper) with deterministic calendar math; the LLM will write phase
+   objective text.
+2. **Stage Planner** — will lay out one phase's week-by-week skeleton (load +
+   focus + deload per week), not full workouts.
+3. **Weekly Planner** — is built. First-week mode is production-wired;
+   ongoing mode exists as a service but is not the composed production default.
+
+Shared guards (no-HR, strength-duration-only, zone validity, availability) live
+in the Weekly Planner harness for both of its modes — never re-implemented per
+mode. A guarantee enforced in one mode must be enforced in the other.
 
 ## Data model (4 roles — not a table per view)
 
-1. **Fitness state** — how fit now (athlete_fitness_snapshots, one row per week, append-only = the progress history).
+1. **Fitness state** — designed but not yet built; no fitness-history table or
+   current-state reader exists. See `docs/briefs/backlog/fitness-state.md`.
 2. **Plans** — what they were told to do (weekly_training_plans).
 3. **Actuals** — what they did (workouts + discipline detail rows).
-4. **Evaluations** — how plan vs actual went (weekly_plan_outcomes).
+4. **Evaluations** — how plan versus actual went. The first-week deterministic
+   core and its versioned outcome storage are built and unit-tested but dormant:
+   no Telegram flow wires linking, evaluation, or outcome persistence for an
+   athlete. `weekly_plan_outcomes` is an unused legacy dated-plan table.
 
-"Current/last/overall progress" = reads over these streams, NOT separate tables.
+"Current/last/overall progress" is a designed future read model over these
+streams, not a currently implemented feature or separate table.
 
 ## Evaluator rules (locked decisions)
 
-- Matching: athlete explicitly links each logged workout to a planned session (Option A) — no date/greedy inference.
-- Missed sessions: DISCARDED, never penalized (drop out of completion rate).
+- These rules describe the built-but-dormant first-week evaluator core; no
+  Telegram link/evaluate/review flow is production-wired yet.
+- Matching: first-week athletes explicitly link each logged workout to a
+  planned session — no date/greedy inference. The separately designed,
+  post-first-week screenshot-matching mechanism is documented in
+  `docs/decisions/locked.md`.
+- Missed sessions remain visible in completion reporting and are excluded from
+  physiological/capability math; adherence is `MATCHED / (MATCHED + MISSED)`.
 - HR effort check: SOFT FLAG only (never auto-adjusts zones); matters as a pattern, not a one-off.
 - Judge sessions by INTENT (intensity) first, volume second. "More distance at same easy HR" = good (fitness). "More distance via higher HR on an easy day" = flag (broke the plan's structure).
 - Evaluator emits FACTS + a suggested signal; the planner makes the final call.
