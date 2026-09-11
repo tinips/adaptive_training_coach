@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,7 +20,9 @@ from app.bot.rendering import TelegramResponse
 from app.schemas.common import TelegramIdentity
 from app.schemas.manual_import import ManualWorkoutImportRequest
 from app.services.workout_screenshot import (
+    ScreenshotConfirmation,
     ScreenshotDraft,
+    ScreenshotLinkOption,
     WorkoutScreenshotHeartRateRequiredError,
 )
 
@@ -28,11 +31,14 @@ def _context(
     service: object,
     *,
     screenshot_service: object | None = None,
+    evaluator_service: object | None = None,
     error: Exception | None = None,
 ) -> Any:
     bot_data = {handlers.BOT_SERVICE_KEY: service}
     if screenshot_service is not None:
         bot_data[handlers.WORKOUT_SCREENSHOT_SERVICE_KEY] = screenshot_service
+    if evaluator_service is not None:
+        bot_data[handlers.FIRST_WEEK_EVALUATION_SERVICE_KEY] = evaluator_service
     return SimpleNamespace(
         application=SimpleNamespace(
             bot_data=bot_data,
@@ -235,7 +241,13 @@ async def test_deliver_sends_text_chunks_in_order() -> None:
 @pytest.mark.asyncio
 async def test_screenshot_save_callback_confirms_and_reports_success() -> None:
     screenshot_service = SimpleNamespace(
-        confirm=AsyncMock(return_value=(SimpleNamespace(), "inserted")),
+        confirm=AsyncMock(
+            return_value=ScreenshotConfirmation(
+                workout=SimpleNamespace(),
+                outcome="inserted",
+                plan_id=uuid.UUID("12345678-1234-5678-1234-567812345678"),
+            )
+        ),
     )
     update = _update(callback_data="screenshot:confirm:draft-token")
 
@@ -251,8 +263,10 @@ async def test_screenshot_save_callback_confirms_and_reports_success() -> None:
         telegram_user_id=8172,
         token="draft-token",
     )
-    update.callback_query.edit_message_text.assert_awaited_once_with(
-        messages.SCREENSHOT_SAVED
+    call_args = update.callback_query.edit_message_text.await_args
+    assert call_args.args == (messages.SCREENSHOT_SAVED,)
+    assert call_args.kwargs["reply_markup"].inline_keyboard[0][0].callback_data == (
+        "firstweek:evaluate:12345678123456781234567812345678"
     )
 
 
@@ -276,6 +290,32 @@ async def test_screenshot_save_callback_explains_required_heart_rate() -> None:
     )
 
 
+@pytest.mark.asyncio
+async def test_first_week_evaluation_callback_invokes_deterministic_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan_id = uuid.UUID("12345678-1234-5678-1234-567812345678")
+    evaluator_service = SimpleNamespace(
+        evaluate_plan=AsyncMock(return_value=SimpleNamespace(evaluation=object()))
+    )
+    monkeypatch.setattr(messages, "first_week_evaluation", lambda _: "review")
+    update = _update(callback_data=f"firstweek:evaluate:{plan_id.hex}")
+
+    await handlers.callback_handler(
+        cast(Update, update),
+        cast(
+            ContextTypes.DEFAULT_TYPE,
+            _context(SimpleNamespace(), evaluator_service=evaluator_service),
+        ),
+    )
+
+    evaluator_service.evaluate_plan.assert_awaited_once_with(
+        telegram_user_id=8172,
+        plan_id=plan_id,
+    )
+    update.callback_query.edit_message_text.assert_awaited_once_with("review")
+
+
 def test_screenshot_draft_hides_save_until_both_heart_rate_values_are_present() -> None:
     request = ManualWorkoutImportRequest(
         discipline="RUNNING",
@@ -289,6 +329,14 @@ def test_screenshot_draft_hides_save_until_both_heart_rate_values_are_present() 
         request=request.model_copy(
             update={"average_heart_rate": 142, "max_heart_rate": 168}
         ),
+        link_options=(
+            ScreenshotLinkOption(
+                index=0,
+                discipline="RUNNING",
+                purpose="Build a controlled aerobic baseline.",
+            ),
+        ),
+        selected_link_option=0,
     )
 
     missing_callbacks = [

@@ -9,6 +9,7 @@ from typing import Any
 
 from app.domain.enums import Discipline, ProfileSettingsStep
 from app.schemas.capabilities import CapabilityReview, GoalExecutionAssessment
+from app.schemas.weekly_evaluation import WeeklyEvaluation
 from app.schemas.weekly_plans import (
     FirstWeekPlan,
     PlanReadiness,
@@ -646,6 +647,19 @@ SCREENSHOT_EXTRACTION_FAILED = (
     "Could not read a workout from that image. Try a clearer screenshot "
     "of a single workout summary."
 )
+
+
+def screenshot_evaluator_evidence_required(missing_fields: tuple[str, ...]) -> str:
+    """Explain a capture rejection without implying a workout was saved."""
+
+    required = " and ".join(missing_fields)
+    return (
+        "That screenshot is missing "
+        f"{required}, which is needed to evaluate this workout. Send a workout "
+        "summary that shows it; nothing was saved."
+    )
+
+
 SCREENSHOT_DRAFT_HEADER = "Here's what I read from the screenshot:"
 SCREENSHOT_CONFIRM_PROMPT = "Save this workout?"
 SCREENSHOT_CONFIRM_BUTTON = "Save"
@@ -653,6 +667,15 @@ SCREENSHOT_ADD_HEART_RATE_BUTTON = "Add required heart rate"
 SCREENSHOT_HEART_RATE_REQUIRED = (
     "Heart rate helps us interpret this workout's effort. Add both average and "
     "maximum heart rate before saving."
+)
+SCREENSHOT_SESSION_LINK_REQUIRED = (
+    "Choose the first-week menu session this workout represents before saving. "
+    "That explicit link lets us compare your actual effort with the planned one."
+)
+SCREENSHOT_NO_LINKABLE_SESSION = (
+    "This workout cannot be saved yet because there is no first-week menu for its "
+    "week to link it to. First-week workouts need an explicit planned-session link "
+    "so we can evaluate them accurately."
 )
 SCREENSHOT_CANCEL_BUTTON = "Discard"
 SCREENSHOT_DISCARDED = "Discarded. Nothing was saved."
@@ -1268,3 +1291,46 @@ def _date_time(value: Any) -> str:
     if isinstance(value, datetime):
         return value.astimezone().strftime("%Y-%m-%d %H:%M %Z")
     return _display(value)
+
+
+FIRST_WEEK_EVALUATE_BUTTON = "Evaluate first week"
+FIRST_WEEK_EVALUATION_UNAVAILABLE = (
+    "That first-week plan is no longer available to evaluate."
+)
+
+
+def first_week_evaluation(evaluation: WeeklyEvaluation) -> str:
+    """Render deterministic facts without inventing new coaching advice."""
+
+    completion = (
+        f"{evaluation.session_completion_percent:.0f}%"
+        if evaluation.session_completion_percent is not None
+        else "Not available"
+    )
+    lines = [
+        "<b>First-week review</b>",
+        (
+            "Completed: "
+            f"{evaluation.matched_count} matched, {evaluation.missed_count} missed "
+            f"({completion})"
+        ),
+        f"Suggested signal: <b>{escape(evaluation.signal.value.replace('_', ' '))}</b>",
+        "",
+        "<b>Session evidence</b>",
+    ]
+    for insight in evaluation.per_session_insights:
+        state = "Missed" if insight.workout_id is None else "Linked workout"
+        details: list[str] = [state]
+        if insight.intent_verdict.value != "NOT_COMPARABLE":
+            details.append(
+                f"effort {insight.intent_verdict.value.lower().replace('_', ' ')}"
+            )
+        if insight.output_verdict.value != "UNKNOWN":
+            details.append(
+                f"output {insight.output_verdict.value.lower().replace('_', ' ')}"
+            )
+        rendered_details = escape("; ".join(details))
+        lines.append(
+            f"- {escape(insight.discipline.value.title())}: {rendered_details}"
+        )
+    return "\n".join(lines)

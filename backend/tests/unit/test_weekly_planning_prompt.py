@@ -104,12 +104,22 @@ def test_first_week_prompt_is_a_probe_and_has_no_goal_payload() -> None:
 
     messages = build_first_week_planner_messages(context)
 
-    assert FIRST_WEEK_PLANNER_PROMPT_VERSION == 8
+    assert FIRST_WEEK_PLANNER_PROMPT_VERSION == 9
     assert "not an event-preparation week" in str(messages[0].content)
     assert "purpose, structured intensity" in str(messages[0].content)
     assert "athlete chooses" in str(messages[0].content)
     assert "RPE_FALLBACK" in str(messages[0].content)
     assert json.loads(str(messages[1].content)) == context
+
+
+def test_first_week_prompt_requests_only_evaluator_evidence() -> None:
+    system = str(
+        build_first_week_planner_messages({"planner_mode": "FIRST_WEEK"})[0].content
+    )
+
+    assert "record actual day/time, duration" in system
+    assert "available\npace/power/heart-rate" in system
+    assert "duration, RPE, how it felt" not in system
 
 
 def test_first_week_prompt_describes_strength_as_movements_not_numbers() -> None:

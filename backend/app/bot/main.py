@@ -15,6 +15,7 @@ from app.bot.handlers import (
     ALLOWED_USER_IDS_KEY,
     BOT_SERVICE_KEY,
     DEV_USER_IDS_KEY,
+    FIRST_WEEK_EVALUATION_SERVICE_KEY,
     WORKOUT_SCREENSHOT_SERVICE_KEY,
 )
 from app.bot.router import register_handlers
@@ -30,6 +31,7 @@ from app.services.accounts import AccountQueryService, AccountService
 from app.services.onboarding import OnboardingService
 from app.services.profiles import ProfileService
 from app.services.training_import import TrainingFileImportService
+from app.services.weekly_evaluation.delivery import FirstWeekEvaluationService
 from app.services.weekly_planning import FirstWeekPlanner
 from app.services.workout_screenshot import WorkoutScreenshotService
 
@@ -46,6 +48,7 @@ class BotRuntime:
     training_import: TrainingFileImportService
     service: CoachBotApplicationService
     workout_screenshot: WorkoutScreenshotService
+    first_week_evaluation: FirstWeekEvaluationService
 
     async def recover(self) -> None:
         """Reconcile durable background work before accepting updates."""
@@ -109,12 +112,14 @@ def build_runtime(
         ),
         observer=observer,
     )
+    first_week_evaluation = FirstWeekEvaluationService(session_factory=session_factory)
     return BotRuntime(
         settings=runtime_settings,
         engine=runtime_engine,
         training_import=training_import,
         service=service,
         workout_screenshot=workout_screenshot,
+        first_week_evaluation=first_week_evaluation,
     )
 
 
@@ -124,6 +129,7 @@ def create_application(
     runtime: BotRuntime | None = None,
     service: CoachBotService | None = None,
     workout_screenshot: WorkoutScreenshotService | None = None,
+    first_week_evaluation: FirstWeekEvaluationService | None = None,
 ) -> TelegramApplication:
     """Build a network-idle Telegram application suitable for tests or polling."""
 
@@ -151,6 +157,13 @@ def create_application(
                     model_name=runtime_settings.llm_vision_model,
                 ),
             )
+    if first_week_evaluation is None:
+        if owned_runtime is not None:
+            first_week_evaluation = owned_runtime.first_week_evaluation
+        else:
+            first_week_evaluation = FirstWeekEvaluationService(
+                session_factory=create_session_factory(create_engine(runtime_settings))
+            )
 
     builder = (
         Application.builder()
@@ -170,6 +183,7 @@ def create_application(
     application = builder.build()
     application.bot_data[BOT_SERVICE_KEY] = service
     application.bot_data[WORKOUT_SCREENSHOT_SERVICE_KEY] = workout_screenshot
+    application.bot_data[FIRST_WEEK_EVALUATION_SERVICE_KEY] = first_week_evaluation
     application.bot_data[ALLOWED_USER_IDS_KEY] = frozenset(
         runtime_settings.telegram_allowed_user_ids
     )

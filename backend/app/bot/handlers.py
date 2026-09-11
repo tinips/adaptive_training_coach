@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import cast
@@ -25,21 +26,32 @@ from app.integrations.llm.vision import ScreenshotExtractionError
 from app.schemas.common import TelegramIdentity
 from app.schemas.manual_import import ManualWorkoutImportRequest
 from app.schemas.training_import import TelegramDocumentUpload
+from app.services.weekly_evaluation.delivery import (
+    FirstWeekEvaluationService,
+    FirstWeekEvaluationUnavailableError,
+)
+from app.services.weekly_evaluation.errors import PlanNotLinkableError
 from app.services.workout_screenshot import (
     ActivityImportValidationError,
+    ScreenshotConfirmation,
     ScreenshotDraft,
+    ScreenshotEvaluatorEvidenceRequiredError,
+    ScreenshotLinkOption,
     WorkoutScreenshotDisabledError,
     WorkoutScreenshotHeartRateRequiredError,
     WorkoutScreenshotNotFoundError,
     WorkoutScreenshotService,
+    WorkoutScreenshotSessionLinkRequiredError,
 )
 
 logger = logging.getLogger(__name__)
 BOT_SERVICE_KEY = "coach_bot_service"
 WORKOUT_SCREENSHOT_SERVICE_KEY = "workout_screenshot_service"
+FIRST_WEEK_EVALUATION_SERVICE_KEY = "first_week_evaluation_service"
 ALLOWED_USER_IDS_KEY = "telegram_allowed_user_ids"
 DEV_USER_IDS_KEY = "dev_telegram_user_ids"
 _SCREENSHOT_CALLBACK_PREFIX = "screenshot:"
+_FIRST_WEEK_EVALUATION_CALLBACK_PREFIX = "firstweek:evaluate:"
 
 
 async def start_handler(
@@ -112,6 +124,9 @@ async def callback_handler(
         return
     if query.data.startswith(_SCREENSHOT_CALLBACK_PREFIX):
         await _handle_screenshot_callback(update, context, query.data)
+        return
+    if query.data.startswith(_FIRST_WEEK_EVALUATION_CALLBACK_PREFIX):
+        await _handle_first_week_evaluation_callback(update, context, query.data)
         return
     if query.data == "ob:v1:goal:confirm":
         try:
@@ -291,6 +306,11 @@ async def workout_screenshot_handler(
         logger.info("telegram_screenshot_extraction_failed user_id=%s", user.id)
         await status_message.edit_text(messages.SCREENSHOT_EXTRACTION_FAILED)
         return
+    except ScreenshotEvaluatorEvidenceRequiredError as error:
+        await status_message.edit_text(
+            messages.screenshot_evaluator_evidence_required(error.missing_fields)
+        )
+        return
 
     await status_message.edit_text(
         _format_draft_summary(draft),
@@ -317,6 +337,28 @@ async def _handle_screenshot_callback(
         await _edit_or_reply(query, messages.SCREENSHOT_DISCARDED)
         return
 
+    if action == "session":
+        raw_token, _, raw_index = token.partition(":")
+        try:
+            option_index = int(raw_index)
+        except ValueError:
+            await _edit_or_reply(query, messages.SCREENSHOT_DRAFT_EXPIRED)
+            return
+        draft = service.select_link_option(
+            telegram_user_id=user.id,
+            token=raw_token,
+            option_index=option_index,
+        )
+        if draft is None:
+            await _edit_or_reply(query, messages.SCREENSHOT_DRAFT_EXPIRED)
+            return
+        await _edit_or_reply(
+            query,
+            _format_draft_summary(draft),
+            reply_markup=_screenshot_keyboard(draft),
+        )
+        return
+
     if action == "heart_rate":
         if not service.request_heart_rate(telegram_user_id=user.id, token=token):
             await _edit_or_reply(query, messages.SCREENSHOT_DRAFT_EXPIRED)
@@ -332,7 +374,7 @@ async def _handle_screenshot_callback(
         return
 
     try:
-        _workout, outcome = await service.confirm(
+        confirmation = await service.confirm(
             telegram_user_id=user.id,
             token=token,
         )
@@ -341,6 +383,9 @@ async def _handle_screenshot_callback(
         return
     except WorkoutScreenshotHeartRateRequiredError:
         await _edit_or_reply(query, messages.SCREENSHOT_HEART_RATE_REQUIRED)
+        return
+    except WorkoutScreenshotSessionLinkRequiredError:
+        await _edit_or_reply(query, messages.SCREENSHOT_SESSION_LINK_REQUIRED)
         return
     except ActivityImportValidationError as error:
         logger.info(
@@ -355,20 +400,60 @@ async def _handle_screenshot_callback(
         "inserted": messages.SCREENSHOT_SAVED,
         "updated": messages.SCREENSHOT_UPDATED,
         "unchanged": messages.SCREENSHOT_UNCHANGED,
-    }[outcome]
-    await _edit_or_reply(query, text)
+    }[confirmation.outcome]
+    await _edit_or_reply(
+        query,
+        text,
+        reply_markup=_first_week_evaluation_keyboard(confirmation),
+    )
 
 
-async def _edit_or_reply(query: CallbackQuery, text: str) -> None:
+async def _handle_first_week_evaluation_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    callback_data: str,
+) -> None:
+    query = update.callback_query
+    user = update.effective_user
+    if query is None or user is None:
+        return
     try:
-        await query.edit_message_text(text)
+        plan_id = uuid.UUID(
+            hex=callback_data.removeprefix(_FIRST_WEEK_EVALUATION_CALLBACK_PREFIX)
+        )
+        result = await _first_week_evaluation_service(context).evaluate_plan(
+            telegram_user_id=user.id,
+            plan_id=plan_id,
+        )
+    except (ValueError, FirstWeekEvaluationUnavailableError, PlanNotLinkableError):
+        await _edit_or_reply(query, messages.FIRST_WEEK_EVALUATION_UNAVAILABLE)
+        return
+    await _edit_or_reply(query, messages.first_week_evaluation(result.evaluation))
+
+
+async def _edit_or_reply(
+    query: CallbackQuery,
+    text: str,
+    *,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> None:
+    try:
+        if reply_markup is None:
+            await query.edit_message_text(text)
+        else:
+            await query.edit_message_text(text, reply_markup=reply_markup)
     except BadRequest as exc:
         if "message is not modified" in str(exc).lower():
             return
         logger.info("telegram_screenshot_message_edit_unavailable")
         reply_text = getattr(query.message, "reply_text", None)
         if callable(reply_text):
-            await cast(Callable[[str], Awaitable[object]], reply_text)(text)
+            if reply_markup is None:
+                await cast(Callable[[str], Awaitable[object]], reply_text)(text)
+            else:
+                await cast(Callable[..., Awaitable[object]], reply_text)(
+                    text, reply_markup=reply_markup
+                )
 
 
 def _format_draft_summary(draft: ScreenshotDraft) -> str:
@@ -399,7 +484,15 @@ def _format_draft_summary(draft: ScreenshotDraft) -> str:
     lines.append("")
     if request.average_heart_rate is None or request.max_heart_rate is None:
         lines.append(messages.SCREENSHOT_HEART_RATE_REQUIRED)
+    elif not draft.link_options:
+        lines.append(messages.SCREENSHOT_NO_LINKABLE_SESSION)
+    elif draft.selected_link_option is None:
+        lines.append(messages.SCREENSHOT_SESSION_LINK_REQUIRED)
     else:
+        selected = draft.link_options[draft.selected_link_option]
+        lines.append(
+            f"Linked to planned {selected.discipline.title()}: {selected.purpose}"
+        )
         lines.append(messages.SCREENSHOT_CONFIRM_PROMPT)
     return "\n".join(lines)
 
@@ -412,6 +505,19 @@ def _screenshot_keyboard(draft: ScreenshotDraft) -> InlineKeyboardMarkup:
                 callback_data=f"screenshot:heart_rate:{draft.token}",
             )
         ]
+        rows = [buttons]
+    elif not draft.link_options:
+        rows = []
+    elif draft.selected_link_option is None:
+        rows = [
+            [
+                InlineKeyboardButton(
+                    _link_option_label(option),
+                    callback_data=(f"screenshot:session:{draft.token}:{option.index}"),
+                )
+            ]
+            for option in draft.link_options
+        ]
     else:
         buttons = [
             InlineKeyboardButton(
@@ -419,13 +525,41 @@ def _screenshot_keyboard(draft: ScreenshotDraft) -> InlineKeyboardMarkup:
                 callback_data=f"screenshot:confirm:{draft.token}",
             )
         ]
-    buttons.append(
-        InlineKeyboardButton(
-            messages.SCREENSHOT_CANCEL_BUTTON,
-            callback_data=f"screenshot:cancel:{draft.token}",
-        )
+        rows = [buttons]
+    rows.append(
+        [
+            InlineKeyboardButton(
+                messages.SCREENSHOT_CANCEL_BUTTON,
+                callback_data=f"screenshot:cancel:{draft.token}",
+            )
+        ]
     )
-    return InlineKeyboardMarkup([buttons])
+    return InlineKeyboardMarkup(rows)
+
+
+def _link_option_label(option: ScreenshotLinkOption) -> str:
+    discipline = option.discipline
+    purpose = option.purpose
+    label = f"{discipline.title()}: {purpose}"
+    return label if len(label) <= 60 else f"{label[:57]}..."
+
+
+def _first_week_evaluation_keyboard(
+    confirmation: ScreenshotConfirmation,
+) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    messages.FIRST_WEEK_EVALUATE_BUTTON,
+                    callback_data=(
+                        f"{_FIRST_WEEK_EVALUATION_CALLBACK_PREFIX}"
+                        f"{confirmation.plan_id.hex}"
+                    ),
+                )
+            ]
+        ]
+    )
 
 
 def _workout_screenshot_service(
@@ -434,6 +568,15 @@ def _workout_screenshot_service(
     return cast(
         WorkoutScreenshotService,
         context.application.bot_data[WORKOUT_SCREENSHOT_SERVICE_KEY],
+    )
+
+
+def _first_week_evaluation_service(
+    context: ContextTypes.DEFAULT_TYPE,
+) -> FirstWeekEvaluationService:
+    return cast(
+        FirstWeekEvaluationService,
+        context.application.bot_data[FIRST_WEEK_EVALUATION_SERVICE_KEY],
     )
 
 

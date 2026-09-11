@@ -13,7 +13,7 @@ import secrets
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -36,10 +36,26 @@ from app.repositories.activities import (
     ActivityUpsertOutcome,
     TrainingActivityRepository,
 )
+from app.repositories.errors import OwnedRecordNotFoundError
 from app.repositories.users import UserRepository
+from app.repositories.weekly_plans import WeeklyTrainingPlanRepository
 from app.schemas.manual_import import ManualWorkoutImportRequest
+from app.schemas.weekly_plans import FirstWeekPlan
 from app.services.activities.adapters.manual_screenshot import (
     from_manual_screenshot,
+)
+from app.services.weekly_evaluation.classification import has_linkable_plan_for_workout
+from app.services.weekly_evaluation.eligibility import local_date
+from app.services.weekly_evaluation.errors import (
+    PlannedSessionNotFoundError,
+    PlanNotLinkableError,
+    WorkoutAlreadyLinkedError,
+    WorkoutNotEligibleError,
+)
+from app.services.weekly_evaluation.linking import LinkingService
+from app.services.workout_screenshot.validation import (
+    ScreenshotEvaluatorEvidenceRequiredError,
+    require_evaluator_capture_metrics,
 )
 
 # A draft is small and short-lived (confirmed or abandoned within minutes),
@@ -61,12 +77,36 @@ class WorkoutScreenshotHeartRateRequiredError(RuntimeError):
     """Raised when a screenshot draft is missing required HR evidence."""
 
 
+class WorkoutScreenshotSessionLinkRequiredError(RuntimeError):
+    """Raised when a screenshot cannot be explicitly linked to a menu session."""
+
+
+@dataclass(frozen=True, slots=True)
+class ScreenshotLinkOption:
+    """One athlete-selectable first-week session, never an auto-match."""
+
+    index: int
+    discipline: str
+    purpose: str
+
+
 @dataclass(frozen=True, slots=True)
 class ScreenshotDraft:
     """What the bot shows the athlete before it commits anything."""
 
     token: str
     request: ManualWorkoutImportRequest
+    link_options: tuple[ScreenshotLinkOption, ...] = ()
+    selected_link_option: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ScreenshotConfirmation:
+    """The persisted workout plus the plan the athlete explicitly selected."""
+
+    workout: Workout
+    outcome: ActivityUpsertOutcome
+    plan_id: uuid.UUID
 
 
 @dataclass(slots=True)
@@ -74,6 +114,10 @@ class _PendingDraft:
     telegram_user_id: int
     request: ManualWorkoutImportRequest
     awaiting_heart_rate: bool = False
+    link_plan_id: uuid.UUID | None = None
+    link_session_ids: tuple[uuid.UUID, ...] = ()
+    link_session_labels: tuple[tuple[str, str], ...] = ()
+    selected_link_option: int | None = None
     created_at: float = field(default_factory=time.monotonic)
 
 
@@ -137,6 +181,20 @@ class WorkoutScreenshotService:
             )
             raise
 
+        try:
+            require_evaluator_capture_metrics(request)
+        except ScreenshotEvaluatorEvidenceRequiredError:
+            failed_at = datetime.now(UTC)
+            await self._observer.on_run_failed(
+                AIWorkflowRunError(
+                    metadata=metadata,
+                    failed_at=failed_at,
+                    latency_ms=int((failed_at - started_at).total_seconds() * 1000),
+                    error_code="screenshot_evaluator_evidence_incomplete",
+                )
+            )
+            raise
+
         completed_at = datetime.now(UTC)
         await self._observer.on_run_completed(
             AIWorkflowRunResult(
@@ -148,14 +206,16 @@ class WorkoutScreenshotService:
         )
 
         token = self._store(telegram_user_id, request)
-        return ScreenshotDraft(token=token, request=request)
+        pending = self._pending[token]
+        await self._load_link_options(pending)
+        return self._as_draft(token, pending)
 
     async def confirm(
         self,
         *,
         telegram_user_id: int,
         token: str,
-    ) -> tuple[Workout, ActivityUpsertOutcome]:
+    ) -> ScreenshotConfirmation:
         """Persist a previously extracted draft for its original athlete only."""
 
         self._require_enabled()
@@ -171,18 +231,45 @@ class WorkoutScreenshotService:
 
             try:
                 incoming = from_manual_screenshot(draft.request)
-                result = await TrainingActivityRepository(session).import_activity(
+                workout, outcome = await TrainingActivityRepository(
+                    session
+                ).import_activity(
                     user_id=user.id,
                     incoming=incoming,
                 )
+                option_index = draft.selected_link_option
+                assert (
+                    option_index is not None
+                )  # checked before opening the transaction
+                assert draft.link_plan_id is not None
+                await LinkingService(session).link_workout_to_session(
+                    athlete_id=user.id,
+                    plan_id=draft.link_plan_id,
+                    plan_session_id=draft.link_session_ids[option_index],
+                    workout_id=workout.id,
+                )
             except ActivityImportValidationError:
                 raise
+            except (
+                OwnedRecordNotFoundError,
+                PlanNotLinkableError,
+                PlannedSessionNotFoundError,
+                WorkoutAlreadyLinkedError,
+                WorkoutNotEligibleError,
+            ) as error:
+                raise WorkoutScreenshotSessionLinkRequiredError(
+                    "selected first-week session is no longer available"
+                ) from error
             except ValueError as error:
                 raise ActivityImportValidationError(
                     "screenshot draft could not be normalized"
                 ) from error
         self._pending.pop(token, None)
-        return result
+        return ScreenshotConfirmation(
+            workout=workout,
+            outcome=outcome,
+            plan_id=draft.link_plan_id,
+        )
 
     def cancel(self, *, telegram_user_id: int, token: str) -> bool:
         """Discard a draft; returns whether one actually existed."""
@@ -228,7 +315,23 @@ class WorkoutScreenshotService:
         )
         draft.awaiting_heart_rate = False
         token = next(key for key, item in self._pending.items() if item is draft)
-        return ScreenshotDraft(token=token, request=draft.request)
+        return self._as_draft(token, draft)
+
+    def select_link_option(
+        self, *, telegram_user_id: int, token: str, option_index: int
+    ) -> ScreenshotDraft | None:
+        """Record the athlete's explicit choice, never a heuristic match."""
+
+        draft = self._pending.get(token)
+        if (
+            draft is None
+            or draft.telegram_user_id != telegram_user_id
+            or option_index < 0
+            or option_index >= len(draft.link_session_ids)
+        ):
+            return None
+        draft.selected_link_option = option_index
+        return self._as_draft(token, draft)
 
     def _require_enabled(self) -> None:
         if not self._settings.screenshot_import_enabled:
@@ -248,6 +351,64 @@ class WorkoutScreenshotService:
             raise WorkoutScreenshotHeartRateRequiredError(
                 "average and maximum heart rate are required before confirmation"
             )
+        if (
+            draft.link_plan_id is None
+            or draft.selected_link_option is None
+            or draft.selected_link_option >= len(draft.link_session_ids)
+        ):
+            raise WorkoutScreenshotSessionLinkRequiredError(
+                "an explicit first-week session link is required before confirmation"
+            )
+
+    async def _load_link_options(self, draft: _PendingDraft) -> None:
+        """Load eligible menu sessions, without choosing one for the athlete."""
+
+        async with self._session_factory() as session:
+            user = await UserRepository(session).get_by_telegram_id(
+                draft.telegram_user_id
+            )
+            if user is None:
+                return
+            workout_date = local_date(draft.request.started_at, user.timezone)
+            week_start = workout_date - timedelta(days=workout_date.weekday())
+            plan = await WeeklyTrainingPlanRepository(session).get_for_week(
+                athlete_id=user.id,
+                week_start=week_start,
+            )
+            if plan is None:
+                return
+            try:
+                first_week_plan = FirstWeekPlan.model_validate(plan.plan_jsonb)
+            except ValueError:
+                return
+            if not has_linkable_plan_for_workout(
+                plan=first_week_plan,
+                plan_schema_version=plan.plan_schema_version,
+                workout_started_at=draft.request.started_at,
+                timezone=user.timezone,
+            ):
+                return
+            draft.link_plan_id = plan.id
+            draft.link_session_ids = tuple(
+                session_item.id for session_item in first_week_plan.sessions
+            )
+            draft.link_session_labels = tuple(
+                (session_item.discipline.value.title(), session_item.purpose)
+                for session_item in first_week_plan.sessions
+            )
+
+    @staticmethod
+    def _as_draft(token: str, draft: _PendingDraft) -> ScreenshotDraft:
+        options = tuple(
+            ScreenshotLinkOption(index=index, discipline=discipline, purpose=purpose)
+            for index, (discipline, purpose) in enumerate(draft.link_session_labels)
+        )
+        return ScreenshotDraft(
+            token=token,
+            request=draft.request,
+            link_options=options,
+            selected_link_option=draft.selected_link_option,
+        )
 
     def _store(self, telegram_user_id: int, request: ManualWorkoutImportRequest) -> str:
         self._evict_expired()
@@ -276,9 +437,13 @@ class WorkoutScreenshotService:
 
 __all__ = [
     "ActivityImportValidationError",
+    "ScreenshotConfirmation",
     "ScreenshotDraft",
+    "ScreenshotEvaluatorEvidenceRequiredError",
+    "ScreenshotLinkOption",
     "WorkoutScreenshotDisabledError",
     "WorkoutScreenshotHeartRateRequiredError",
     "WorkoutScreenshotNotFoundError",
     "WorkoutScreenshotService",
+    "WorkoutScreenshotSessionLinkRequiredError",
 ]

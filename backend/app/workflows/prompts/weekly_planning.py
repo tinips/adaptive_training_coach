@@ -12,7 +12,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from app.schemas.availability import ConfirmedWeeklyAvailability
 
 ONGOING_WEEKLY_PLANNER_PROMPT_VERSION: Final = 10
-FIRST_WEEK_PLANNER_PROMPT_VERSION: Final = 8
+FIRST_WEEK_PLANNER_PROMPT_VERSION: Final = 9
 # Backward-compatible name for callers that use the ongoing planner.
 WEEKLY_PLANNER_PROMPT_VERSION: Final = ONGOING_WEEKLY_PLANNER_PROMPT_VERSION
 
@@ -181,9 +181,9 @@ movement slow and stopping with plenty in reserve."}.
 availability_constraints is non-negotiable. Ensure every individual menu session fits
 at least one allowed discipline/window, but do not name days or times. Respect
 equipment/access and health limitations. Include concise guardrails and explicit
-logging instructions: record actual day/time, duration, RPE, how it felt, and any
-available pace/power/heart-rate. Use at most five distinct logging instructions; do
-not create one per session. tests must be empty. All swimming this week is in a
+logging instructions: record actual day/time, duration, and any available
+pace/power/heart-rate. Use at most five distinct logging instructions; do not create
+one per session. tests must be empty. All swimming this week is in a
 pool; never plan open-water swimming. For untrained swimming, use breathing, body
 position, short 25m repeats, and generous rest; never prescribe continuous-distance or
 pace targets."""
