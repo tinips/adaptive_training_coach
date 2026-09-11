@@ -18,6 +18,9 @@ class RecentRaceResult(_BaselineSchema):
 
     distance_km: float = Field(gt=0, le=250)
     duration_seconds: int = Field(gt=0, le=24 * 60 * 60)
+    effort: Literal["MAXIMAL", "HARD", "STEADY", "EASY"] | None = None
+    # Kept solely to load the short-lived free-text field introduced in v2.
+    # New baseline forms write the structured ``effort`` selection instead.
     effort_context: str | None = Field(default=None, min_length=1, max_length=240)
 
 

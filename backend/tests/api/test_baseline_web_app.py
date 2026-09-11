@@ -32,5 +32,7 @@ async def test_baseline_web_app_serves_adaptive_discipline_fields() -> None:
     assert response.status_code == 200
     assert "Your training baseline" in response.text
     assert "running.typical_weekly_sessions" in response.text
+    assert "running.recent_race_effort" in response.text
+    assert "Maximal / race effort" in response.text
     assert "triathlon.open_water_confidence" in response.text
     await engine.dispose()

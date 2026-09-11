@@ -104,12 +104,12 @@ def test_first_week_prompt_is_a_probe_and_has_no_goal_payload() -> None:
 
     messages = build_first_week_planner_messages(context)
 
-    assert FIRST_WEEK_PLANNER_PROMPT_VERSION == 11
+    assert FIRST_WEEK_PLANNER_PROMPT_VERSION == 12
     assert "not an event-preparation week" in str(messages[0].content)
     assert "purpose, structured intensity" in str(messages[0].content)
     assert "athlete chooses" in str(messages[0].content)
     assert "RPE_FALLBACK" in str(messages[0].content)
-    assert "effort_context" in str(messages[0].content)
+    assert "selected effort value" in str(messages[0].content)
     assert "distance_range_meters" in str(messages[0].content)
     assert json.loads(str(messages[1].content)) == context
 

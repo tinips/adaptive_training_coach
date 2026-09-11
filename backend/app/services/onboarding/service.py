@@ -1424,18 +1424,16 @@ class OnboardingService:
                 ):
                     values[field] = desired[discipline]
                 continue
-            if field == "running.recent_race_effort_context":
+            if field == "running.recent_race_effort":
                 running = document.get("running")
                 race = (
                     running.get("recent_race_result")
                     if isinstance(running, dict)
                     else None
                 )
-                effort_context = (
-                    race.get("effort_context") if isinstance(race, dict) else None
-                )
-                if isinstance(effort_context, str):
-                    values[field] = effort_context
+                effort = race.get("effort") if isinstance(race, dict) else None
+                if isinstance(effort, str):
+                    values[field] = effort
                 continue
             section, _, key = field.partition(".")
             source = document.get(section)

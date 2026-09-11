@@ -92,7 +92,7 @@ def test_resolver_does_not_turn_an_explicitly_maximal_result_into_training_pace(
             recent_race_result=RecentRaceResult(
                 distance_km=10,
                 duration_seconds=3_000,
-                effort_context="All-out race effort",
+                effort="MAXIMAL",
             ),
         )
     )
