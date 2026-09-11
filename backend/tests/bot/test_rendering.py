@@ -24,7 +24,11 @@ from app.schemas.capabilities import (
     ContextExecutionAssessment,
     GoalExecutionAssessment,
 )
-from app.schemas.weekly_plans import FirstWeekPlan, PlanSession
+from app.schemas.weekly_plans import (
+    FirstWeekPlan,
+    FirstWeekStrengthSession,
+    PlanSession,
+)
 
 
 def _weekly_availability() -> dict[str, object]:
@@ -91,6 +95,37 @@ def test_first_week_menu_renders_utf8_glyphs_and_fallback_note() -> None:
     assert "Purpose: Easy aerobic run." in rendered
     assert "Finish relaxed." not in rendered
     assert "Keep breathing easy." not in rendered
+
+
+def test_first_week_menu_renders_duration_only_strength_sessions() -> None:
+    plan = FirstWeekPlan(
+        week_start=date(2026, 9, 7),
+        sessions=(
+            FirstWeekStrengthSession(
+                discipline="STRENGTH",
+                purpose="Practice basic strength movement.",
+                intensity={
+                    "metric": "RPE",
+                    "target_range": [2, 3],
+                    "rpe_range": [2, 3],
+                    "guidance": "Stay comfortable.",
+                },
+                objective="Move with controlled form.",
+                targets={"duration_minutes": 30},
+                execution="Finish with plenty in reserve.",
+            ),
+        ),
+        guardrails=("Keep it comfortable.",),
+        logging_instructions=("Log duration.",),
+        sessions_per_discipline={"STRENGTH": 1},
+        total_minutes_per_discipline={"STRENGTH": 30},
+    )
+
+    rendered = messages.first_week_menu(plan)
+
+    assert "<b>1. Strength</b>" in rendered
+    assert "30 min" in rendered
+    assert "RPE 2-3" in rendered
 
 
 def test_first_week_menu_splits_over_limit_at_sessions_and_sections() -> None:

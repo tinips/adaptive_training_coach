@@ -443,7 +443,7 @@ def _volume_or_duration_label(session: PlanSession) -> str:
     duration directly, so duration is what's shown for those.
     """
 
-    distance_range = session.targets.distance_range_meters
+    distance_range = getattr(session.targets, "distance_range_meters", None)
     if distance_range is None:
         return f"{session.targets.duration_minutes} min"
     lower, upper = distance_range
