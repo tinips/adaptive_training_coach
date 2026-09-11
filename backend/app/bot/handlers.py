@@ -29,6 +29,7 @@ from app.services.workout_screenshot import (
     ActivityImportValidationError,
     ScreenshotDraft,
     WorkoutScreenshotDisabledError,
+    WorkoutScreenshotHeartRateRequiredError,
     WorkoutScreenshotNotFoundError,
     WorkoutScreenshotService,
 )
@@ -338,6 +339,9 @@ async def _handle_screenshot_callback(
     except WorkoutScreenshotNotFoundError:
         await _edit_or_reply(query, messages.SCREENSHOT_DRAFT_EXPIRED)
         return
+    except WorkoutScreenshotHeartRateRequiredError:
+        await _edit_or_reply(query, messages.SCREENSHOT_HEART_RATE_REQUIRED)
+        return
     except ActivityImportValidationError as error:
         logger.info(
             "telegram_screenshot_import_invalid user_id=%s reason=%s",
@@ -393,23 +397,28 @@ def _format_draft_summary(draft: ScreenshotDraft) -> str:
         if swim.total_strokes is not None:
             lines.append(f"Total strokes: {swim.total_strokes}")
     lines.append("")
-    lines.append(messages.SCREENSHOT_CONFIRM_PROMPT)
+    if request.average_heart_rate is None or request.max_heart_rate is None:
+        lines.append(messages.SCREENSHOT_HEART_RATE_REQUIRED)
+    else:
+        lines.append(messages.SCREENSHOT_CONFIRM_PROMPT)
     return "\n".join(lines)
 
 
 def _screenshot_keyboard(draft: ScreenshotDraft) -> InlineKeyboardMarkup:
-    buttons = [
-        InlineKeyboardButton(
-            messages.SCREENSHOT_CONFIRM_BUTTON,
-            callback_data=f"screenshot:confirm:{draft.token}",
-        )
-    ]
     if draft.request.average_heart_rate is None or draft.request.max_heart_rate is None:
-        buttons.append(
+        buttons = [
             InlineKeyboardButton(
-                "Add heart rate", callback_data=f"screenshot:heart_rate:{draft.token}"
+                messages.SCREENSHOT_ADD_HEART_RATE_BUTTON,
+                callback_data=f"screenshot:heart_rate:{draft.token}",
             )
-        )
+        ]
+    else:
+        buttons = [
+            InlineKeyboardButton(
+                messages.SCREENSHOT_CONFIRM_BUTTON,
+                callback_data=f"screenshot:confirm:{draft.token}",
+            )
+        ]
     buttons.append(
         InlineKeyboardButton(
             messages.SCREENSHOT_CANCEL_BUTTON,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -16,6 +17,11 @@ from telegram.ext import ContextTypes
 from app.bot import handlers, keyboards, messages
 from app.bot.rendering import TelegramResponse
 from app.schemas.common import TelegramIdentity
+from app.schemas.manual_import import ManualWorkoutImportRequest
+from app.services.workout_screenshot import (
+    ScreenshotDraft,
+    WorkoutScreenshotHeartRateRequiredError,
+)
 
 
 def _context(
@@ -248,6 +254,61 @@ async def test_screenshot_save_callback_confirms_and_reports_success() -> None:
     update.callback_query.edit_message_text.assert_awaited_once_with(
         messages.SCREENSHOT_SAVED
     )
+
+
+@pytest.mark.asyncio
+async def test_screenshot_save_callback_explains_required_heart_rate() -> None:
+    screenshot_service = SimpleNamespace(
+        confirm=AsyncMock(side_effect=WorkoutScreenshotHeartRateRequiredError())
+    )
+    update = _update(callback_data="screenshot:confirm:draft-token")
+
+    await handlers.callback_handler(
+        cast(Update, update),
+        cast(
+            ContextTypes.DEFAULT_TYPE,
+            _context(SimpleNamespace(), screenshot_service=screenshot_service),
+        ),
+    )
+
+    update.callback_query.edit_message_text.assert_awaited_once_with(
+        messages.SCREENSHOT_HEART_RATE_REQUIRED
+    )
+
+
+def test_screenshot_draft_hides_save_until_both_heart_rate_values_are_present() -> None:
+    request = ManualWorkoutImportRequest(
+        discipline="RUNNING",
+        source_app_name="Treadmill",
+        started_at=datetime(2026, 9, 11, 8, tzinfo=UTC),
+        duration_seconds=1800,
+    )
+    missing_hr = ScreenshotDraft(token="missing", request=request)
+    complete_hr = ScreenshotDraft(
+        token="complete",
+        request=request.model_copy(
+            update={"average_heart_rate": 142, "max_heart_rate": 168}
+        ),
+    )
+
+    missing_callbacks = [
+        button.callback_data
+        for row in handlers._screenshot_keyboard(missing_hr).inline_keyboard
+        for button in row
+    ]
+    complete_callbacks = [
+        button.callback_data
+        for row in handlers._screenshot_keyboard(complete_hr).inline_keyboard
+        for button in row
+    ]
+
+    assert "screenshot:confirm:missing" not in missing_callbacks
+    assert "screenshot:heart_rate:missing" in missing_callbacks
+    assert messages.SCREENSHOT_HEART_RATE_REQUIRED in handlers._format_draft_summary(
+        missing_hr
+    )
+    assert "screenshot:confirm:complete" in complete_callbacks
+    assert "screenshot:heart_rate:complete" not in complete_callbacks
 
 
 @pytest.mark.asyncio

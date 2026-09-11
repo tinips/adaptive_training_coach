@@ -61,7 +61,7 @@ are defined in `docs/README.md`.
 
 ## Workout capture
 
-- `DESIGNED`, not yet implemented (2026-09-08). Confirming a screenshot-captured
+- `BUILT` (decision 2026-09-08; implemented 2026-09-11). Confirming a screenshot-captured
   workout now requires average and max heart rate. The existing optional
   "Add heart rate" prompt becomes a hard requirement: the confirm action is
   blocked until both values are present, replacing the current behavior where

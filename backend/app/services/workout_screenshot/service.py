@@ -57,6 +57,10 @@ class WorkoutScreenshotNotFoundError(RuntimeError):
     """Raised for an unknown/expired draft, or an unrecognized athlete."""
 
 
+class WorkoutScreenshotHeartRateRequiredError(RuntimeError):
+    """Raised when a screenshot draft is missing required HR evidence."""
+
+
 @dataclass(frozen=True, slots=True)
 class ScreenshotDraft:
     """What the bot shows the athlete before it commits anything."""
@@ -158,6 +162,7 @@ class WorkoutScreenshotService:
         draft = self._pending.get(token)
         if draft is None or draft.telegram_user_id != telegram_user_id:
             raise WorkoutScreenshotNotFoundError("draft not found or expired")
+        self._require_confirmable_draft(draft)
 
         async with self._session_factory() as session, session.begin():
             user = await UserRepository(session).get_by_telegram_id(telegram_user_id)
@@ -229,6 +234,21 @@ class WorkoutScreenshotService:
         if not self._settings.screenshot_import_enabled:
             raise WorkoutScreenshotDisabledError("screenshot import is disabled")
 
+    @staticmethod
+    def _require_confirmable_draft(draft: _PendingDraft) -> None:
+        """Apply capture-confirm gates before any persistence work begins.
+
+        Keep independent confirmation requirements here so later gates (such as
+        screenshot volume validation) can be added without weakening or
+        entangling the mandatory-HR invariant.
+        """
+
+        request = draft.request
+        if request.average_heart_rate is None or request.max_heart_rate is None:
+            raise WorkoutScreenshotHeartRateRequiredError(
+                "average and maximum heart rate are required before confirmation"
+            )
+
     def _store(self, telegram_user_id: int, request: ManualWorkoutImportRequest) -> str:
         self._evict_expired()
         if len(self._pending) >= _MAX_PENDING_DRAFTS:
@@ -258,6 +278,7 @@ __all__ = [
     "ActivityImportValidationError",
     "ScreenshotDraft",
     "WorkoutScreenshotDisabledError",
+    "WorkoutScreenshotHeartRateRequiredError",
     "WorkoutScreenshotNotFoundError",
     "WorkoutScreenshotService",
 ]

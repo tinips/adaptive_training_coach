@@ -23,6 +23,7 @@ from app.schemas.manual_import import ManualWorkoutImportRequest
 from app.services.activities.adapters.manual_screenshot import from_manual_screenshot
 from app.services.activities.normalization import normalize_import
 from app.services.workout_screenshot.service import (
+    WorkoutScreenshotHeartRateRequiredError,
     WorkoutScreenshotService,
     _PendingDraft,
 )
@@ -34,6 +35,7 @@ def _service_with_draft(
     max_heart_rate: float | None = None,
 ) -> WorkoutScreenshotService:
     service = object.__new__(WorkoutScreenshotService)
+    service._settings = Settings(environment="test", screenshot_import_enabled=True)
     service._pending = {
         "draft-token": _PendingDraft(
             telegram_user_id=8172,
@@ -111,6 +113,30 @@ async def test_confirm_persists_a_pending_screenshot_workout(
     assert workout.running_details.max_heart_rate == 168
     assert workout.running_details.average_pace_seconds_per_km == 360
     assert "draft-token" not in service._pending
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("average_heart_rate", "max_heart_rate"),
+    [
+        (None, None),
+        (142, None),
+        (None, 168),
+    ],
+)
+async def test_confirm_rejects_a_screenshot_draft_without_both_heart_rate_values(
+    average_heart_rate: float | None,
+    max_heart_rate: float | None,
+) -> None:
+    service = _service_with_draft(
+        average_heart_rate=average_heart_rate,
+        max_heart_rate=max_heart_rate,
+    )
+
+    with pytest.raises(WorkoutScreenshotHeartRateRequiredError):
+        await service.confirm(telegram_user_id=8172, token="draft-token")
+
+    assert "draft-token" in service._pending
 
 
 def test_strength_screenshot_is_normalized_to_a_strength_workout() -> None:

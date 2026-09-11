@@ -649,6 +649,11 @@ SCREENSHOT_EXTRACTION_FAILED = (
 SCREENSHOT_DRAFT_HEADER = "Here's what I read from the screenshot:"
 SCREENSHOT_CONFIRM_PROMPT = "Save this workout?"
 SCREENSHOT_CONFIRM_BUTTON = "Save"
+SCREENSHOT_ADD_HEART_RATE_BUTTON = "Add required heart rate"
+SCREENSHOT_HEART_RATE_REQUIRED = (
+    "Heart rate helps us interpret this workout's effort. Add both average and "
+    "maximum heart rate before saving."
+)
 SCREENSHOT_CANCEL_BUTTON = "Discard"
 SCREENSHOT_DISCARDED = "Discarded. Nothing was saved."
 SCREENSHOT_DRAFT_EXPIRED = "This confirmation has expired. Send the screenshot again."
