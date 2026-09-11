@@ -153,8 +153,12 @@ Telegram bot (no link/evaluate/review UI). Each `DESIGNED` tag below still
 describes the decided behavior, not running-and-reachable code; see
 `docs/briefs/backlog/first-week-evaluator.md` for the per-slice build status.
 
-- `DESIGNED` — matching is athlete-explicit. Date or discipline may organize
-  candidates, but cannot create the final link automatically.
+- `DESIGNED` — matching is athlete-explicit for first-week linking. Date or
+  discipline may organize candidates, but cannot create the final link
+  automatically. This is unqualified for the first week. Post-first-week
+  (ongoing, dated-plan) screenshot-captured workouts follow a documented
+  exception — see "Ongoing workout matching (post-first-week)" below — not a
+  reopening of this rule.
 - `DESIGNED` — every planned session receives a code-generated UUID. Array
   ordinal is never permanent identity. A plan revision preserves a session UUID
   only when it represents the same intended session; materially replaced
@@ -230,6 +234,66 @@ describes the decided behavior, not running-and-reachable code; see
   10 bpm, emit `SOURCE_CONFLICT` and make the HR verdict `NOT_COMPARABLE`. The
   selected reference-HR band has a ±5 bpm allowance and remains a soft effort
   flag only.
+
+## Ongoing workout matching (post-first-week)
+
+`DECIDED` (2026-09-11). Scope: this section governs **only**
+post-first-week, screenshot-captured workout matching, once an ongoing/dated
+plan exists. It does not alter the first-week evaluator's matching rule
+above, which stays athlete-explicit with no date/greedy inference,
+unqualified.
+
+This revises the framing in `docs/design/first-week-evaluator.md`'s
+"architectural tensions" item 1, which previously read as a blanket
+rejection of all date-based matching everywhere; it is not a revival of the
+old greedy-date comparator that was removed on 2026-09-08, that removal
+still stands. This is a new, narrower, more careful mechanism.
+
+- **Match key**: date + discipline + time-of-day, with submission order as a
+  tiebreaker when time-of-day alone doesn't separate two candidates. This
+  resolves the double-session-same-day case (e.g. a morning run and an
+  afternoon run on the same day): time-of-day plus submission order turn a
+  same-discipline collision into two clean, unambiguous matches instead of a
+  fallback case.
+- **Exactly one candidate**: auto-link, no extra tap required. The match is
+  still shown on the confirm screen either way — it is never silent, see the
+  load-bearing assumption below.
+- **Ambiguous (2+ candidates remain after date/discipline/time-of-day/order)
+  or no candidate**: fall back to manual picking, same UI pattern as the
+  first-week link flow.
+- **Lock trigger is athlete confirmation, not evaluation timing.** This is
+  narrower than the first-week rule above (which allows correction up until
+  evaluation, then supersedes). For ongoing capture: when the athlete
+  confirms a workout — already a required step, since screenshot-captured
+  workouts require confirming HR to save — that confirmation is the
+  permanent lock for that workout's link and data. No correction after
+  confirm, full stop.
+- **Load-bearing assumption, not yet independently verified against the UI:**
+  the confirm screen must display which planned session the workout matched
+  to, not just the workout's own HR/pace numbers, so the athlete has an
+  actual chance to see and reject a wrong match before locking it in. This is
+  what makes "no correction after confirm" safe rather than a silent trap.
+  If the confirm screen does not show the match, this mechanism needs
+  revisiting before it ships.
+- A photo-quality gate (prompting a retake on low OCR confidence before
+  saving anything) is a good, separate, additive safeguard. It reduces
+  bad-data-extraction errors specifically and does not replace the need for
+  the confirm screen to show the match.
+
+## Fitness state
+
+`DECIDED` (2026-09-11), not yet built — fitness-state storage itself remains
+deferred (see `docs/decisions/open.md`).
+
+- **Corrections are contained to their own week. No cascade.** If a given
+  week's evaluation is later corrected, only that week's fitness-state row
+  gets a new superseding version. Later weeks keep whatever trend numbers
+  they already computed; nothing recalculates automatically. This matches
+  the evaluator's own supersede-don't-cascade pattern (see "First-week
+  evaluator" above), and the ongoing-matching confirm-time lock (see
+  "Ongoing workout matching (post-first-week)") already closes off the main
+  trigger — a wrong auto-match getting corrected — that would otherwise make
+  this come up often in practice.
 
 ## Prescribed-range tolerance model (running/swim pace, cycling power, distance/volume)
 

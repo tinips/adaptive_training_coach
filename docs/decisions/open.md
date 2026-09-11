@@ -46,7 +46,9 @@ data rather than deciding it from first principles now.
 
 The following topics are intentionally absent from the active approval gate:
 
-- fitness-history storage, seeding, confidence, and correction rules -
+- fitness-history storage, seeding, confidence, and correction rules (the
+  correction-cascade rule itself is decided, see `docs/decisions/locked.md`,
+  "Fitness state"; storage, seeding, and confidence remain open) -
   `docs/design/fitness-state.md`;
 - the exact `last_week_feedback` consumer contract and ongoing-planner
   activation/matching convergence - `docs/design/planner-architecture.md`;

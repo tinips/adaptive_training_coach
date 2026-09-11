@@ -654,9 +654,16 @@ rather than reconciling it, and three more are now resolved by the
 2026-09-10 implementation:
 
 1. ~~First-week linking is athlete-explicit (`DESIGNED`), while the built but
-   dormant ongoing comparator uses greedy date matching.~~ Resolved 2026-09-08:
-   the greedy-date comparator was removed, since it modeled the approach this
-   design rejects, not a variant to reconcile with it.
+   dormant ongoing comparator uses greedy date matching.~~ Resolved
+   2026-09-08: the greedy-date comparator was removed, since it modeled the
+   approach this design rejects, not a variant to reconcile with it. That
+   removal still stands. Revised 2026-09-11: this should not be read as a
+   blanket rejection of all date-based matching for every future case —
+   post-first-week, ongoing/dated-plan screenshot capture now has its own
+   narrower, deliberately-designed matching mechanism (not a revival of the
+   removed greedy comparator), see `docs/decisions/locked.md`, "Ongoing
+   workout matching (post-first-week)". First-week linking itself is
+   unaffected and stays athlete-explicit.
 2. ~~The approved immutable evaluator history differs from
    `WeeklyPlanOutcomeRepository.upsert()`, which replaces the same week's dated
    comparison.~~ Resolved 2026-09-10: `FirstWeekEvaluationOutcome` is its own
