@@ -402,10 +402,24 @@ def _first_week_zone_violations(
         ]
     if session.intensity.metric == "RPE":
         return []
+    lower, upper = session.intensity.target_range
+    if zone.maximal_benchmark_pace is not None:
+        if (
+            session.intensity.metric == zone.metric
+            and lower > zone.maximal_benchmark_pace
+        ):
+            return []
+        return [
+            PlanViolation(
+                "FIRST_WEEK_ZONE_CONFLICT",
+                session.discipline,
+                None,
+                "pace target is faster than the reported maximal benchmark",
+            )
+        ]
     allowed_ranges = tuple(
         value for value in (zone.easy, zone.moderate, zone.hard) if value
     )
-    lower, upper = session.intensity.target_range
     if session.intensity.metric != zone.metric or not any(
         lower >= allowed[0] and upper <= allowed[1] for allowed in allowed_ranges
     ):

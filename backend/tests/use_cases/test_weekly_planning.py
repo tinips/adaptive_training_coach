@@ -353,6 +353,7 @@ async def test_first_week_prompt_contains_all_confirmed_onboarding_context(
                         "recent_race_result": {
                             "distance_km": 10,
                             "duration_seconds": 3_000,
+                            "effort": "MAXIMAL",
                         },
                     },
                     "triathlon": {
@@ -441,6 +442,11 @@ async def test_first_week_prompt_contains_all_confirmed_onboarding_context(
         {"code": "pool_access", "display_name": "Pool access", "kind": "ACCESS"}
     ]
     assert context["self_reported_baseline"] is not None
+    assert context["self_reported_baseline"]["running"]["recent_race_result"] == {
+        "distance_km": 10.0,
+        "duration_seconds": 3_000,
+        "effort": "MAXIMAL",
+    }
     assert context["preferences"] == {
         "coaching_style": "CONSERVATIVE",
         "desired_weekly_sessions": {"RUNNING": 3},
@@ -462,6 +468,12 @@ async def test_first_week_prompt_contains_all_confirmed_onboarding_context(
         ]
         == "PACE_SECONDS_PER_KM"
     )
+    assert (
+        first_week_prepared.prompt_context["resolved_intensity_zones"]["RUNNING"][
+            "mode"
+        ]
+        == "NUMERIC"
+    )
 
     first_week_result = await first_week.generate_next_week(_identity())
     assert first_week_result.kind == "created"
@@ -471,6 +483,11 @@ async def test_first_week_prompt_contains_all_confirmed_onboarding_context(
     assert first_session.purpose
     assert first_session.intensity.metric == "PACE_SECONDS_PER_KM"
     assert first_session.intensity.rpe_range == (2, 4)
+    assert all(
+        session.intensity.target_range[0] >= 300
+        for session in first_week_result.plan.sessions
+        if session.discipline.value == "RUNNING"
+    )
     assert first_week_result.generation_source == "model"
     assert first_week_result.plan.tests == ()
     assert first_week_result.plan.guardrails

@@ -27,6 +27,7 @@ class ResolvedIntensityZones(BaseModel):
     easy: tuple[float, float] | None = None
     moderate: tuple[float, float] | None = None
     hard: tuple[float, float] | None = None
+    maximal_benchmark_pace: float | None = Field(default=None, gt=0)
     guidance: str = Field(min_length=1, max_length=240)
 
 
@@ -67,17 +68,10 @@ def _resolve_discipline(
             else None
         )
         if race is not None:
-            if race.effort == "MAXIMAL":
-                return ResolvedIntensityZones(
-                    mode="RPE_FALLBACK",
-                    metric="RPE",
-                    guidance=(
-                        "The reported running result was a maximal effort, not an "
-                        "easy-training pace. Prescribe this first week by RPE and "
-                        "feel, not pace."
-                    ),
-                )
-            return running_pace_zones(race.duration_seconds / race.distance_km)
+            return running_pace_zones(
+                race.duration_seconds / race.distance_km,
+                effort=race.effort,
+            )
     if discipline is Discipline.SWIMMING:
         threshold = (
             baseline.swimming.recent_400m_seconds
@@ -109,7 +103,22 @@ def power_zones(ftp: int) -> ResolvedIntensityZones:
     )
 
 
-def running_pace_zones(race_pace: float) -> ResolvedIntensityZones:
+def running_pace_zones(
+    race_pace: float,
+    *,
+    effort: Literal["MAXIMAL", "HARD", "STEADY", "EASY"] | None = None,
+) -> ResolvedIntensityZones:
+    if effort == "MAXIMAL":
+        return ResolvedIntensityZones(
+            mode="NUMERIC",
+            metric="PACE_SECONDS_PER_KM",
+            maximal_benchmark_pace=race_pace,
+            guidance=(
+                "The reported maximal pace is a performance ceiling, not a target. "
+                "Choose conservative pace ranges from the complete baseline; never "
+                "prescribe a pace faster than this benchmark."
+            ),
+        )
     return ResolvedIntensityZones(
         mode="NUMERIC",
         metric="PACE_SECONDS_PER_KM",

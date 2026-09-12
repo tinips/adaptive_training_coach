@@ -28,6 +28,7 @@ from app.services.weekly_planning.service import (
 from app.services.weekly_planning.validation import (
     _STRENGTH_FALLBACK_EXECUTION,
     PlanViolation,
+    _first_week_zone_violations,
     _strength_violations,
     make_first_week_plan,
     repair_plan,
@@ -108,6 +109,42 @@ def test_menu_requires_requested_frequency_and_rpe_without_a_threshold() -> None
         "FIRST_WEEK_RPE_REQUIRED",
         "SESSION_COUNT_UNDERSHOOT",
     }
+
+
+def test_maximal_pace_benchmark_allows_planner_selected_slower_paces() -> None:
+    zone = ResolvedIntensityZones(
+        mode="NUMERIC",
+        metric="PACE_SECONDS_PER_KM",
+        maximal_benchmark_pace=300,
+        guidance="The benchmark is a ceiling.",
+    )
+    slower = PlanSession.model_validate(
+        {
+            "discipline": "RUNNING",
+            "purpose": "Establish a relaxed aerobic pace.",
+            "intensity": {
+                "metric": "PACE_SECONDS_PER_KM",
+                "target_range": [405, 435],
+                "rpe_range": [3, 4],
+                "guidance": "Keep the effort easy.",
+            },
+            "objective": "Run comfortably.",
+            "targets": {"distance_range_meters": [5000, 6000]},
+            "execution": "Keep breathing relaxed throughout.",
+        }
+    )
+    faster = slower.model_copy(
+        update={
+            "intensity": slower.intensity.model_copy(
+                update={"target_range": (295, 310)}
+            )
+        }
+    )
+
+    assert _first_week_zone_violations(slower, zone) == []
+    assert [item.code for item in _first_week_zone_violations(faster, zone)] == [
+        "FIRST_WEEK_ZONE_CONFLICT"
+    ]
 
 
 def test_menu_rejects_duplicate_sessions() -> None:

@@ -235,18 +235,29 @@ def _fake_first_week_session(
     tier: str,
     zone: dict[str, object] | None,
 ) -> dict[str, object]:
+    maximal_benchmark = (
+        float(zone["maximal_benchmark_pace"])
+        if zone is not None
+        and isinstance(zone.get("maximal_benchmark_pace"), int | float)
+        else None
+    )
     controlled = (
         zone is not None
         and zone.get("mode") == "NUMERIC"
         and index == 1
         and tier in {"DEVELOPING", "TRAINED", "WELL_TRAINED"}
-        and isinstance(zone.get("moderate"), list)
+        and (isinstance(zone.get("moderate"), list) or maximal_benchmark is not None)
     )
     if controlled:
         assert zone is not None
+        target_range = (
+            zone["moderate"]
+            if isinstance(zone.get("moderate"), list)
+            else [round(maximal_benchmark * 1.20), round(maximal_benchmark * 1.34)]
+        )
         intensity = {
             "metric": zone["metric"],
-            "target_range": zone["moderate"],
+            "target_range": target_range,
             "rpe_range": [5, 6],
             "guidance": "Controlled tempo in the resolved zone; finish with reserve.",
         }
@@ -256,11 +267,16 @@ def _fake_first_week_session(
     elif (
         zone is not None
         and zone.get("mode") == "NUMERIC"
-        and isinstance(zone.get("easy"), list)
+        and (isinstance(zone.get("easy"), list) or maximal_benchmark is not None)
     ):
+        target_range = (
+            zone["easy"]
+            if isinstance(zone.get("easy"), list)
+            else [round(maximal_benchmark * 1.35), round(maximal_benchmark * 1.45)]
+        )
         intensity = {
             "metric": zone["metric"],
-            "target_range": zone["easy"],
+            "target_range": target_range,
             "rpe_range": [2, 4],
             "guidance": "Stay within the resolved easy zone.",
         }
@@ -310,7 +326,9 @@ def _fake_distance_range_meters(
     if discipline not in ("RUNNING", "SWIMMING"):
         return None
     metric = intensity.get("metric")
-    unit_meters = _FAKE_PACE_UNIT_METERS.get(metric) if isinstance(metric, str) else None
+    unit_meters = (
+        _FAKE_PACE_UNIT_METERS.get(metric) if isinstance(metric, str) else None
+    )
     if unit_meters is None:
         return None
     target_range = intensity.get("target_range")

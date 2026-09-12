@@ -81,9 +81,7 @@ def test_resolver_never_selects_heart_rate_even_with_reliable_observed_hr() -> N
     assert zones[Discipline.RUNNING].metric == "RPE"
 
 
-def test_resolver_does_not_turn_an_explicitly_maximal_result_into_training_pace() -> (
-    None
-):
+def test_resolver_uses_an_explicitly_maximal_result_as_pace_baseline() -> None:
     baseline = AthleteBaselineData(
         running=RunningBaseline(
             typical_weekly_sessions=2,
@@ -103,5 +101,11 @@ def test_resolver_does_not_turn_an_explicitly_maximal_result_into_training_pace(
         disciplines=(Discipline.RUNNING,),
     )
 
-    assert zones[Discipline.RUNNING].mode == "RPE_FALLBACK"
-    assert "maximal effort" in zones[Discipline.RUNNING].guidance
+    running = zones[Discipline.RUNNING]
+    assert running.mode == "NUMERIC"
+    assert running.metric == "PACE_SECONDS_PER_KM"
+    assert running.maximal_benchmark_pace == 300
+    assert running.easy is None
+    assert running.moderate is None
+    assert running.hard is None
+    assert "performance ceiling" in running.guidance

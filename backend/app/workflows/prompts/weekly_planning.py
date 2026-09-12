@@ -12,7 +12,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from app.schemas.availability import ConfirmedWeeklyAvailability
 
 ONGOING_WEEKLY_PLANNER_PROMPT_VERSION: Final = 10
-FIRST_WEEK_PLANNER_PROMPT_VERSION: Final = 12
+FIRST_WEEK_PLANNER_PROMPT_VERSION: Final = 16
 # Backward-compatible name for callers that use the ongoing planner.
 WEEKLY_PLANNER_PROMPT_VERSION: Final = ONGOING_WEEKLY_PLANNER_PROMPT_VERSION
 
@@ -138,10 +138,16 @@ it never overrides the unprepared rule. Controlled tempo/threshold is not a maxi
 test. Do not make medical claims or invent measurements.
 
 A running recent_race_result can include a selected effort value: MAXIMAL, HARD,
-STEADY, or EASY. Treat that selected value as authoritative. MAXIMAL means the result
-is a performance ceiling, not an easy or moderate training pace. In that case, the
-resolved running zone will be RPE_FALLBACK and you must not prescribe pace or hard
-running work for this first-week menu.
+STEADY, or EASY. Treat its distance and duration/pace as baseline evidence, and its
+selected effort value as authoritative interpretation context. A MAXIMAL result is a
+performance ceiling, not a literal easy-training pace; do not prescribe the recorded
+benchmark pace as an easy workout merely because it is numeric. When
+resolved_intensity_zones provides maximal_benchmark_pace, it deliberately supplies a
+ceiling rather than fixed pace bands: use the full baseline, first-week tier, and
+reported effort to choose conservative, suitable workout types, distances, and pace
+targets. Every selected running pace must be slower than that ceiling. Do not discard
+a usable result or convert it to RPE-only solely because its selected effort was
+MAXIMAL.
 
 Every session must contain purpose, structured intensity, objective, targets,
 execution. intensity requires metric, target_range, rpe_range, and guidance. Keep
