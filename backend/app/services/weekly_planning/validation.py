@@ -29,7 +29,10 @@ from app.services.weekly_planning.constants import (
     UNTRAINED_SWIM_MAX_SESSIONS,
     UNTRAINED_SWIM_SESSION_MAX_MINUTES,
 )
-from app.services.weekly_planning.tiers import BaselineTier
+from app.services.weekly_planning.tiers import (
+    BaselineTier,
+    FirstWeekAthleteEnduranceContext,
+)
 from app.services.weekly_planning.zones import ResolvedIntensityZones
 
 
@@ -140,15 +143,6 @@ def validate_plan(
         if session.discipline is Discipline.SWIMMING
         and Discipline.SWIMMING in zero_baseline
     ]
-    if len(swim_sessions) > UNTRAINED_SWIM_MAX_SESSIONS:
-        violations.append(
-            PlanViolation(
-                "UNTRAINED_SWIM_OVERREACH",
-                Discipline.SWIMMING,
-                None,
-                "untrained swimmer has too many sessions",
-            )
-        )
     for day, session in swim_sessions:
         if (session.targets.duration_minutes or 0) > UNTRAINED_SWIM_SESSION_MAX_MINUTES:
             violations.append(
@@ -215,6 +209,7 @@ def validate_first_week_plan(
     preferences: TrainingPreferences | None,
     zones: dict[Discipline, ResolvedIntensityZones],
     tiers: dict[Discipline, BaselineTier] | None = None,
+    athlete_endurance_context: FirstWeekAthleteEnduranceContext | None = None,
 ) -> ValidationOutcome:
     """Validate an athlete-placed menu without assigning it calendar dates."""
 
@@ -264,18 +259,25 @@ def validate_first_week_plan(
             )
     violations.extend(_first_week_distinctness_violations(plan))
     if tiers is not None:
-        violations.extend(_first_week_tier_demand_violations(plan, zones, tiers))
+        violations.extend(
+            _first_week_tier_demand_violations(
+                plan, zones, tiers, athlete_endurance_context
+            )
+        )
     if preferences is not None:
         for discipline, requested in preferences.desired_weekly_sessions.items():
-            if requested <= 0 or discipline in zero_baseline:
+            if requested <= 0:
                 continue
-            if counts.get(discipline, 0) != requested:
+            capacity = _discipline_availability_capacity(discipline, availability)
+            expected = min(requested, capacity) if capacity is not None else requested
+            if counts.get(discipline, 0) != expected:
                 violations.append(
                     PlanViolation(
                         "SESSION_COUNT_UNDERSHOOT",
                         discipline,
                         None,
-                        "first-week menu does not meet the stated requested frequency",
+                        "first-week menu does not meet the requested frequency that "
+                        "fits confirmed availability",
                     )
                 )
     return ValidationOutcome(violations=tuple(violations))
@@ -336,13 +338,15 @@ def _first_week_tier_demand_violations(
     plan: FirstWeekPlan,
     zones: dict[Discipline, ResolvedIntensityZones],
     tiers: dict[Discipline, BaselineTier],
+    athlete_endurance_context: FirstWeekAthleteEnduranceContext | None,
 ) -> list[PlanViolation]:
-    """Keep tiered calibration signal deterministic instead of prompt-only."""
+    """Keep sport safety and whole-week calibration demand deterministic."""
 
     by_discipline: dict[Discipline, list[PlanSession]] = defaultdict(list)
     for session in plan.sessions:
         by_discipline[session.discipline].append(session)
     violations: list[PlanViolation] = []
+    prepared_numeric_disciplines: list[Discipline] = []
     for discipline, sessions in by_discipline.items():
         tier = tiers.get(discipline)
         if tier is None:
@@ -369,18 +373,36 @@ def _first_week_tier_demand_violations(
             or tier not in {"DEVELOPING", "TRAINED", "WELL_TRAINED"}
         ):
             continue
-        if not any(session.intensity.rpe_range[0] >= 5 for session in sessions):
-            violations.append(
-                PlanViolation(
-                    "FIRST_WEEK_CALIBRATION_SIGNAL_MISSING",
-                    discipline,
-                    None,
-                    (
-                        "prepared discipline with numeric zones needs controlled "
-                        "moderate work"
-                    ),
-                )
+        prepared_numeric_disciplines.append(discipline)
+    controlled_sessions = sum(
+        session.intensity.rpe_range[0] >= 5 for session in plan.sessions
+    )
+    maximum = (
+        athlete_endurance_context.max_controlled_sessions
+        if athlete_endurance_context is not None
+        else len(prepared_numeric_disciplines)
+    )
+    if controlled_sessions > maximum:
+        violations.append(
+            PlanViolation(
+                "FIRST_WEEK_CONTROLLED_SESSION_EXCESS",
+                None,
+                None,
+                (
+                    "first-week controlled sessions exceed whole-athlete endurance "
+                    "capacity"
+                ),
             )
+        )
+    if prepared_numeric_disciplines and maximum > 0 and controlled_sessions == 0:
+        violations.append(
+            PlanViolation(
+                "FIRST_WEEK_CALIBRATION_SIGNAL_MISSING",
+                prepared_numeric_disciplines[0],
+                None,
+                "prepared numeric disciplines need one controlled calibration session",
+            )
+        )
     return violations
 
 

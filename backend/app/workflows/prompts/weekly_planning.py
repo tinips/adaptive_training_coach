@@ -12,7 +12,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from app.schemas.availability import ConfirmedWeeklyAvailability
 
 ONGOING_WEEKLY_PLANNER_PROMPT_VERSION: Final = 10
-FIRST_WEEK_PLANNER_PROMPT_VERSION: Final = 16
+FIRST_WEEK_PLANNER_PROMPT_VERSION: Final = 18
 # Backward-compatible name for callers that use the ongoing planner.
 WEEKLY_PLANNER_PROMPT_VERSION: Final = ONGOING_WEEKLY_PLANNER_PROMPT_VERSION
 
@@ -137,6 +137,25 @@ zones. Coaching style shifts the amount and placement of this work within the ti
 it never overrides the unprepared rule. Controlled tempo/threshold is not a maximal
 test. Do not make medical claims or invent measurements.
 
+first_week_athlete_endurance_context is authoritative for the whole week. It is
+separate from a discipline tier: whole-athlete endurance training does not upgrade
+running, cycling, or swimming-specific intensity safety or invent a sport threshold.
+Use it to distribute total load and controlled calibration work across disciplines.
+Never exceed max_controlled_sessions across the complete menu. A multisport-trained
+athlete may receive their safely supported session frequency; do not treat a
+low-volume discipline as sedentary when whole-athlete context shows established
+endurance training. Its own tier still decides whether it remains easy-only.
+
+desired_weekly_sessions is the athlete's requested session count for each discipline.
+Meet that count whenever confirmed availability can support it; do not reduce it
+because the athlete reported fewer historic sessions, or none. When the requested
+count exceeds their stated exposure, preserve the extra sessions as short, easy,
+technique, or recovery work. Do not use those extra sessions to add controlled
+intensity, increase a session beyond its safe introductory duration, or override an
+unprepared discipline's easy-only rule. Availability and discipline-specific safety
+limits, such as an untrained swimmer's introductory duration cap, are the only
+reasons to plan fewer requested sessions.
+
 A running recent_race_result can include a selected effort value: MAXIMAL, HARD,
 STEADY, or EASY. Treat its distance and duration/pace as baseline evidence, and its
 selected effort value as authoritative interpretation context. A MAXIMAL result is a
@@ -161,8 +180,10 @@ distance_range_meters [lower, upper] as well as the intensity pace range. This i
 required even if duration_minutes is present; the platform derives duration from the
 two ranges when it is omitted. For RPE-based endurance sessions, use
 duration_minutes instead. Use only targets supported by the athlete's context. Meet
-desired_weekly_sessions for every safely prepared discipline; do not force sessions
-for a zero-baseline unprepared endurance discipline. Choose each session duration
+desired_weekly_sessions for every discipline when availability permits. For
+zero-baseline or low-exposure disciplines, meet the requested count with brief,
+easy, clearly distinct introductory, technique, or recovery sessions rather than
+omitting requested sessions. Choose each session duration
 from the baseline and available windows rather than assuming a fixed duration. Where
 it fits the recovery and discipline constraints, use longer windows (such as weekends)
 for sessions that benefit from them.

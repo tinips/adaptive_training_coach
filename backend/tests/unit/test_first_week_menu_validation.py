@@ -111,6 +111,78 @@ def test_menu_requires_requested_frequency_and_rpe_without_a_threshold() -> None
     }
 
 
+def test_menu_requires_requested_frequency_for_zero_baseline_discipline() -> None:
+    """Requested introductory sessions remain visible instead of being dropped."""
+
+    week_start = date(2026, 9, 7)
+    baseline = AthleteBaselineData(
+        running=RunningBaseline(
+            typical_weekly_sessions=0,
+            typical_weekly_duration_minutes=0,
+            longest_recent_run_minutes=0,
+        ),
+        preferences=TrainingPreferences(
+            coaching_style=CoachingStyle.CONSERVATIVE,
+            desired_weekly_sessions={Discipline.RUNNING: 2},
+        ),
+    )
+    plan = make_first_week_plan(
+        FirstWeekPlanPrescription.model_validate(
+            {
+                "week_start": week_start,
+                "sessions": [
+                    {
+                        "discipline": "RUNNING",
+                        "purpose": "Build relaxed run-walk familiarity.",
+                        "intensity": {
+                            "metric": "RPE",
+                            "target_range": [3, 4],
+                            "rpe_range": [3, 4],
+                            "guidance": "Easy and conversational.",
+                        },
+                        "objective": "Practice a comfortable introduction to running.",
+                        "targets": {"duration_minutes": 20},
+                        "execution": "Alternate easy jogging and walking as needed.",
+                    }
+                ],
+            }
+        )
+    )
+    readiness = PlanReadiness(
+        week_start=week_start,
+        analysis_started_at=datetime(2026, 8, 8, tzinfo=UTC),
+        analysis_ended_at=datetime(2026, 9, 7, tzinfo=UTC),
+        disciplines=(
+            PlanReadinessDiscipline(
+                discipline=Discipline.RUNNING,
+                session_count=0,
+                active_day_count=0,
+                state=DisciplineEvidenceState.NONE,
+            ),
+        ),
+        total_session_count=0,
+        total_active_day_count=0,
+        ready=True,
+    )
+
+    outcome = validate_first_week_plan(
+        plan,
+        readiness=readiness,
+        baseline=baseline,
+        availability=None,
+        preferences=baseline.preferences,
+        zones=resolve_first_week_zones(
+            baseline=baseline,
+            calculations={},
+            disciplines=(Discipline.RUNNING,),
+        ),
+    )
+
+    assert [violation.code for violation in outcome.violations] == [
+        "SESSION_COUNT_UNDERSHOOT"
+    ]
+
+
 def test_maximal_pace_benchmark_allows_planner_selected_slower_paces() -> None:
     zone = ResolvedIntensityZones(
         mode="NUMERIC",

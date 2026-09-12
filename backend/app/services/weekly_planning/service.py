@@ -74,6 +74,8 @@ from app.services.weekly_planning.evidence import (
 from app.services.weekly_planning.scheduler import schedule_prescription
 from app.services.weekly_planning.tiers import (
     BaselineTier,
+    FirstWeekAthleteEnduranceContext,
+    resolve_first_week_athlete_endurance_context,
     resolve_first_week_tiers,
 )
 from app.services.weekly_planning.validation import (
@@ -134,6 +136,7 @@ class _PlanningInput:
     input_digest: str
     zones: dict[Discipline, ResolvedIntensityZones]
     tiers: dict[Discipline, BaselineTier]
+    athlete_endurance_context: FirstWeekAthleteEnduranceContext | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -501,6 +504,7 @@ class WeeklyPlanningService:
                     preferences=prepared.preferences,
                     zones=prepared.zones,
                     tiers=prepared.tiers,
+                    athlete_endurance_context=prepared.athlete_endurance_context,
                 )
                 result = await self._persist_generated(
                     prepared=prepared,
@@ -640,6 +644,7 @@ class WeeklyPlanningService:
                     preferences=prepared.preferences,
                     zones=prepared.zones,
                     tiers=prepared.tiers,
+                    athlete_endurance_context=prepared.athlete_endurance_context,
                 )
                 fallback_errors = _first_week_validation_errors(outcome)
             except ValidationError as error:
@@ -669,6 +674,7 @@ class WeeklyPlanningService:
                     preferences=prepared.preferences,
                     zones=prepared.zones,
                     tiers=prepared.tiers,
+                    athlete_endurance_context=prepared.athlete_endurance_context,
                 )
                 if repaired_outcome.ok:
                     plan, outcome, source = repaired, repaired_outcome, "model_repaired"
@@ -686,6 +692,7 @@ class WeeklyPlanningService:
                     preferences=prepared.preferences,
                     zones=prepared.zones,
                     tiers=prepared.tiers,
+                    athlete_endurance_context=prepared.athlete_endurance_context,
                 )
                 source = "fallback"
                 fallback_reason = (
@@ -737,6 +744,7 @@ class WeeklyPlanningService:
                     preferences=prepared.preferences,
                     zones=prepared.zones,
                     tiers=prepared.tiers,
+                    athlete_endurance_context=prepared.athlete_endurance_context,
                 )
                 source = "fallback"
                 fallback_reason = "repair_provider_error"
@@ -935,6 +943,10 @@ class WeeklyPlanningService:
                 readiness=readiness,
                 disciplines=disciplines,
             )
+            athlete_endurance_context = resolve_first_week_athlete_endurance_context(
+                baseline=self_reported_baseline,
+                readiness=readiness,
+            )
             prompt_context = {
                 "planner_mode": self.planner_mode,
                 "week_start": week_start.isoformat(),
@@ -1025,6 +1037,9 @@ class WeeklyPlanningService:
                 prompt_context["first_week_baseline_tiers"] = {
                     discipline.value: tier for discipline, tier in tiers.items()
                 }
+                prompt_context["first_week_athlete_endurance_context"] = (
+                    athlete_endurance_context.model_dump(mode="json")
+                )
                 prompt_context["resolved_intensity_zones"] = {
                     discipline.value: zone.model_dump(mode="json")
                     for discipline, zone in zones.items()
@@ -1054,6 +1069,7 @@ class WeeklyPlanningService:
                 input_digest=input_digest,
                 zones=zones,
                 tiers=tiers,
+                athlete_endurance_context=athlete_endurance_context,
             )
 
     async def _persist_generated(
@@ -1264,18 +1280,6 @@ def _build_first_week_fallback(prepared: _PlanningInput) -> FirstWeekPlan:
             else None,
         }.get(discipline)
         stated_sessions = getattr(baseline, "typical_weekly_sessions", 0)
-        zero_baseline = (
-            discipline
-            in {
-                Discipline.RUNNING,
-                Discipline.CYCLING,
-                Discipline.SWIMMING,
-            }
-            and stated_sessions == 0
-            and getattr(baseline, "typical_weekly_duration_minutes", 0) == 0
-        )
-        if zero_baseline:
-            continue
         requested = (
             prepared.preferences.desired_weekly_sessions.get(discipline)
             if prepared.preferences is not None
@@ -1285,9 +1289,8 @@ def _build_first_week_fallback(prepared: _PlanningInput) -> FirstWeekPlan:
         if discipline is Discipline.STRENGTH:
             count = desired_count if desired_count is not None else 1
         else:
-            count = min(
-                desired_count if desired_count is not None else max(1, stated_sessions),
-                max(1, stated_sessions),
+            count = (
+                desired_count if desired_count is not None else max(1, stated_sessions)
             )
         allowed_name = availability_names.get(discipline)
         max_window = (

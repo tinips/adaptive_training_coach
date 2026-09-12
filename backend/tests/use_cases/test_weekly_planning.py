@@ -474,6 +474,11 @@ async def test_first_week_prompt_contains_all_confirmed_onboarding_context(
         ]
         == "NUMERIC"
     )
+    endurance_context = first_week_prepared.prompt_context[
+        "first_week_athlete_endurance_context"
+    ]
+    assert endurance_context["level"] == "ENDURANCE_TRAINED"
+    assert endurance_context["max_controlled_sessions"] == 1
 
     first_week_result = await first_week.generate_next_week(_identity())
     assert first_week_result.kind == "created"
@@ -647,9 +652,11 @@ async def test_first_week_untrained_athlete_gets_easy_rpe_model_menu(
     assert result.kind == "created"
     assert result.generation_source == "model"
     assert isinstance(result.plan, FirstWeekPlan)
-    assert len(result.plan.sessions) == 1
-    assert result.plan.sessions[0].intensity.metric == "RPE"
-    assert result.plan.sessions[0].intensity.rpe_range == (2, 3)
+    assert len(result.plan.sessions) == 3
+    assert all(session.intensity.metric == "RPE" for session in result.plan.sessions)
+    assert all(
+        session.intensity.rpe_range == (2, 3) for session in result.plan.sessions
+    )
 
 
 @pytest.mark.asyncio

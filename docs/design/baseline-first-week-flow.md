@@ -216,7 +216,7 @@ the following deterministic gate before it is shown to the athlete:
 | Per-session rules | No heart-rate prescription; a concise one-sentence displayed purpose; strength stays duration-based; each endurance target uses a supported metric. |
 | Zone/ceiling rules | RPE-only where no threshold exists; ordinary numeric targets must fit a supplied candidate band; a maximal-benchmark running pace must be slower than the ceiling. |
 | Baseline/tier rules | No hard session on a zero baseline; unprepared work stays easy; prepared numeric disciplines need controlled calibration work. |
-| Practical rules | Each session fits a confirmed availability window; desired session counts are met where safely prepared; duplicate menu sessions are rejected. |
+| Practical rules | Each session fits a confirmed availability window; requested session counts are met even above historic exposure when availability permits; extra zero/low-exposure sessions are short, easy, and distinct; duplicate menu sessions are rejected. |
 
 If the first model output fails schema or domain validation, the system first
 attempts deterministic repair where possible, then makes at most two bounded
@@ -311,11 +311,12 @@ which inputs it reads, and what happens when the evidence is absent or invalid.
 | Goal change | Can an old baseline still be used? | No. A baseline is stored with a signature of the active goal templates. A relevant goal change invalidates that baseline and opens a pre-filled replacement form, preventing stale sport context from driving a plan. |
 | Pace evidence | Is there a numerical running benchmark? | If distance and duration exist, `duration / distance` resolves a numerical pace source. If absent, the discipline receives RPE fallback. A selected `MAXIMAL` result is numerical and becomes a ceiling, not fallback. |
 | Other sport thresholds | Is there an appropriate sport-specific source? | Cycling uses reported FTP when present; swimming uses the reported 400 m time when present. Without one, the corresponding sport receives RPE fallback. No HR-derived prescription is created. |
-| Tier | How much first-week demand is safe? | No stated/evidenced volume is `UNPREPARED`. Otherwise, `WELL_TRAINED` requires well-evidenced activity plus at least 4 sessions, 240 minutes, or a 90-minute longest session. `TRAINED` needs 3 sessions, 150 minutes, a 60-minute longest session, or well-evidenced activity. Remaining athletes are `DEVELOPING`. |
+| Sport-specific tier | How much work is safe in this discipline? | No stated/evidenced volume is `UNPREPARED`. Otherwise, `WELL_TRAINED` requires well-evidenced activity plus at least 4 sessions, 240 minutes, or a 90-minute longest session. `TRAINED` needs 3 sessions, 150 minutes, a 60-minute longest session, or well-evidenced activity. Remaining athletes are `DEVELOPING`. |
+| Whole-athlete endurance context | Is this athlete generally endurance trained across sports? | Sum stated running, cycling, and swimming sessions/minutes and inspect recent evidence. This controls total menu demand and the maximum controlled sessions across the week; it never upgrades a sport-specific tier or invents a pace/power threshold. |
 | Prompt context | What may the model use? | It receives the validated baseline, effort, tier, zones/ceiling, availability, equipment, profile constraints, recent evidence, desired session count, and coaching style. First-week prompts deliberately omit event-target data. |
 | Model output | What structure must it provide? | Each menu session needs a discipline, concise purpose, objective, typed intensity, typed targets, and execution. Numeric run/swim pace sessions also need a distance range. The model cannot choose IDs or dates. |
 | Pace direction | Is a maximal-result target safe? | Pace is measured in seconds/km, so a *larger* number is slower. For a maximal benchmark `p`, the validator requires the lower end of the target range to be strictly greater than `p`; otherwise even part of the range could be faster than the athlete's stated maximum. |
-| Session safety | Does the menu obey non-negotiable limits? | The validator rejects HR prescriptions, unsupported metrics, hard work on a zero baseline, excessive unprepared intensity, invalid zone targets, duplicate sessions, and sessions that cannot fit any allowed window. It also checks desired session count except where zero baseline makes that unsafe. |
+| Session safety | Does the menu obey non-negotiable limits? | The validator rejects HR prescriptions, unsupported metrics, hard work on a zero baseline, excessive unprepared intensity, invalid zone targets, duplicate sessions, and sessions that cannot fit any allowed window. It requires every requested session where availability permits, including a zero-baseline discipline; those added sessions must remain brief and easy. |
 | Failure handling | What if the model gets it wrong? | Invalid schema or domain output is repaired deterministically when possible. Otherwise the provider receives only the previous output and explicit violations for at most two repair attempts. Persistent failure produces a safe deterministic fallback and records why. |
 | Repeated request | Does a second tap create another plan? | No. An identical planning-input digest returns the existing plan. Changed inputs supersede the current revision and preserve the older revision for auditability. |
 | Captured evidence | What becomes comparable later? | Running canonical pace comes from stored distance and moving duration. Planned pace remains structured, not prose, so it can be compared directly. Captured HR supports a soft effort check; it is never treated as an automatic fitness or zone change. |
@@ -325,6 +326,12 @@ Two details are worth calling out:
 - A generated guardrail is coaching text. The typed validator is the actual
   enforcement layer; it never parses prose such as a title, purpose, or
   guardrail to decide safety.
+- A triathlete can be `DEVELOPING` in running yet `ENDURANCE_TRAINED` overall.
+  The running tier still protects run-specific intensity, while whole-athlete
+  context prevents the planner from treating the athlete as sedentary and caps
+  controlled sessions across the complete menu. `ENDURANCE_UNTRAINED` allows
+  none, `ENDURANCE_DEVELOPING` one, `ENDURANCE_TRAINED` one or two, and
+  `ENDURANCE_WELL_TRAINED` up to three controlled sessions.
 - The first week only gives the system controlled observations. It cannot turn
   one `MAXIMAL` result into a personally accurate easy pace. That requires
   repeated, comparable completed-workout evidence.
@@ -432,7 +439,7 @@ for an athlete training two sessions of each triathlon discipline.
 | Athlete | Baseline and availability | Generated first-week menu | Validation result |
 | --- | --- | --- | --- |
 | Marta, trained runner | 3 runs / 165 min per week; 70-minute longest run; 10 km in 50:00 selected `MAXIMAL`; three 50/50/80-minute running windows. | Easy 45 min at **6:30–7:00/km** (390–420 s/km), RPE 3–4, 6.4–6.9 km; controlled 3 × 6 min in 43 min at **5:45–6:05/km** (345–365 s/km), RPE 5–6; longer easy 70 min at **6:30–7:05/km** (390–425 s/km), RPE 3–4, 9.9–10.8 km. | `model`; all running paces were slower than the 5:00/km ceiling. |
-| Nora, zero-baseline runner | 0 runs, 0 minutes, no benchmark; conservative coaching; two 35-minute running windows; requested three sessions. | Run-walk 25 min, RPE 2–3: 1 min jog / 2 min walk; run-walk 30 min, RPE 2–3: 2 min jog / 2 min walk. | `model`; the menu used two sessions because zero baseline does not force the requested count, and it used RPE only. |
+| Nora, zero-baseline runner | 0 runs, 0 minutes, no benchmark; conservative coaching; two 35-minute running windows; requested three sessions. | Historic output: run-walk 25 min, RPE 2–3: 1 min jog / 2 min walk; run-walk 30 min, RPE 2–3: 2 min jog / 2 min walk. | This is a pre-v18 historic result. Prompt v18 and the validator now require all three requested sessions when availability can support three; the added session must be brief, easy, and RPE-only. |
 | Leo, developing runner | 2 runs / 90 min per week; 45-minute longest run; 5 km in 35:00 selected `EASY`; two 50/60-minute running windows. | Easy 47 min at **7:42–8:45/km** (462–525 s/km), RPE 3–4, 5.0–6.5 km; moderate 2 × 6 min in 51 min at **6:52–7:38/km** (412–458 s/km), RPE 5–6, 6.0–8.0 km. | `model`; numeric pace bands came from the non-maximal benchmark conversion. |
 
 The running outputs were also produced after full onboarding, including live

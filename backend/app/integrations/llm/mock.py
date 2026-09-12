@@ -199,8 +199,6 @@ def _fake_first_week_sessions(request: dict[str, object]) -> list[dict[str, obje
         tier = str(tier_by_discipline.get(raw_discipline, "UNPREPARED"))
         desired = desired_by_discipline.get(raw_discipline, 1)
         count = desired if isinstance(desired, int) and desired > 0 else 1
-        if tier == "UNPREPARED":
-            count = 1
         zone = zones_by_discipline.get(raw_discipline)
         for index in range(count):
             sessions.append(
