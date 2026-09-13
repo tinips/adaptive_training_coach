@@ -266,7 +266,6 @@ CAPABILITIES = (
         "ACCESS",
         "Access to a suitable open-water swimming location.",
     ),
-    ("goggles", "Swimming goggles", "EQUIPMENT", "Swimming goggles."),
     ("gym_access", "Gym access", "FACILITY", "Access to an equipped gym."),
 )
 
@@ -399,11 +398,8 @@ OPTION_CAPABILITIES = (
     ),
     ("cycling_stationary", "stationary_bike", "stationary_bike", "REQUIRED"),
     ("swimming_pool", "pool", "pool_access", "REQUIRED"),
-    ("swimming_pool", "pool", "goggles", "RECOMMENDED"),
     ("swimming_open_water", "open_water", "open_water_access", "REQUIRED"),
-    ("swimming_open_water", "open_water", "goggles", "REQUIRED"),
     ("swimming_open_water", "pool", "pool_access", "REQUIRED"),
-    ("swimming_open_water", "pool", "goggles", "RECOMMENDED"),
     ("strength_general", "gym", "gym_access", "REQUIRED"),
     ("strength_gym", "gym", "gym_access", "REQUIRED"),
 )

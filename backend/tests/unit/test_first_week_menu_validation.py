@@ -11,7 +11,9 @@ from pydantic import ValidationError
 from app.domain.enums import CoachingStyle, Discipline, DisciplineEvidenceState
 from app.schemas.baseline import (
     AthleteBaselineData,
+    CyclingBaseline,
     RunningBaseline,
+    SwimmingBaseline,
     TrainingPreferences,
 )
 from app.schemas.weekly_plans import (
@@ -68,7 +70,10 @@ def test_menu_requires_requested_frequency_and_rpe_without_a_threshold() -> None
                             "guidance": "Use watch power.",
                         },
                         "objective": "Run comfortably.",
-                        "targets": {"duration_minutes": 45},
+                        "targets": {
+                            "duration_minutes": 45,
+                            "distance_range_meters": [6000, 7000],
+                        },
                         "execution": "Keep it comfortable.",
                     }
                 ],
@@ -141,7 +146,10 @@ def test_menu_requires_requested_frequency_for_zero_baseline_discipline() -> Non
                             "guidance": "Easy and conversational.",
                         },
                         "objective": "Practice a comfortable introduction to running.",
-                        "targets": {"duration_minutes": 20},
+                        "targets": {
+                            "duration_minutes": 20,
+                            "distance_range_meters": [2500, 3000],
+                        },
                         "execution": "Alternate easy jogging and walking as needed.",
                     }
                 ],
@@ -181,6 +189,122 @@ def test_menu_requires_requested_frequency_for_zero_baseline_discipline() -> Non
     assert [violation.code for violation in outcome.violations] == [
         "SESSION_COUNT_UNDERSHOOT"
     ]
+
+
+def test_menu_requires_indoor_ftp_power_and_volume_but_swim_rpe_and_volume() -> None:
+    """The first-week contract keeps each sport's usable metrics distinct."""
+
+    week_start = date(2026, 9, 7)
+    baseline = AthleteBaselineData(
+        cycling=CyclingBaseline(
+            typical_weekly_sessions=2,
+            typical_weekly_duration_minutes=120,
+            longest_recent_ride_minutes=75,
+            riding_environment="INDOOR",
+            riding_confidence="CONFIDENT",
+            recent_ftp_watts=193,
+        ),
+        swimming=SwimmingBaseline(
+            typical_weekly_sessions=2,
+            typical_weekly_duration_minutes=60,
+            longest_continuous_swim_meters=1000,
+            swimming_environment="POOL",
+            pool_length_meters=25,
+        ),
+    )
+    plan = make_first_week_plan(
+        FirstWeekPlanPrescription.model_validate(
+            {
+                "week_start": week_start,
+                "sessions": [
+                    _endurance_session(
+                        "CYCLING",
+                        {
+                            "metric": "RPE",
+                            "target_range": [3, 4],
+                            "rpe_range": [3, 4],
+                            "guidance": "Easy trainer ride by feel.",
+                        },
+                        {"duration_minutes": 45},
+                    ),
+                    _endurance_session(
+                        "SWIMMING",
+                        {
+                            "metric": "SWIM_PACE_SECONDS_PER_100M",
+                            "target_range": [120, 135],
+                            "rpe_range": [3, 4],
+                            "guidance": "Hold a steady pace.",
+                        },
+                        {
+                            "duration_minutes": 30,
+                            "distance_range_meters": [700, 900],
+                        },
+                    ),
+                ],
+            }
+        )
+    )
+    readiness = PlanReadiness(
+        week_start=week_start,
+        analysis_started_at=datetime(2026, 8, 8, tzinfo=UTC),
+        analysis_ended_at=datetime(2026, 9, 7, tzinfo=UTC),
+        disciplines=(
+            PlanReadinessDiscipline(
+                discipline=Discipline.CYCLING,
+                session_count=2,
+                active_day_count=2,
+                state=DisciplineEvidenceState.SELF_REPORTED,
+            ),
+            PlanReadinessDiscipline(
+                discipline=Discipline.SWIMMING,
+                session_count=2,
+                active_day_count=2,
+                state=DisciplineEvidenceState.SELF_REPORTED,
+            ),
+        ),
+        total_session_count=4,
+        total_active_day_count=2,
+        ready=True,
+    )
+    zones = resolve_first_week_zones(
+        baseline=baseline,
+        calculations={},
+        disciplines=(Discipline.CYCLING, Discipline.SWIMMING),
+    )
+
+    outcome = validate_first_week_plan(
+        plan,
+        readiness=readiness,
+        baseline=baseline,
+        availability=None,
+        preferences=None,
+        zones=zones,
+    )
+
+    assert {item.code for item in outcome.violations} == {
+        "FIRST_WEEK_NUMERIC_TARGET_REQUIRED",
+        "FIRST_WEEK_VOLUME_REQUIRED",
+        "FIRST_WEEK_SWIM_RPE_REQUIRED",
+    }
+
+    repaired = repair_plan(plan, outcome.violations, baseline=baseline, zones=zones)
+
+    assert isinstance(repaired, FirstWeekPlan)
+    cycling, swimming = repaired.sessions
+    assert cycling.intensity.metric == "POWER_WATTS"
+    assert cycling.intensity.target_range == (106, 145)
+    assert cycling.targets.average_power_watts == 126
+    assert cycling.targets.distance_range_meters is not None
+    assert swimming.intensity.metric == "RPE"
+    assert swimming.targets.distance_range_meters == (700, 900)
+    assert validate_first_week_plan(
+        repaired,
+        readiness=readiness,
+        baseline=baseline,
+        availability=None,
+        preferences=None,
+        zones=zones,
+    ).ok
 
 
 def test_maximal_pace_benchmark_allows_planner_selected_slower_paces() -> None:
@@ -234,7 +358,10 @@ def test_menu_rejects_duplicate_sessions() -> None:
                     "guidance": "Easy.",
                 },
                 "objective": "Run easily.",
-                "targets": {"duration_minutes": 30},
+                "targets": {
+                    "duration_minutes": 30,
+                    "distance_range_meters": [4000, 5000],
+                },
                 "execution": "Keep it easy.",
             }
         ]
@@ -289,7 +416,10 @@ def test_menu_rejects_a_purpose_with_multiple_sentences() -> None:
                             "guidance": "Easy.",
                         },
                         "objective": "Run easily.",
-                        "targets": {"duration_minutes": 30},
+                        "targets": {
+                            "duration_minutes": 30,
+                            "distance_range_meters": [4000, 5000],
+                        },
                         "execution": "Keep it easy.",
                     }
                 ],

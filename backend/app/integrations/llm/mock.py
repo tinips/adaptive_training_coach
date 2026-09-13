@@ -311,31 +311,38 @@ _FAKE_PACE_UNIT_METERS = {
     "PACE_SECONDS_PER_KM": 1000.0,
     "SWIM_PACE_SECONDS_PER_100M": 100.0,
 }
+_FAKE_VOLUME_METERS_PER_MINUTE = {
+    "RUNNING": 150.0,
+    "CYCLING": 500.0,
+    "SWIMMING": 25.0,
+}
 
 
 def _fake_distance_range_meters(
     *, discipline: str, duration_minutes: int, intensity: dict[str, object]
 ) -> tuple[float, float] | None:
-    """Companion distance for a fake pace-metric session, see service.py's
-    ``_fallback_distance_range_meters`` for the same reasoning: running and
-    swimming sessions with a real pace target now require a distance range.
+    """Companion volume for every endurance fake session.
+
+    Pace metrics use their pace range; RPE-only swim and cycling menus use a
+    broad duration-based estimate, matching the deterministic fallback.
     """
 
-    if discipline not in ("RUNNING", "SWIMMING"):
+    if discipline == "STRENGTH":
         return None
     metric = intensity.get("metric")
     unit_meters = (
         _FAKE_PACE_UNIT_METERS.get(metric) if isinstance(metric, str) else None
     )
-    if unit_meters is None:
-        return None
-    target_range = intensity.get("target_range")
-    if not isinstance(target_range, (list, tuple)) or len(target_range) != 2:
-        return None
-    avg_pace_seconds = (float(target_range[0]) + float(target_range[1])) / 2
-    if avg_pace_seconds <= 0:
-        return None
-    distance_meters = (duration_minutes * 60 / avg_pace_seconds) * unit_meters
+    if unit_meters is not None:
+        target_range = intensity.get("target_range")
+        if not isinstance(target_range, (list, tuple)) or len(target_range) != 2:
+            return None
+        avg_pace_seconds = (float(target_range[0]) + float(target_range[1])) / 2
+        if avg_pace_seconds <= 0:
+            return None
+        distance_meters = (duration_minutes * 60 / avg_pace_seconds) * unit_meters
+    else:
+        distance_meters = duration_minutes * _FAKE_VOLUME_METERS_PER_MINUTE[discipline]
     return (distance_meters, distance_meters)
 
 

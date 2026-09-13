@@ -190,10 +190,7 @@ async def test_profile_inputs_validate_deterministically_and_then_begin_goal_int
         assert invalid_height.kind == "profile_validation_error"
         assert invalid_height.current_step is OnboardingStep.PROFILE_HEIGHT_INTAKE
 
-    timezone = await service.handle_text(identity, "178")
-    assert timezone.kind == "profile_timezone_intake"
-    assert timezone.current_step is OnboardingStep.PROFILE_TIMEZONE_INTAKE
-    goal_intake = await service.handle_text(identity, "Europe/Madrid")
+    goal_intake = await service.handle_text(identity, "178")
     assert goal_intake.kind == "goal_intake"
     assert goal_intake.current_step is OnboardingStep.GOAL_INTAKE
     assert goal_intake.user_status is UserStatus.ONBOARDING_IN_PROGRESS
@@ -210,10 +207,58 @@ async def test_profile_inputs_validate_deterministically_and_then_begin_goal_int
         assert profile.gender is AthleteGender.FEMALE
         assert profile.weight_kg == 72.5
         assert profile.height_cm == 178.0
-        assert persisted_user.timezone == "Europe/Madrid"
+        assert persisted_user.timezone == "UTC"
         assert persisted_user.status is UserStatus.ONBOARDING_IN_PROGRESS
         assert onboarding.status is OnboardingStatus.ACTIVE
         assert onboarding.current_step is OnboardingStep.GOAL_INTAKE
+
+
+@pytest.mark.asyncio
+async def test_baseline_start_upgrades_an_incomplete_legacy_form_for_the_goal(
+    profile_database: async_sessionmaker[AsyncSession],
+) -> None:
+    identity = _identity()
+    async with profile_database.begin() as session:
+        user, _ = await UserRepository(session).get_or_create(
+            telegram_user_id=identity.telegram_user_id,
+            telegram_username=identity.telegram_username,
+            first_name=identity.first_name,
+        )
+        user.status = UserStatus.ONBOARDING_IN_PROGRESS
+        onboarding, _ = await OnboardingRepository(session).get_or_create(
+            user_id=user.id,
+            current_step=OnboardingStep.BASELINE_INTAKE,
+        )
+        await OnboardingRepository(session).save_progress(
+            user_id=user.id,
+            current_step=onboarding.current_step,
+            answers={"baseline_fields": ["preferences.coaching_style"]},
+        )
+        await ProfileRepository(session).upsert_training_goal(
+            user_id=user.id,
+            main_goal="Half-distance triathlon",
+            event_date=None,
+            secondary_priority=None,
+            goal_template_id=catalog_id("goal", "TRIATHLON_HALF_DISTANCE"),
+            supporting_goal_template_id=catalog_id("goal", "MUSCLE_RETENTION"),
+        )
+
+    service = OnboardingService(
+        session_factory=profile_database,
+        settings=Settings(llm_mode="mock"),
+    )
+
+    result = await service.start(identity)
+
+    assert result.current_step is OnboardingStep.BASELINE_INTAKE
+    fields = result.answers["baseline_fields"]
+    assert isinstance(fields, list)
+    assert len(fields) == 25
+    assert "running.typical_weekly_sessions" in fields
+    assert "cycling.typical_weekly_sessions" in fields
+    assert "swimming.typical_weekly_sessions" in fields
+    assert "triathlon.prior_experience" in fields
+    assert "preferences.desired_weekly_sessions.STRENGTH" in fields
 
 
 @pytest.mark.asyncio
@@ -431,6 +476,7 @@ async def test_web_app_baseline_is_goal_adaptive_and_persisted(
         "running.typical_weekly_duration_minutes",
         "running.longest_recent_run_minutes",
         "running.recent_race_result",
+        "running.recent_race_effort",
         "preferences.desired_weekly_sessions.RUNNING",
     ]
 

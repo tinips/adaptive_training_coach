@@ -434,22 +434,25 @@ def first_week_menu_messages(
 
 
 def _volume_or_duration_label(session: PlanSession) -> str:
-    """What the athlete sees as their target: pace/volume, not duration.
+    """Show the primary volume target, retaining time for swim and cycling.
 
-    See docs/decisions/locked.md, "Duration derivation": for a running or
-    swimming session with a real pace target, the athlete's prescribed
-    volume is the distance range, duration is only an internal scheduling
-    estimate. Strength, cycling, and RPE-fallback sessions still prescribe
-    duration directly, so duration is what's shown for those.
+    Running pace and distance define its displayed work. Pool swimming and
+    cycling have an independently meaningful duration, so their cards show
+    both duration and volume rather than hiding either one.
     """
 
     distance_range = getattr(session.targets, "distance_range_meters", None)
     if distance_range is None:
         return f"{session.targets.duration_minutes} min"
     lower, upper = distance_range
-    if session.discipline is Discipline.SWIMMING:
-        return f"{lower:.0f}-{upper:.0f} m"
-    return f"{lower / 1000:.1f}-{upper / 1000:.1f} km"
+    volume = (
+        f"{lower:.0f}-{upper:.0f} m"
+        if session.discipline is Discipline.SWIMMING
+        else f"{lower / 1000:.1f}-{upper / 1000:.1f} km"
+    )
+    if session.discipline in (Discipline.SWIMMING, Discipline.CYCLING):
+        return f"{session.targets.duration_minutes} min · {volume}"
+    return volume
 
 
 def _intensity_label(session: PlanSession) -> str:

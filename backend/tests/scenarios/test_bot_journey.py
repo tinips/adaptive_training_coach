@@ -305,8 +305,7 @@ async def test_journey_collects_profile_goal_and_required_context_before_complet
         "ob:v1:profile:gender:FEMALE",
     )
     height = await bot.handle_text(athlete, "62.5")
-    timezone = await bot.handle_text(athlete, "168")
-    intake = await bot.handle_text(athlete, "Europe/Madrid")
+    intake = await bot.handle_text(athlete, "168")
     sport_choice = await bot.handle_callback(athlete, "ob:v1:goal:sport:TRIATHLON")
     template_choice = await bot.handle_callback(
         athlete, "ob:v1:goal:template:TRIATHLON_HALF_DISTANCE"
@@ -357,7 +356,6 @@ async def test_journey_collects_profile_goal_and_required_context_before_complet
     assert ("Female", "ob:v1:profile:gender:FEMALE") in _buttons(gender)
     assert weight.text == messages.PROFILE_WEIGHT_INTAKE
     assert height.text == messages.PROFILE_HEIGHT_INTAKE
-    assert timezone.text == messages.PROFILE_TIMEZONE_INTAKE
     assert availability.text == messages.AVAILABILITY_INTAKE
     assert "Review your weekly availability" in availability_review.text
     assert "select every resource" in equipment.text.casefold()
@@ -501,7 +499,6 @@ async def test_a_single_sport_athlete_can_skip_the_supporting_goal(
     await bot.handle_callback(athlete, "ob:v1:profile:gender:MALE")
     await bot.handle_text(athlete, "78")
     await bot.handle_text(athlete, "180")
-    await bot.handle_text(athlete, "Europe/Madrid")
     template_choice = await bot.handle_callback(athlete, "ob:v1:goal:sport:RUNNING")
     metric_prompt = await bot.handle_callback(athlete, "ob:v1:goal:template:MARATHON")
     date_prompt = await bot.handle_callback(athlete, "ob:v1:goal:metric:skip")
@@ -536,7 +533,6 @@ async def _onboard_to_completed(
     await bot.handle_callback(athlete, "ob:v1:profile:gender:FEMALE")
     await bot.handle_text(athlete, "62.5")
     await bot.handle_text(athlete, "168")
-    await bot.handle_text(athlete, "Europe/Madrid")
     await bot.handle_callback(athlete, "ob:v1:goal:sport:RUNNING")
     await bot.handle_callback(athlete, "ob:v1:goal:template:MARATHON")
     await bot.handle_callback(athlete, "ob:v1:goal:metric:skip")
@@ -633,7 +629,6 @@ async def _onboard_to_goal_chosen(
     await bot.handle_callback(athlete, "ob:v1:profile:gender:FEMALE")
     await bot.handle_text(athlete, "62.5")
     await bot.handle_text(athlete, "168")
-    await bot.handle_text(athlete, "Europe/Madrid")
     await bot.handle_callback(athlete, "ob:v1:goal:sport:RUNNING")
     return bot, athlete, factory
 
@@ -948,8 +943,7 @@ async def test_recreated_account_reaches_the_deterministic_goal_menu(
         event_type="callback",
     )
     await _agent_input(bot, "62.5")
-    timezone = await _agent_input(bot, "168")
-    intake = await _agent_input(bot, "Europe/Madrid")
+    intake = await _agent_input(bot, "168")
     goal = await _agent_input(
         bot,
         "ob:v1:goal:sport:TRIATHLON",
@@ -964,7 +958,6 @@ async def test_recreated_account_reaches_the_deterministic_goal_menu(
     assert _reply_buttons(restarted) == [["Resume"], ["Delete"]]
     assert _reply_buttons(resumed) == [["Resume"], ["Delete"]]
     assert birth_year.text == messages.PROFILE_BIRTH_YEAR_INTAKE
-    assert timezone.text == messages.PROFILE_TIMEZONE_INTAKE
     assert intake.text == messages.GOAL_INTAKE
     assert goal.text == messages.GOAL_TEMPLATE_PROMPT
 

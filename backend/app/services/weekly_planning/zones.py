@@ -56,10 +56,13 @@ def _resolve_discipline(
     calculation: BaselineCalculation | None,
 ) -> ResolvedIntensityZones:
     if discipline is Discipline.CYCLING:
-        ftp = (
-            baseline.cycling.recent_ftp_watts if baseline and baseline.cycling else None
-        )
-        if ftp is not None:
+        cycling = baseline.cycling if baseline else None
+        ftp = cycling.recent_ftp_watts if cycling else None
+        if (
+            ftp is not None
+            and cycling is not None
+            and cycling.riding_environment in ("INDOOR", "BOTH")
+        ):
             return power_zones(ftp)
     if discipline is Discipline.RUNNING:
         race = (
@@ -72,20 +75,12 @@ def _resolve_discipline(
                 race.duration_seconds / race.distance_km,
                 effort=race.effort,
             )
-    if discipline is Discipline.SWIMMING:
-        threshold = (
-            baseline.swimming.recent_400m_seconds
-            if baseline and baseline.swimming
-            else None
-        )
-        if threshold is not None:
-            return swim_pace_zones(threshold / 4)
     return ResolvedIntensityZones(
         mode="RPE_FALLBACK",
         metric="RPE",
         guidance=(
-            "No usable threshold is available: prescribe and record effort by RPE "
-            "and breathing/feel, not pace, power, or heart-rate targets."
+            "Prescribe and record effort by RPE and breathing/feel, not pace, "
+            "power, or heart-rate targets."
         ),
     )
 

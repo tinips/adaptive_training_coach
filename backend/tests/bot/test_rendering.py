@@ -227,6 +227,55 @@ def test_first_week_menu_compacts_metric_cards_and_deduplicates_logging() -> Non
     assert "Record actual day and time completed." not in rendered
 
 
+def test_first_week_menu_shows_time_and_volume_for_swimming_and_cycling() -> None:
+    plan = FirstWeekPlan(
+        week_start=date(2026, 9, 7),
+        sessions=(
+            PlanSession(
+                discipline="CYCLING",
+                purpose="Build controlled trainer volume.",
+                intensity={
+                    "metric": "POWER_WATTS",
+                    "target_range": [106, 145],
+                    "rpe_range": [3, 4],
+                    "guidance": "Stay inside the easy power range.",
+                },
+                objective="Complete a steady aerobic trainer ride.",
+                targets={
+                    "duration_minutes": 45,
+                    "distance_range_meters": [20000, 25000],
+                },
+                execution="Keep cadence smooth and finish with reserve.",
+            ),
+            PlanSession(
+                discipline="SWIMMING",
+                purpose="Build relaxed pool volume.",
+                intensity={
+                    "metric": "RPE",
+                    "target_range": [3, 4],
+                    "rpe_range": [3, 4],
+                    "guidance": "Use calm breathing and relaxed effort.",
+                },
+                objective="Complete controlled pool repeats with rest.",
+                targets={
+                    "duration_minutes": 30,
+                    "distance_range_meters": [700, 900],
+                },
+                execution="Use short repeats and rest before form degrades.",
+            ),
+        ),
+        guardrails=("Keep every session controlled.",),
+        logging_instructions=("Log duration and RPE.",),
+        sessions_per_discipline={"CYCLING": 1, "SWIMMING": 1},
+        total_minutes_per_discipline={"CYCLING": 45, "SWIMMING": 30},
+    )
+
+    rendered = messages.first_week_menu(plan)
+
+    assert "45 min \u00b7 20.0-25.0 km" in rendered
+    assert "30 min \u00b7 700-900 m" in rendered
+
+
 def test_first_week_menu_interleaves_disciplines() -> None:
     running = PlanSession(
         discipline="RUNNING",

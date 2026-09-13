@@ -12,7 +12,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from app.schemas.availability import ConfirmedWeeklyAvailability
 
 ONGOING_WEEKLY_PLANNER_PROMPT_VERSION: Final = 10
-FIRST_WEEK_PLANNER_PROMPT_VERSION: Final = 18
+FIRST_WEEK_PLANNER_PROMPT_VERSION: Final = 19
 # Backward-compatible name for callers that use the ongoing planner.
 WEEKLY_PLANNER_PROMPT_VERSION: Final = ONGOING_WEEKLY_PLANNER_PROMPT_VERSION
 
@@ -125,9 +125,12 @@ equipment/access, health limitations, athlete profile, and preferences.
 
 resolved_intensity_zones is authoritative. If a discipline is RPE_FALLBACK, prescribe
 only RPE/feel with descriptive guidance; never invent pace, power, or heart-rate
-targets. If numeric zones are supplied, keep numeric IntensityTargets inside one of
-their supplied ranges. Never prescribe a maximal test, benchmark, all-out effort, or
-VO2max test. first_week_baseline_tiers is authoritative and defines preparation for
+targets. If numeric zones are supplied for RUNNING or CYCLING, use that numeric metric
+for every session in that discipline and keep it inside one of the supplied ranges.
+In particular, a POWER_WATTS cycling zone means the athlete has a reported FTP and an
+indoor trainer available: prescribe watts, not RPE alone. Never prescribe a maximal
+test, benchmark, all-out effort, or VO2max test. first_week_baseline_tiers is
+authoritative and defines preparation for
 each discipline. The week must characterize the athlete where they are: an all-easy
 week gathers no useful intensity signal from a trained athlete. For UNPREPARED, use
 only easy, low-volume work. For DEVELOPING, use easy work plus one controlled moderate
@@ -174,12 +177,14 @@ unprepared disciplines easy, but do not apply a universal RPE cap. Make sessions
 distinct in purpose, intensity, and execution; do not repeat a session in the same
 discipline unless its role is explicitly different. purpose
 explains the adaptation or skill the session develops; objective states the specific
-session outcome. For pace-based running and swimming (intensity.metric is
-PACE_SECONDS_PER_KM or SWIM_PACE_SECONDS_PER_100M), targets must include a positive
-distance_range_meters [lower, upper] as well as the intensity pace range. This is
-required even if duration_minutes is present; the platform derives duration from the
-two ranges when it is omitted. For RPE-based endurance sessions, use
-duration_minutes instead. Use only targets supported by the athlete's context. Meet
+session outcome. Every running, cycling, and swimming session must include a positive
+distance_range_meters [lower, upper] as its volume target. Running with a supported
+numeric zone uses PACE_SECONDS_PER_KM plus that volume; its duration may be derived
+from the two ranges. Swimming always uses RPE/feel, never swim pace, and must include
+both duration_minutes and pool volume in meters (the duration includes recovery).
+Cycling always includes duration_minutes and distance volume; when its resolved zone
+is POWER_WATTS, it also uses POWER_WATTS as the primary intensity target. Use only
+targets supported by the athlete's context. Meet
 desired_weekly_sessions for every discipline when availability permits. For
 zero-baseline or low-exposure disciplines, meet the requested count with brief,
 easy, clearly distinct introductory, technique, or recovery sessions rather than

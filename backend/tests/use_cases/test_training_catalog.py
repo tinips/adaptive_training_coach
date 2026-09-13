@@ -64,6 +64,7 @@ async def test_seed_integrity_covers_triathlon_and_supporting_goals(
     goal_codes = {row[0] for row in GOAL_TEMPLATES}
     context_codes = {row[0] for row in TRAINING_CONTEXTS}
     capability_codes = {row[0] for row in CAPABILITIES}
+    assert "goggles" not in capability_codes
     option_keys = {(row[0], row[1]) for row in EXECUTION_OPTIONS}
     required_option_keys = {
         (target, option)

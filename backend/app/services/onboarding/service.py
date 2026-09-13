@@ -127,6 +127,7 @@ _FREE_TEXT_CONTEXT_STEPS = frozenset(
 _CONTEXT_TEXT_MIN_LENGTH = 3
 _CONTEXT_TEXT_MAX_LENGTH = 2000
 _EVENT_DATE_FORMATS = ("%Y-%m-%d", "%d/%m/%Y")
+_DEFAULT_TIMEZONE = "UTC"
 
 
 def _parse_event_date(text: str) -> date | None:
@@ -394,29 +395,21 @@ class OnboardingService:
         ):
             return onboarding
         existing_fields = tuple(field for field in existing if isinstance(field, str))
-        disciplines_in_order = (
-            Discipline.RUNNING,
-            Discipline.CYCLING,
-            Discipline.SWIMMING,
+        goal = await ProfileRepository(session).get_training_goal(
+            user_id=onboarding.user_id
         )
-
-        available = {
-            field
-            for discipline in disciplines_in_order
-            for field in fields_for_disciplines((discipline,))
-        }
-        if set(existing_fields).issubset(available):
+        if goal is None:
+            return onboarding
+        fields = await self._baseline_fields_for_goal(session=session, goal=goal)
+        if not fields:
+            return onboarding
+        if existing_fields == fields:
             return onboarding
 
-        disciplines = tuple(
-            discipline
-            for discipline in disciplines_in_order
-            if any(
-                field.startswith(f"{discipline.value}.") for field in existing_fields
-            )
-        )
-        fields = fields_for_disciplines(disciplines)
-        if not fields:
+        # Only replace a form whose fields are an incomplete version of the
+        # current goal's form. An unrelated or malformed session is left for
+        # the normal stale-action safeguards rather than being guessed at.
+        if not set(existing_fields).issubset(fields):
             return onboarding
 
         answers[_BASELINE_FIELDS_KEY] = list(fields)
@@ -2671,7 +2664,6 @@ class OnboardingService:
             OnboardingStep.PROFILE_BIRTH_YEAR_INTAKE,
             OnboardingStep.PROFILE_WEIGHT_INTAKE,
             OnboardingStep.PROFILE_HEIGHT_INTAKE,
-            OnboardingStep.PROFILE_TIMEZONE_INTAKE,
         }:
             return await self._handle_profile_text(identity, text)
         if (
@@ -3033,35 +3025,14 @@ class OnboardingService:
                     weight_kg=float(staged_weight_kg),
                     height_cm=float(height_cm),
                 )
-                onboarding = await OnboardingRepository(session).save_progress(
-                    user_id=user.id,
-                    current_step=OnboardingStep.PROFILE_TIMEZONE_INTAKE,
-                    answers=cast(dict[str, object], answers),
-                )
-                return self._result(user, onboarding)
-
-            if step is OnboardingStep.PROFILE_TIMEZONE_INTAKE:
-                timezone = self._parse_timezone(text)
-                if timezone is None:
-                    return self._result(
-                        user,
-                        onboarding,
-                        kind="profile_validation_error",
-                        error_code="invalid_timezone",
-                    )
+                # Telegram does not provide a reliable IANA timezone. Start
+                # athletes in UTC; they can change it later in Profile settings.
                 await UserRepository(session).update_timezone(
-                    user_id=user.id, timezone=timezone
-                )
-                goal = await ProfileRepository(session).get_training_goal(
-                    user_id=user.id
+                    user_id=user.id, timezone=_DEFAULT_TIMEZONE
                 )
                 onboarding = await OnboardingRepository(session).save_progress(
                     user_id=user.id,
-                    current_step=(
-                        OnboardingStep.AVAILABILITY_INTAKE
-                        if goal is not None
-                        else OnboardingStep.GOAL_INTAKE
-                    ),
+                    current_step=OnboardingStep.GOAL_INTAKE,
                     answers=cast(dict[str, object], answers),
                 )
                 return self._result(user, onboarding)

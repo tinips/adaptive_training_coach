@@ -232,6 +232,7 @@ def validate_first_week_plan(
     for session in plan.sessions:
         violations.extend(_heart_rate_prescription_violations(session, None))
         violations.extend(_first_week_purpose_violations(session))
+        violations.extend(_first_week_volume_violations(session))
         violations.extend(
             _first_week_zone_violations(session, zones.get(session.discipline))
         )
@@ -409,6 +410,15 @@ def _first_week_tier_demand_violations(
 def _first_week_zone_violations(
     session: PlanSession, zone: ResolvedIntensityZones | None
 ) -> list[PlanViolation]:
+    if session.discipline is Discipline.SWIMMING and session.intensity.metric != "RPE":
+        return [
+            PlanViolation(
+                "FIRST_WEEK_SWIM_RPE_REQUIRED",
+                session.discipline,
+                None,
+                "swimming is prescribed by duration, volume, and RPE rather than pace",
+            )
+        ]
     if zone is None:
         return []
     if zone.mode == "RPE_FALLBACK":
@@ -423,6 +433,16 @@ def _first_week_zone_violations(
             )
         ]
     if session.intensity.metric == "RPE":
+        if session.discipline in (Discipline.RUNNING, Discipline.CYCLING):
+            return [
+                PlanViolation(
+                    "FIRST_WEEK_NUMERIC_TARGET_REQUIRED",
+                    session.discipline,
+                    None,
+                    "a supported running pace or indoor cycling power zone "
+                    "must be used",
+                )
+            ]
         return []
     lower, upper = session.intensity.target_range
     if zone.maximal_benchmark_pace is not None:
@@ -456,6 +476,23 @@ def _first_week_zone_violations(
     return []
 
 
+def _first_week_volume_violations(session: PlanSession) -> list[PlanViolation]:
+    """Every endurance card carries a measurable distance-volume target."""
+
+    if session.discipline not in _ENDURANCE_DISCIPLINES:
+        return []
+    if session.targets.distance_range_meters is not None:
+        return []
+    return [
+        PlanViolation(
+            "FIRST_WEEK_VOLUME_REQUIRED",
+            session.discipline,
+            None,
+            "running, cycling, and swimming sessions require distance volume",
+        )
+    ]
+
+
 def _menu_session_fits_availability(
     session: PlanSession, availability: ConfirmedWeeklyAvailability
 ) -> bool:
@@ -480,7 +517,7 @@ def repair_plan(
     """Apply one deterministic, idempotent repair pass without adding sessions."""
 
     if isinstance(plan, FirstWeekPlan):
-        return _repair_first_week_menu(plan, violations, zones=zones)
+        return _repair_first_week_menu(plan, violations, baseline=baseline, zones=zones)
 
     payload = plan.model_dump(mode="json")
     violation_list = tuple(violations)
@@ -671,17 +708,20 @@ def _repair_first_week_menu(
     plan: FirstWeekPlan,
     violations: Iterable[PlanViolation],
     *,
+    baseline: AthleteBaselineData | None,
     zones: dict[Discipline, ResolvedIntensityZones] | None = None,
 ) -> FirstWeekPlan:
     """Repair a menu without inventing dates or re-running placement."""
 
-    codes = {violation.code for violation in violations}
+    violation_list = tuple(violations)
+    codes = {violation.code for violation in violation_list}
     payload = plan.model_dump(mode="json")
     raw_sessions = payload.get("sessions")
     if not isinstance(raw_sessions, list):
         return plan
     if codes & {
         "FIRST_WEEK_RPE_REQUIRED",
+        "FIRST_WEEK_SWIM_RPE_REQUIRED",
         "FIRST_WEEK_ZONE_CONFLICT",
         "HARD_ON_ZERO_BASELINE",
         "UNSUPPORTED_TARGET",
@@ -701,8 +741,67 @@ def _repair_first_week_menu(
                 "swim_pace_seconds_per_100m",
             ):
                 targets[field] = None
+    if "FIRST_WEEK_SWIM_RPE_REQUIRED" in codes:
+        for raw in raw_sessions:
+            if raw.get("discipline") != Discipline.SWIMMING.value:
+                continue
+            rpe_range = _raw_rpe_range(raw)
+            raw["intensity"] = _rpe_intensity_for_range(rpe_range)
+            _targets(raw)["rpe"] = rpe_range[1]
+    if "FIRST_WEEK_NUMERIC_TARGET_REQUIRED" in codes and zones is not None:
+        for violation in violation_list:
+            if (
+                violation.code != "FIRST_WEEK_NUMERIC_TARGET_REQUIRED"
+                or violation.discipline is None
+            ):
+                continue
+            zone = zones.get(violation.discipline)
+            if zone is None or zone.mode != "NUMERIC":
+                continue
+            for raw in raw_sessions:
+                if raw.get("discipline") != violation.discipline.value:
+                    continue
+                rpe_range = _raw_rpe_range(raw)
+                target_range = (
+                    zone.moderate
+                    if rpe_range[1] >= 5 and zone.moderate is not None
+                    else zone.easy
+                )
+                if target_range is None:
+                    continue
+                raw["intensity"] = {
+                    "metric": zone.metric,
+                    "target_range": list(target_range),
+                    "rpe_range": list(rpe_range),
+                    "guidance": "Stay within the resolved intensity range.",
+                }
+                targets = _targets(raw)
+                midpoint = round((target_range[0] + target_range[1]) / 2)
+                if zone.metric == "POWER_WATTS":
+                    targets["average_power_watts"] = midpoint
+                elif zone.metric == "PACE_SECONDS_PER_KM":
+                    targets["pace_seconds_per_km"] = midpoint
+    if "FIRST_WEEK_VOLUME_REQUIRED" in codes:
+        for raw in raw_sessions:
+            discipline = raw.get("discipline")
+            if not isinstance(discipline, str):
+                continue
+            parsed_discipline = Discipline(discipline)
+            if parsed_discipline not in _ENDURANCE_DISCIPLINES:
+                continue
+            targets = _targets(raw)
+            if targets.get("distance_range_meters") is None:
+                duration = targets.get("duration_minutes")
+                if isinstance(duration, int):
+                    targets["distance_range_meters"] = list(
+                        _estimated_distance_range_meters(
+                            discipline=parsed_discipline,
+                            duration_minutes=duration,
+                            baseline=baseline,
+                        )
+                    )
     if "FIRST_WEEK_CALIBRATION_SIGNAL_MISSING" in codes and zones is not None:
-        for violation in violations:
+        for violation in violation_list:
             if (
                 violation.code != "FIRST_WEEK_CALIBRATION_SIGNAL_MISSING"
                 or violation.discipline is None
@@ -768,6 +867,59 @@ def _repair_first_week_menu(
             }
         )
     )
+
+
+def _raw_rpe_range(raw: dict[str, object]) -> tuple[int, int]:
+    intensity = raw.get("intensity")
+    if isinstance(intensity, dict):
+        rpe_range = intensity.get("rpe_range")
+        if (
+            isinstance(rpe_range, list)
+            and len(rpe_range) == 2
+            and all(isinstance(value, int) for value in rpe_range)
+        ):
+            return (rpe_range[0], rpe_range[1])
+    return (3, 4)
+
+
+def _rpe_intensity_for_range(rpe_range: tuple[int, int]) -> dict[str, object]:
+    return {
+        "metric": "RPE",
+        "target_range": list(rpe_range),
+        "rpe_range": list(rpe_range),
+        "guidance": "Use relaxed breathing and perceived effort rather than pace.",
+    }
+
+
+def _estimated_distance_range_meters(
+    *,
+    discipline: Discipline,
+    duration_minutes: int,
+    baseline: AthleteBaselineData | None,
+) -> tuple[float, float]:
+    """Conservative repair-only volume when a model omitted a required target.
+
+    The model is normally expected to author the volume. These broad estimates keep
+    the menu actionable on a repair path without inventing an intensity target.
+    """
+
+    meters_per_minute = {
+        Discipline.RUNNING: 150.0,
+        Discipline.CYCLING: 500.0,
+        Discipline.SWIMMING: 25.0,
+    }[discipline]
+    midpoint = duration_minutes * meters_per_minute
+    if discipline is Discipline.SWIMMING and baseline and baseline.swimming:
+        longest = baseline.swimming.longest_continuous_swim_meters
+        if longest > 0:
+            midpoint = min(midpoint, float(longest))
+    minimum_width = {
+        Discipline.RUNNING: 250.0,
+        Discipline.CYCLING: 1000.0,
+        Discipline.SWIMMING: 50.0,
+    }[discipline]
+    half_width = max(minimum_width / 2, midpoint * 0.1)
+    return (max(1.0, midpoint - half_width), midpoint + half_width)
 
 
 def _sessions(plan: WeeklyPlan) -> Iterable[tuple[date, PlanSession]]:
