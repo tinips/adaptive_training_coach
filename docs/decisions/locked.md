@@ -408,6 +408,37 @@ output-check computation needs to consume actual segment-level data (or an
 equivalent actual breakdown) to compute the actual-overall blend. This
 decision locks the model and scope only.
 
+Reconfirmed 2026-09-13 during the discipline-prescription-contract
+discussion (`docs/decisions/open.md`): the running (with a supported race
+result), continuous-session case. Corrected 2026-09-14 after direct code
+inspection and live execution — this was already partially built, not a
+future item: `_require_and_derive_session_targets` auto-derives
+`duration_minutes` from the averages of `distance_range_meters` and
+`pace_seconds_per_km` whenever the model omits a duration (verified live:
+8.0–9.0 km @ 300–335 s/km → 45 min; 9.0–10.0 km @ 265–294 s/km → 44 min).
+The real remaining gap is narrower: `PrescribedSessionTargets.duration_minutes`
+stays `int | None` and is still model-settable, so nothing yet rejects or
+overrides a duration the model supplies on its own instead of omitting it —
+that consistency check, not the derivation itself, is the open implementation
+item. Swimming and cycling are unaffected: swimming never gets a numeric pace
+target (see `docs/decisions/open.md`, "Discipline prescription contract",
+item 2), so it stays in the RPE-fallback exception above with duration and
+distance both independently prescribed; cycling's continuous/primary mode
+already prescribes duration and power together, unchanged.
+
+Corrected 2026-09-14: the paragraph previously here proposed a bespoke
+derived-pace mechanism for swim, on the mistaken premise that swim never
+gets a real prescribed pace. That premise was wrong — swimming already
+mirrors running exactly, including for duration: when a 400 m benchmark
+exists, `resolve_first_week_zones` computes a real `NUMERIC` swim-pace mode
+and `_DURATION_DERIVED_DISCIPLINES` (`weekly_plans.py`) already includes
+`SWIMMING` alongside `RUNNING`, so duration is derived from `distance ÷
+pace` for swim exactly as described above whenever that numeric pace
+target applies. Nothing new needed there. The only swim-specific gap is
+the no-benchmark case (no 400 m time on file), which now follows the same
+rule as running without a pace source — see `docs/decisions/open.md`,
+item 3.
+
 E7 through E11 were the remaining evaluator product gates: signal
 thresholds/precedence, volume-overshoot handling in the per-session verdict,
 single-session efficiency-evidence semantics, where intent adherence
